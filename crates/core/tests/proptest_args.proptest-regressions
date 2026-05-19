@@ -5,3 +5,4 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc f0568f60fb20da150f013c43eeaa42bb081b461f82c5da64aeb7e06651c13ac4 # shrinks to s = "ዂ"
+cc b090d391c879ec708fc2b7b85d8d4b17b08298b1e47aaf37a34ab661f58de46e # shrinks to kvs = [("a", ""), ("a", "A")]
