@@ -560,4 +560,25 @@ mod testing {
         }
         Ok(())
     }
+
+    mod proptest_codec {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn decode_never_panics(bytes in prop::collection::vec(any::<u8>(), 0..3000)) {
+                let km = [0x42u8; KEY_MATERIAL_LENGTH];
+                let mut codec = EncryptingCodec::new(km, km);
+                let mut buf = BytesMut::from(&bytes[..]);
+                for _ in 0..3 {
+                    match codec.decode(&mut buf) {
+                        Ok(None) => break,
+                        Ok(Some(_)) => break,
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+    }
 }
