@@ -186,7 +186,11 @@ fn init_logging_recvr(
     Ok(())
 }
 
-fn resolve_target_addr(addr: &TargetAddr) -> Result<SocketAddr> {
+/// Resolve a `fast_socks5::util::TargetAddr` to a concrete `SocketAddr`.
+/// `Ip(_)` variants pass through; `Domain` variants always fail because
+/// the PT spec forbids the transport from doing DNS — that's the calling
+/// Tor client's responsibility.
+pub fn resolve_target_addr(addr: &TargetAddr) -> Result<SocketAddr> {
     match addr {
         TargetAddr::Ip(sa) => Ok(*sa),
         TargetAddr::Domain(_, _) => {
@@ -743,15 +747,18 @@ impl fast_socks5::server::Authentication for PtArgsAuth {
 }
 
 /// Reconstruct the PT-spec argument string from the SOCKS5
-/// USERNAME/PASSWORD fields, mirroring Go lyrebird `rfc1929.go:88-100`:
+/// USERNAME/PASSWORD fields, mirroring Go lyrebird `rfc1929.go:88-100`.
+///
+/// PT spec §3.5 mandates this peculiar split when the arg string
+/// exceeds 255 bytes: the parent process packs it into
+/// `(username, password)` with `username` capped at 255 bytes.
 ///
 /// * `passwd == [0x00]` is the "no passwd; uname is the whole arg list"
 ///   marker — return just `uname`.
 /// * Otherwise concatenate `uname` and `passwd` as raw bytes, no
-///   separator. The parent splits its argument list across the two
-///   fields when it exceeds 255 bytes.
+///   separator.
 /// * `None` means the client connected via NO_AUTH (no args).
-pub(crate) fn arg_string_from_creds(creds: Option<(String, String)>) -> String {
+pub fn arg_string_from_creds(creds: Option<(String, String)>) -> String {
     match creds {
         None => String::new(),
         Some((uname, passwd)) if passwd.as_bytes() == [0x00] => uname,
