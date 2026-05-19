@@ -26,3 +26,8 @@ lyrebird = { package = "ptrs-gesher-lyrebird", path = "../lyrebird", version = "
 
 [dev-dependencies]
 tokio = { version = "1", features = ["net"] }
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "umbrella_bench"
+harness = false

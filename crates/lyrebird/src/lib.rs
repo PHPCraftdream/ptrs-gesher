@@ -41,12 +41,12 @@
 //! wish to copy `./lyrebird` to a permanent location (e.g. `/usr/local/bin`).
 //!
 //! Client side torrc configuration:
-//! ```
+//! ```text
 //! ClientTransportPlugin obfs4 exec /usr/local/bin/lyrebird
 //! ```
 //!
 //! Bridge side torrc configuration:
-//! ```
+//! ```text
 //! # Act as a bridge relay.
 //! BridgeRelay 1
 //!

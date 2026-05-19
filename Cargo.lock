@@ -2232,6 +2232,7 @@ dependencies = [
 name = "ptrs-gesher"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "ptrs-gesher-bridge-line",
  "ptrs-gesher-core",
  "ptrs-gesher-lyrebird",
