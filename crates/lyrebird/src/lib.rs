@@ -848,4 +848,41 @@ mod tests {
         let got = auth.authenticate(None).await;
         assert_eq!(got, Some((String::new(), String::new())));
     }
+
+    // -- resolve_target_addr --
+
+    #[test]
+    fn resolve_target_addr_ip() {
+        let addr = TargetAddr::Ip("127.0.0.1:9050".parse().unwrap());
+        let resolved = resolve_target_addr(&addr).unwrap();
+        assert_eq!(resolved.to_string(), "127.0.0.1:9050");
+    }
+
+    #[test]
+    fn resolve_target_addr_ipv6() {
+        let addr = TargetAddr::Ip("[::1]:443".parse().unwrap());
+        let resolved = resolve_target_addr(&addr).unwrap();
+        assert_eq!(resolved.to_string(), "[::1]:443");
+    }
+
+    #[test]
+    fn resolve_target_addr_domain_fails() {
+        let addr = TargetAddr::Domain("example.com".into(), 443);
+        let err = resolve_target_addr(&addr);
+        assert!(err.is_err(), "domain resolution should fail (PT doesn't do DNS)");
+    }
+
+    // -- arg_string edge cases --
+
+    #[test]
+    fn arg_string_empty_uname_and_passwd() {
+        let creds = Some((String::new(), String::new()));
+        assert_eq!(arg_string_from_creds(creds), "");
+    }
+
+    #[test]
+    fn arg_string_passwd_is_nul_only() {
+        let creds = Some((String::new(), "\0".to_string()));
+        assert_eq!(arg_string_from_creds(creds), "");
+    }
 }

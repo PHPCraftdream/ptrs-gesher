@@ -202,13 +202,13 @@ impl Decoder for EncryptingCodec {
         let cipher = XSalsa20Poly1305::new(key);
         let nonce = GenericArray::from_slice(&self.decoder.next_nonce); // unique per message
 
-        let res = cipher.decrypt(nonce, data.as_ref());
-        if res.is_err() {
-            let e = res.unwrap_err();
-            trace!("failed to decrypt result: {e}");
-            return Err(e.into());
-        }
-        let plaintext = res?;
+        let plaintext = match cipher.decrypt(nonce, data.as_ref()) {
+            Ok(p) => p,
+            Err(e) => {
+                trace!("failed to decrypt result: {e}");
+                return Err(e.into());
+            }
+        };
         if plaintext.len() < MESSAGE_OVERHEAD {
             return Err(FrameError::InvalidMessage);
         }

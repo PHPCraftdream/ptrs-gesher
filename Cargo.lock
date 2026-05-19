@@ -2237,6 +2237,7 @@ dependencies = [
  "ptrs-gesher-lyrebird",
  "ptrs-gesher-obfs4",
  "ptrs-gesher-webtunnel",
+ "tokio",
 ]
 
 [[package]]
@@ -2252,6 +2253,7 @@ dependencies = [
 name = "ptrs-gesher-core"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "futures",
  "itertools 0.13.0",
  "serial_test",

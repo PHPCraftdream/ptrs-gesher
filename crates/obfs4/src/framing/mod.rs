@@ -182,7 +182,7 @@ impl From<std::io::Error> for FrameError {
 
 impl From<FrameError> for std::io::Error {
     fn from(value: FrameError) -> Self {
-        std::io::Error::new(std::io::ErrorKind::Other, format!("{}", value))
+        std::io::Error::other(format!("{}", value))
     }
 }
 

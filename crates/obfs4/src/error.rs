@@ -83,7 +83,7 @@ impl From<Error> for std::io::Error {
     fn from(e: Error) -> Self {
         match e {
             Error::IOError(io_err) => io_err,
-            e => std::io::Error::new(std::io::ErrorKind::Other, format!("{e}")),
+            e => std::io::Error::other(format!("{e}")),
         }
     }
 }
@@ -195,8 +195,7 @@ mod tests {
 
     #[test]
     fn test_display_io_error() {
-        let err = Error::IOError(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        let err = Error::IOError(std::io::Error::other(
             "some io error",
         ));
         assert_eq!(format!("{}", err), "some io error");
@@ -219,7 +218,7 @@ mod tests {
 
     #[test]
     fn test_from_io_error() {
-        let io_err = std::io::Error::new(std::io::ErrorKind::Other, "some io error");
+        let io_err = std::io::Error::other("some io error");
         let err = Error::from(io_err);
         assert_eq!(format!("{}", err), "some io error");
     }
@@ -233,8 +232,7 @@ mod tests {
 
     #[test]
     fn test_from_other_error() {
-        let other_err = Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        let other_err = Box::new(std::io::Error::other(
             "some other error",
         ));
         let err = Error::from(other_err);

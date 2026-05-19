@@ -818,4 +818,27 @@ mod test {
 
         Ok(())
     }
+
+    // -- pt_should_exit_on_stdin_close --
+
+    #[test]
+    fn exit_on_stdin_close_returns_true_when_set() {
+        env::set_var(constants::EXIT_ON_STDIN_CLOSE, "1");
+        assert!(pt_should_exit_on_stdin_close());
+    }
+
+    #[test]
+    fn exit_on_stdin_close_returns_false_when_not_one() {
+        env::set_var(constants::EXIT_ON_STDIN_CLOSE, "0");
+        assert!(!pt_should_exit_on_stdin_close());
+
+        env::set_var(constants::EXIT_ON_STDIN_CLOSE, "yes");
+        assert!(!pt_should_exit_on_stdin_close());
+    }
+
+    #[test]
+    fn exit_on_stdin_close_returns_false_when_unset() {
+        env::remove_var(constants::EXIT_ON_STDIN_CLOSE);
+        assert!(!pt_should_exit_on_stdin_close());
+    }
 }

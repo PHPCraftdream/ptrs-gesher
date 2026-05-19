@@ -34,3 +34,35 @@ pub use bridge_line;
 
 #[cfg(feature = "lyrebird")]
 pub use lyrebird;
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn core_reexport_accessible() {
+        let args = super::ptrs::args::Args::new();
+        assert!(args.retrieve("nonexistent").is_none());
+    }
+
+    #[cfg(feature = "obfs4")]
+    #[test]
+    fn obfs4_reexport_accessible() {
+        use super::ptrs::PluggableTransport;
+        let name = <super::obfs4::Obfs4PT as PluggableTransport<tokio::net::TcpStream>>::name();
+        assert_eq!(name, "obfs4");
+    }
+
+    #[cfg(feature = "webtunnel")]
+    #[test]
+    fn webtunnel_reexport_accessible() {
+        assert_eq!(super::webtunnel::WEBTUNNEL_NAME, "webtunnel");
+    }
+
+    #[cfg(feature = "bridge-line")]
+    #[test]
+    fn bridge_line_reexport_accessible() {
+        let b: super::bridge_line::BridgeLine = "192.0.2.1:443 ABCDEF0123456789ABCDEF0123456789ABCDEF01"
+            .parse()
+            .unwrap();
+        assert_eq!(b.addr.port(), 443);
+    }
+}

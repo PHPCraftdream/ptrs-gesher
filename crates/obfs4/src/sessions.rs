@@ -470,7 +470,7 @@ impl Server {
             }
             trace!("{} successful read {n}B", session_id);
 
-            match self.server(&mut |_: &()| Some(()), &[materials.clone()], &buf[..n]) {
+            match self.server(&mut |_: &()| Some(()), std::slice::from_ref(&materials), &buf[..n]) {
                 Ok((keygen, response)) => {
                     stream.write_all(&response).await?;
                     info!("{} handshake complete", session_id);

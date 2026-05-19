@@ -5,7 +5,6 @@ pub mod tests;
 pub(crate) use fake_prng::*;
 
 use std::env;
-use std::io::{Read, Result, Write};
 #[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::str::FromStr;
@@ -83,10 +82,10 @@ pub fn pipes_async() -> Result<(
 #[cfg(test)]
 mod test {
 
-    use super::*;
-    use std::{io, thread};
+    
+    
 
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    
 
     #[cfg(unix)]
     #[tokio::test]
