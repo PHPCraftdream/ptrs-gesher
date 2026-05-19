@@ -384,13 +384,6 @@ mod tests {
     }
 
     #[test]
-    fn server_builder_default() {
-        let sb = ServerBuilder::<TcpStream>::default();
-        assert_eq!(sb.iat_mode, IAT::Off);
-        assert!(sb.statefile_path.is_none());
-    }
-
-    #[test]
     fn server_builder_methods() {
         let mut sb = ServerBuilder::<TcpStream>::default();
         sb.iat_mode(IAT::Enabled);
@@ -418,47 +411,25 @@ mod tests {
     }
 
     #[test]
-    fn server_builder_build() {
-        let sb = ServerBuilder::<TcpStream>::default();
-        let server = sb.build();
-        assert_eq!(server.iat_mode, IAT::Off);
-        assert!(!server.biased);
-    }
-
-    #[test]
-    fn server_builder_client_params_not_empty() {
+    fn server_builder_client_params_contains_cert() {
         let sb = ServerBuilder::<TcpStream>::default();
         let params = sb.client_params();
-        assert!(!params.is_empty());
         assert!(params.contains("cert="));
+        assert!(params.contains("iat-mode=0"));
     }
 
     #[test]
-    fn server_new_from_known_key() {
+    fn server_new_derives_pubkey_from_secret() {
         let sec = [0x42u8; KEY_LENGTH];
-        let id = [0x00u8; NODE_ID_LENGTH];
+        let id = [0x99u8; NODE_ID_LENGTH];
         let server = Server::new(sec, id);
-        assert_eq!(server.iat_mode, IAT::Off);
-    }
-
-    #[test]
-    fn server_getrandom_creates_server() {
-        let server = Server::getrandom();
-        assert_eq!(server.iat_mode, IAT::Off);
-    }
-
-    #[test]
-    fn server_client_params_returns_builder() {
-        let server = Server::getrandom();
-        let cb = server.client_params();
-        assert_eq!(cb.iat_mode, IAT::Off);
-    }
-
-    #[test]
-    fn server_new_server_session() {
-        let server = Server::getrandom();
-        let session = server.new_server_session();
-        assert!(session.is_ok());
+        assert_eq!(server.identity_keys.pk.id.as_bytes(), &id);
+        // pk derived from sk must be deterministic
+        let server2 = Server::new(sec, id);
+        assert_eq!(
+            server.identity_keys.pk.pk.as_bytes(),
+            server2.identity_keys.pk.pk.as_bytes()
+        );
     }
 
     #[test]

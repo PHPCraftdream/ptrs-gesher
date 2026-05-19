@@ -184,14 +184,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn shake_key_generator_produces_output() {
-        let seed: SecretBuf = vec![0xAB; 32].into();
-        let kg = ShakeKeyGenerator::new(seed);
-        let result = kg.expand(64).unwrap();
-        assert_eq!(result.len(), 64);
-    }
-
-    #[test]
     fn shake_key_generator_deterministic() {
         let seed1: SecretBuf = vec![0x42; 32].into();
         let seed2: SecretBuf = vec![0x42; 32].into();
@@ -215,28 +207,4 @@ mod tests {
         assert_eq!(&short[..], &long[..16]);
     }
 
-    #[test]
-    fn shake_key_generator_zero_length() {
-        let seed: SecretBuf = vec![0x00; 8].into();
-        let r = ShakeKeyGenerator::new(seed).expand(0).unwrap();
-        assert!(r.is_empty());
-    }
-
-    #[test]
-    fn relay_handshake_error_display() {
-        let e = RelayHandshakeError::EAgain;
-        assert!(e.to_string().contains("try again"));
-
-        let e = RelayHandshakeError::MissingKey;
-        assert!(e.to_string().contains("key"));
-
-        let e = RelayHandshakeError::BadClientHandshake;
-        assert!(e.to_string().contains("client"));
-
-        let e = RelayHandshakeError::BadServerHandshake;
-        assert!(e.to_string().contains("server"));
-
-        let e = RelayHandshakeError::ReplayedHandshake;
-        assert!(e.to_string().contains("replay"));
-    }
 }

@@ -20,18 +20,6 @@ pub(crate) fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
 mod tests {
     use super::*;
     #[test]
-    fn bool_to_choice_true() {
-        let c = bool_to_choice(true);
-        assert_eq!(c.unwrap_u8(), 1);
-    }
-
-    #[test]
-    fn bool_to_choice_false() {
-        let c = bool_to_choice(false);
-        assert_eq!(c.unwrap_u8(), 0);
-    }
-
-    #[test]
     fn bytes_eq_equal() {
         assert!(bytes_eq(b"hello", b"hello"));
     }

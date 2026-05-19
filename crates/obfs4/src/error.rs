@@ -238,4 +238,40 @@ mod tests {
         let err = Error::from(other_err);
         assert_eq!(format!("{}", err), "some other error");
     }
+
+    #[test]
+    fn error_to_io_error_preserves_io_variant() {
+        // Critical: Error::IOError converted back to io::Error must NOT be
+        // re-wrapped as a generic "other" error — it must unwrap.
+        let io_orig = std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused");
+        let obfs_err = Error::from(io_orig);
+        let io_back: std::io::Error = obfs_err.into();
+        assert_eq!(io_back.kind(), std::io::ErrorKind::ConnectionRefused);
+    }
+
+    #[test]
+    fn error_to_io_error_non_io_wraps_as_other() {
+        let err = Error::NotImplemented;
+        let io_err: std::io::Error = err.into();
+        assert_eq!(io_err.kind(), std::io::ErrorKind::Other);
+        assert!(io_err.to_string().contains("NotImplemented"));
+    }
+
+    #[test]
+    fn from_frame_error_wraps_correctly() {
+        let err = Error::from(crate::framing::FrameError::TagMismatch);
+        match err {
+            Error::Obfs4Framing(crate::framing::FrameError::TagMismatch) => {}
+            _ => panic!("expected Obfs4Framing(TagMismatch)"),
+        }
+    }
+
+    #[test]
+    fn from_relay_handshake_error_wraps_correctly() {
+        let err = Error::from(RelayHandshakeError::MissingKey);
+        match err {
+            Error::HandshakeErr(RelayHandshakeError::MissingKey) => {}
+            _ => panic!("expected HandshakeErr(MissingKey)"),
+        }
+    }
 }

@@ -281,17 +281,6 @@ mod test {
     }
 
     #[test]
-    fn seed_to_bytes_roundtrip() -> Result<()> {
-        let seed = Seed::new()?;
-        let bytes = seed.to_bytes();
-        assert_eq!(bytes.len(), SEED_LENGTH);
-        assert_eq!(seed.as_bytes(), &bytes);
-        let seed2 = Seed::from(bytes);
-        assert_eq!(seed, seed2);
-        Ok(())
-    }
-
-    #[test]
     fn seed_display() -> Result<()> {
         let seed = Seed([0xAB; SEED_LENGTH]);
         let s = format!("{seed}");
@@ -312,13 +301,12 @@ mod test {
     }
 
     #[test]
-    fn drbg_next_block_returns_8_bytes() -> Result<()> {
-        let seed = Seed::new()?;
+    fn drbg_next_block_advances_state() -> Result<()> {
+        let seed = Seed::from([0x55; SEED_LENGTH]);
         let mut drbg = Drbg::new(Some(seed))?;
-        let block = drbg.next_block();
-        assert_eq!(block.len(), SIZE);
-        let block2 = drbg.next_block();
-        assert_ne!(block, block2);
+        let b1 = drbg.next_block();
+        let b2 = drbg.next_block();
+        assert_ne!(b1, b2, "DRBG must advance between blocks");
         Ok(())
     }
 

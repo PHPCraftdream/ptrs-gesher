@@ -80,13 +80,17 @@ filetime = {version="0.2.25", optional=true}
 tracing-subscriber = "0.3.18"
 hex-literal = "0.4.1"
 tor-basic-utils = "0.25.0"
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 sha2 = "0.10.8"
 hmac = "0.12.1"
 bytes = "1.5.0"
 
 [[bench]]
 name = "obfs4_bench"
+harness = false
+
+[[bench]]
+name = "throughput_bench"
 harness = false
 
 [lints.rust]

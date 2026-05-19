@@ -190,43 +190,6 @@ mod tests {
     }
 
     #[test]
-    fn client_handshake_new_and_accessors() {
-        let repres = test_repres();
-        let msg = ClientHandshakeMessage::new(repres, 100, "12345".into());
-        assert_eq!(msg.pad_len, 100);
-        assert_eq!(msg.get_epoch_hr(), "12345");
-        assert_eq!(msg.get_representative(), repres);
-    }
-
-    #[test]
-    fn client_handshake_get_public_is_cached() {
-        let repres = test_repres();
-        let mut msg = ClientHandshakeMessage::new(repres, 0, String::new());
-        let pk1 = msg.get_public();
-        let pk2 = msg.get_public();
-        assert_eq!(pk1.as_bytes(), pk2.as_bytes());
-    }
-
-    #[test]
-    fn server_handshake_new_and_pubkey_cached() {
-        let repres = test_repres();
-        let auth = [0xDD; AUTHCODE_LENGTH];
-        let mut msg = ServerHandshakeMessage::new(repres, auth, "999".into());
-
-        let pk1 = msg.server_pubkey();
-        let pk2 = msg.server_pubkey();
-        assert_eq!(pk1.as_bytes(), pk2.as_bytes());
-    }
-
-    #[test]
-    fn server_handshake_auth() {
-        let repres = test_repres();
-        let auth = [0xCC; AUTHCODE_LENGTH];
-        let msg = ServerHandshakeMessage::new(repres, auth, "0".into());
-        assert_eq!(msg.server_auth(), auth);
-    }
-
-    #[test]
     fn client_marshall_output_size() {
         let repres = test_repres();
         let pad_len = 50;

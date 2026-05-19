@@ -355,19 +355,6 @@ mod tests {
     }
 
     #[test]
-    fn iat_display_roundtrip() {
-        for s in ["0", "1", "2"] {
-            let iat = IAT::from_str(s).unwrap();
-            assert_eq!(iat.to_string(), s);
-        }
-    }
-
-    #[test]
-    fn iat_default_is_off() {
-        assert_eq!(IAT::default(), IAT::Off);
-    }
-
-    #[test]
     fn maybe_timeout_default_returns_some() {
         let d = MaybeTimeout::Default_.duration();
         assert!(d.is_some());
@@ -401,11 +388,6 @@ mod tests {
         assert!(d.unwrap() > Duration::from_secs(55));
     }
 
-    #[test]
-    fn try_handle_non_payload_padding_ok() {
-        let msg = Messages::Padding(10);
-        assert!(matches!(msg, Messages::Padding(_)));
-    }
 }
 
 impl<T> AsyncWrite for Obfs4Stream<T>

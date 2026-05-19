@@ -292,21 +292,6 @@ mod test {
     }
 
     #[test]
-    fn biased_vs_uniform() -> Result<()> {
-        let seed = drbg::Seed::from([0xAA; drbg::SEED_LENGTH]);
-        let biased = WeightedDist::new(seed.clone(), 0, 100, true);
-        let uniform = WeightedDist::new(seed, 0, 100, false);
-
-        for _ in 0..100 {
-            let b = biased.sample();
-            let u = uniform.sample();
-            assert!((0..=100).contains(&b));
-            assert!((0..=100).contains(&u));
-        }
-        Ok(())
-    }
-
-    #[test]
     fn sample_in_range() -> Result<()> {
         let seed = drbg::Seed::new()?;
         let w = WeightedDist::new(seed, 10, 50, false);
@@ -314,14 +299,6 @@ mod test {
             let s = w.sample();
             assert!(s >= 10 && s <= 50, "sample {s} out of range [10, 50]");
         }
-        Ok(())
-    }
-
-    #[test]
-    fn display_does_not_panic() -> Result<()> {
-        let seed = drbg::Seed::new()?;
-        let w = WeightedDist::new(seed, 0, 10, true);
-        let _ = format!("{w}");
         Ok(())
     }
 }

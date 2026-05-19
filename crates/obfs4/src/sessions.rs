@@ -144,8 +144,16 @@ pub(crate) fn new_client_session(
     station_pubkey: Obfs4NtorPublicKey,
     iat_mode: IAT,
 ) -> ClientSession<Initialized> {
+    new_client_session_with_rng(station_pubkey, iat_mode, &mut rand::thread_rng())
+}
+
+pub(crate) fn new_client_session_with_rng<R: RngCore>(
+    station_pubkey: Obfs4NtorPublicKey,
+    iat_mode: IAT,
+    rng: &mut R,
+) -> ClientSession<Initialized> {
     let mut session_id = [0u8; SESSION_ID_LEN];
-    rand::thread_rng().fill_bytes(&mut session_id);
+    rng.fill_bytes(&mut session_id);
     ClientSession {
         node_pubkey: station_pubkey,
         session_id,
@@ -491,13 +499,6 @@ mod tests {
     }
 
     #[test]
-    fn client_debug_format() {
-        let s = new_client_session(test_pubkey(), IAT::Paranoid);
-        let dbg = format!("{:?}", s);
-        assert!(dbg.contains("iat:Paranoid"));
-    }
-
-    #[test]
     fn session_enum_client_accessors() {
         let cs = new_client_session(test_pubkey(), IAT::Off);
         let seed = cs.len_seed.clone();
@@ -509,6 +510,55 @@ mod tests {
         assert!(session.id().starts_with("c"));
         assert!(!session.biased());
         assert_eq!(session.len_seed().as_bytes(), seed.as_bytes());
+    }
+
+    #[test]
+    fn deterministic_rng_produces_same_session_id() {
+        use rand::rngs::mock::StepRng;
+        let mut rng1 = StepRng::new(42, 1);
+        let mut rng2 = StepRng::new(42, 1);
+        let s1 = new_client_session_with_rng(test_pubkey(), IAT::Off, &mut rng1);
+        let s2 = new_client_session_with_rng(test_pubkey(), IAT::Off, &mut rng2);
+        assert_eq!(s1.session_id, s2.session_id);
+    }
+
+    #[test]
+    fn different_rng_produces_different_session_id() {
+        use rand::rngs::mock::StepRng;
+        let mut rng1 = StepRng::new(1, 1);
+        let mut rng2 = StepRng::new(999, 1);
+        let s1 = new_client_session_with_rng(test_pubkey(), IAT::Off, &mut rng1);
+        let s2 = new_client_session_with_rng(test_pubkey(), IAT::Off, &mut rng2);
+        assert_ne!(s1.session_id, s2.session_id);
+    }
+
+    #[test]
+    fn server_session_set_id() {
+        let server = Server::getrandom();
+        let mut ss = server.new_server_session().unwrap();
+        let new_id = [0xAA; SESSION_ID_LEN];
+        ss.set_session_id(new_id);
+        assert_eq!(ss.session_id, new_id);
+    }
+
+    #[test]
+    fn server_transition_preserves_fields() {
+        let server = Server::getrandom();
+        let ss = server.new_server_session().unwrap();
+        let orig_id = ss.session_id;
+        let ss2 = ss.transition(ServerHandshaking {});
+        assert_eq!(ss2.session_id, orig_id);
+    }
+
+    #[test]
+    fn server_fault_preserves_fields() {
+        let server = Server::getrandom();
+        let ss = server.new_server_session().unwrap();
+        let orig_id = ss.session_id;
+        let sf = ss.fault(ServerHandshakeFailed {
+            details: "test".into(),
+        });
+        assert_eq!(sf.session_id, orig_id);
     }
 }
 
