@@ -21,7 +21,7 @@ use tokio::net::TcpStream;
 use crate::{Error, WebTunnelConfig, WebTunnelStream, PrefixStream};
 
 /// Generate a Sec-WebSocket-Key (16 random bytes, base64-encoded).
-pub(crate) fn generate_websocket_key() -> String {
+pub fn generate_websocket_key() -> String {
     let mut buf = [0u8; 16];
     // getrandom only fails when the system RNG is unavailable — fatal
     // for a transport that depends on randomness.
@@ -31,7 +31,7 @@ pub(crate) fn generate_websocket_key() -> String {
 }
 
 /// Build the HTTP/1.1 Upgrade request bytes.
-pub(crate) fn build_upgrade_request(config: &WebTunnelConfig) -> String {
+pub fn build_upgrade_request(config: &WebTunnelConfig) -> String {
     let parsed = url::Url::parse(&config.url).expect("url already validated");
     let path = if parsed.path().is_empty() {
         "/"

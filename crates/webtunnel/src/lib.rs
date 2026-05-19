@@ -15,7 +15,7 @@ use ptrs::args::Args;
 use ptrs::{info, warn, FutureResult as F};
 use tokio::io::{AsyncRead, AsyncWrite};
 
-mod handshake;
+pub mod handshake;
 
 pub const WEBTUNNEL_NAME: &str = "webtunnel";
 
@@ -68,7 +68,7 @@ pub struct WebTunnelConfig {
 }
 
 impl WebTunnelConfig {
-    fn from_args(args: &Args) -> Result<Self, Error> {
+    pub fn from_args(args: &Args) -> Result<Self, Error> {
         let url_str = args
             .retrieve("url")
             .ok_or(Error::MissingUrl)?;

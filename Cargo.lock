@@ -2297,6 +2297,7 @@ dependencies = [
  "bytes",
  "cipher",
  "colored",
+ "criterion",
  "crypto_secretbox",
  "curve25519-dalek",
  "curve25519-elligator2",
@@ -2338,6 +2339,7 @@ name = "ptrs-gesher-webtunnel"
 version = "0.1.0"
 dependencies = [
  "base64",
+ "criterion",
  "getrandom 0.2.17",
  "httparse",
  "ptrs-gesher-core",
