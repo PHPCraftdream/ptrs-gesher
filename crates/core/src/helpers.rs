@@ -258,7 +258,7 @@ pub(crate) fn validate_proxy_url(spec: &Url) -> Result<(), Error> {
 /// (i.e., if the same program can be run as either a client or a server), check
 /// whether the `TOR_PT_CLIENT_TRANSPORTS` environment variable is set:
 ///
-/// ```
+/// ```text
 /// match std::env::var_os("TOR_PT_CLIENT_TRANSPORTS") {
 ///     Some(_) => {
 ///         // Client mode; call pt.ClientSetup.

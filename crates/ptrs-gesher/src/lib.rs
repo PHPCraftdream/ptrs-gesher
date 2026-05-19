@@ -7,7 +7,7 @@
 //!
 //! ## Examples
 //!
-//! ```
+//! ```text
 //! use ptrs_gesher::{Args, BridgeLine};
 //!
 //! // Parse a torrc bridge line:

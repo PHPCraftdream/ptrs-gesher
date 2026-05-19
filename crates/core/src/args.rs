@@ -33,7 +33,7 @@ macro_rules! count {
 ///
 /// ## Example
 ///
-/// ```ignore
+/// ```text
 /// # #[macro_use] extern crate ptrs;
 /// # fn main() {
 ///
@@ -262,7 +262,7 @@ impl Opts {
     /// escaped with a backslash."
     ///
     /// Example:
-    /// ```ignore
+    /// ```text
     /// # use std::collections::HashMap;
     /// use ptrs::{args, args::{Opts, Args}};
     /// let input = "scramblesuit:key=banana;automata:rule=110;automata:depth=3";

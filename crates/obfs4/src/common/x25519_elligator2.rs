@@ -63,7 +63,7 @@ impl<'a> From<&'a EphemeralSecret> for PublicKey {
 /// revealing that an x25519 public key is being shared.
 ///
 /// # Example
-/// ```
+/// ```text
 /// use obfs4::common::x25519_elligator2::{Keys, PublicRepresentative, PublicKey};
 ///
 /// // Generate Alice's key pair.

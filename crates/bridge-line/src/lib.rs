@@ -30,7 +30,7 @@ use std::str::FromStr;
 ///
 /// # Examples
 ///
-/// ```
+/// ```text
 /// use bridge_line::BridgeLine;
 ///
 /// let bridge: BridgeLine = "obfs4 1.2.3.4:80 ABCDEF0123456789ABCDEF0123456789ABCDEF01 cert=AAA iat-mode=0"

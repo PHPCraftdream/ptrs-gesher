@@ -160,9 +160,6 @@ pub(crate) fn new_client_session(
 
 impl ClientSession<Initialized> {
     /// Perform a Handshake over the provided stream.
-    /// ```
-    ///
-    /// ```
     ///
     /// TODO: make sure failure modes align with golang obfs4
     /// - FIN/RST based on buffered data.
