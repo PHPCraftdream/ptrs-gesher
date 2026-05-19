@@ -84,6 +84,7 @@ criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 sha2 = "0.10.8"
 hmac = "0.12.1"
 bytes = "1.5.0"
+proptest = "1"
 
 [[bench]]
 name = "obfs4_bench"

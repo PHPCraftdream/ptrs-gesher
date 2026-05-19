@@ -132,7 +132,10 @@ impl Messages {
             }
 
             MessageTypes::PrngSeed => {
-                let mut seed = [0_u8; 24];
+                if buf.remaining() < SEED_LENGTH {
+                    return Err(FrameError::InvalidMessage);
+                }
+                let mut seed = [0_u8; SEED_LENGTH];
                 buf.copy_to_slice(&mut seed[..]);
                 Ok(Messages::PrngSeed(seed))
             }
@@ -252,5 +255,35 @@ mod test {
         assert_eq!(Messages::Payload(vec![]).as_pt(), MessageTypes::Payload);
         assert_eq!(Messages::PrngSeed([0; SEED_LENGTH]).as_pt(), MessageTypes::PrngSeed);
         assert_eq!(Messages::Padding(0).as_pt(), MessageTypes::Payload);
+    }
+
+    mod proptest_msgs {
+        use super::*;
+        use proptest::prelude::*;
+
+        proptest! {
+            #[test]
+            fn payload_marshall_roundtrip(data in prop::collection::vec(any::<u8>(), 1..1400)) {
+                let msg = Messages::Payload(data.clone());
+                let mut buf = BytesMut::new();
+                msg.marshall(&mut buf).unwrap();
+                let parsed = Messages::try_parse(&mut buf).unwrap();
+                prop_assert_eq!(parsed, Messages::Payload(data));
+            }
+
+            #[test]
+            fn prng_seed_marshall_roundtrip(seed in any::<[u8; SEED_LENGTH]>()) {
+                let mut buf = BytesMut::new();
+                build_and_marshall(&mut buf, MessageTypes::PrngSeed.into(), seed, 0).unwrap();
+                let parsed = Messages::try_parse(&mut buf).unwrap();
+                prop_assert_eq!(parsed, Messages::PrngSeed(seed));
+            }
+
+            #[test]
+            fn try_parse_never_panics(bytes in prop::collection::vec(any::<u8>(), 0..500)) {
+                let mut buf = BytesMut::from(&bytes[..]);
+                let _ = Messages::try_parse(&mut buf);
+            }
+        }
     }
 }

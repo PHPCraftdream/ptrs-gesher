@@ -124,43 +124,41 @@ impl Args {
             return Ok(args);
         }
 
-        let mut i: usize = 0;
+        let mut remaining = params;
         loop {
-            let begin = i;
-
             // Read the key.
-            let (offset, key) = index_unescaped(&params[i..], vec!['=', ',', ';'])?;
+            let (offset, key) = index_unescaped(remaining, vec!['=', ',', ';'])?;
 
-            i += offset;
             // End of string or no equals sign?
-            if i >= params.len() || params.chars().nth(i).unwrap() != '=' {
+            if offset >= remaining.len() || !remaining[offset..].starts_with('=') {
                 return Err(Error::ParseError(format!(
                     "parsing client params found no equals sign in {}",
-                    &params[begin..i]
+                    &remaining[..offset]
                 )));
             }
 
-            // Skip the equals sign.
-            i += 1;
+            // Skip past key + '='
+            remaining = &remaining[offset + 1..];
 
             // Read the value.
-            let (offset, value) = index_unescaped(&params[i..], vec![',', ';'])?;
+            let (offset, value) = index_unescaped(remaining, vec![',', ';'])?;
 
-            i += offset;
             if key.is_empty() {
                 return Err(Error::ParseError(format!(
-                    "parsing client params encountered empty key in {}",
-                    &params[begin..i]
+                    "parsing client params encountered empty key in ={}",
+                    &remaining[..offset]
                 )));
             }
             args.add(&key, &value);
 
-            if i >= params.len() {
+            remaining = &remaining[offset..];
+
+            if remaining.is_empty() {
                 break;
             }
 
-            // Skip the semicolon.
-            i += 1;
+            // Skip the delimiter (';' or ',')
+            remaining = &remaining[1..];
         }
 
         Ok(args)
@@ -221,28 +219,31 @@ fn backslash_escape(s: &str, set: Vec<char>) -> String {
 /// the unescaped string up to the returned index.
 fn index_unescaped(s: &str, term: Vec<char>) -> Result<(usize, String), Error> {
     let mut unesc = String::new();
+    let mut chars = s.char_indices();
     let mut i: usize = 0;
-    while i < s.len() {
-        let mut c = s.chars().nth(i).unwrap();
+    while let Some((byte_pos, c)) = chars.next() {
+        i = byte_pos;
 
-        // is c a terminator character?
         if term.contains(&c) {
-            break;
+            return Ok((i, unesc));
         }
         if c == '\\' {
-            i += 1;
-            if i >= s.len() {
-                return Err(Error::ParseError(format!(
-                    "nothing following final escape in \"{}\"",
-                    s
-                )));
+            match chars.next() {
+                Some((_next_pos, next_c)) => {
+                    unesc.push(next_c);
+                    continue;
+                }
+                None => {
+                    return Err(Error::ParseError(format!(
+                        "nothing following final escape in \"{}\"",
+                        s
+                    )));
+                }
             }
-            c = s.chars().nth(i).unwrap();
         }
         unesc.push(c);
-        i += 1;
     }
-    Ok((i, unesc))
+    Ok((s.len(), unesc))
 }
 
 /// transport name to value mapping as from TOR_PT_SERVER_TRANSPORT_OPTIONS
