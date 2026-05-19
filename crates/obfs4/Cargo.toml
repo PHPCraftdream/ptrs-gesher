@@ -1,0 +1,91 @@
+[package]
+name = "ptrs-gesher-obfs4"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+description = "obfs4 pluggable transport implementation (ptrs-gesher framework)"
+keywords = ["tor", "networking", "censorship", "circumvention", "pluggable-transport"]
+categories = ["network-programming", "cryptography"]
+repository = "https://github.com/PHPCraftdream/ptrs-gesher"
+
+[features]
+default = []
+debug = ["ptrs/debug"]
+
+[lib]
+name = "obfs4"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+## Local
+ptrs = { package = "ptrs-gesher-core", path = "../core", version = "0.1.0" }
+
+## PRNG
+getrandom = "0.2.11"
+rand = { version="0.8.5", features=["getrandom"]}
+rand_core = "0.6.4"
+
+## Crypto
+digest = { version = "0.10.7", features=["mac"]}
+siphasher = "1.0.0"
+sha2 = "0.10.8"
+hmac = { version="0.12.1", features=["reset"]}
+hkdf = "0.12.3"
+crypto_secretbox = { version="0.1.1", features=["salsa20", "heapless"]}
+subtle = "2.5.0"
+x25519-dalek = { version = "2.0.1", features = ["static_secrets", "getrandom", "reusable_secrets"]}
+
+## Utils
+hex = "0.4.3"
+tracing = "0.1.40"
+colored = "2.0.4"
+base64 = "0.22.0"
+serde_json = "1.0.114"
+serde = "1.0.197"
+
+## Networking tools
+pin-project = "1.1.3"
+futures = "0.3.29"
+tokio = { version = "1.34", features = ["io-util", "rt-multi-thread", "net", "rt", "macros", "sync", "signal", "time", "fs"] }
+tokio-util = { version = "0.7.10", features = ["codec", "io"]}
+bytes = "1.5.0"
+
+## ntor_arti
+tor-cell = "0.25.0"
+tor-llcrypto = "0.25.0"
+tor-error = "0.25.0"
+tor-bytes = "0.25.0"
+cipher = "0.4.4"
+zeroize = "1.7.0"
+thiserror = "2.0.6"
+
+## transitive dependencies that break things when versions are too low
+## i.e. any lower than the exact versions here.
+curve25519-dalek = { version="4.1", optional=true}
+curve25519-elligator2 = { version="0.1.0-alpha.1", features=["elligator2"] }
+
+anyhow = { version="1.0.20", optional=true}
+async-trait = { version="0.1.9", optional=true}
+num-bigint = { version="0.4.2", optional=true}
+simple_asn1 = { version="0.6.1", optional=true}
+filetime = {version="0.2.25", optional=true}
+
+## Maybe useful in future iterations
+# tor-socksproto = { version = "0.10.0" }
+# arti-client = { package = "arti-client", version = "0.14.0", default-features = false }
+# tor-ptmgr = "0.11.0"
+
+[dev-dependencies]
+tracing-subscriber = "0.3.18"
+hex-literal = "0.4.1"
+tor-basic-utils = "0.25.0"
+
+# benches
+# criterion = "0.5"
+
+[lints.rust]
+# unexpected_cfgs are used to disable incomplete / WIP features and tests. This is
+# not an error for this library. This turns off that specific lint for the "disable" feature.
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(target_features, values("disabled"))'] }
+

@@ -1,0 +1,19 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/obfs4",
+    "crates/webtunnel",
+    "crates/lyrebird",
+    "crates/bridge-line",
+    "crates/ptrs-gesher",
+]
+
+[workspace.package]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/PHPCraftdream/ptrs-gesher"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

@@ -1,0 +1,24 @@
+ptrs-gesher
+===========
+
+Forked from `jmwample/ptrs` (https://github.com/jmwample/ptrs),
+dual-licensed under MIT OR Apache-2.0. Substantial portions of the
+following crates originate from that upstream:
+
+  - crates/core   (formerly: crates/ptrs)
+  - crates/obfs4  (formerly: crates/obfs4)
+  - crates/lyrebird (formerly: crates/lyrebird; refactored to expose a
+    library API alongside the binary, and dispatching to the new
+    `webtunnel` transport by name)
+
+Original copyright: Jack Wampler <jack.wampler@colorado.edu>.
+
+The following are new in this fork (no upstream equivalent):
+
+  - crates/webtunnel       — TLS + HTTP/1.1 Upgrade transport.
+  - crates/bridge-line     — `Bridge` directive parser.
+  - crates/ptrs-gesher     — umbrella crate.
+
+The fork's working name "gesher" (גשר, Hebrew "bridge") refers both
+to the cryptographic-bridges domain and to the fork relationship with
+the upstream project.

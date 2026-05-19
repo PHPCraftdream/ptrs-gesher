@@ -1,0 +1,48 @@
+[package]
+name = "ptrs-gesher-lyrebird"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT OR Apache-2.0"
+description = "Lyrebird PT-manager: in-process loop usable as a library or busybox-style binary (ptrs-gesher framework)"
+keywords = ["tor", "censorship", "pluggable", "transports"]
+categories = ["network-programming", "cryptography"]
+repository = "https://github.com/PHPCraftdream/ptrs-gesher"
+
+[features]
+default = []
+debug = ["ptrs/debug", "obfs4/debug"]
+
+[lib]
+name = "lyrebird"
+
+[[bin]]
+name = "lyrebird"
+path = "src/main.rs"
+test = false
+bench = false
+
+[dependencies]
+## internal crates
+ptrs = { package = "ptrs-gesher-core", path = "../core", version = "0.1.0" }
+obfs4 = { package = "ptrs-gesher-obfs4", path = "../obfs4", version = "0.1.0" }
+webtunnel = { package = "ptrs-gesher-webtunnel", path = "../webtunnel", version = "0.1.0" }
+
+# shared deps
+
+# fwd deps
+anyhow = "1.0"
+async-trait = "0.1"
+clap = { version = "4.5", features = ["derive"]}
+fast-socks5 = "0.10.0"
+futures = "0.3.31"
+safelog = "0.4.2"
+thiserror = "2.0.9"
+tokio = { version = "1.42", features = ["io-util", "net", "macros", "sync", "signal"] }
+tokio-util = "0.7.13"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
+url = "2.5.4"
+
+
+# lyrebird deps

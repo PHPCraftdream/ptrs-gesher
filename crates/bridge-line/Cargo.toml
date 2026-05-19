@@ -1,0 +1,24 @@
+[package]
+name = "ptrs-gesher-bridge-line"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.70"
+license = "MIT OR Apache-2.0"
+description = "Tor `Bridge` directive parser — torrc format, transport-agnostic (ptrs-gesher framework)"
+keywords = ["tor", "bridge", "parser", "obfs4", "webtunnel"]
+categories = ["network-programming", "parsing"]
+repository = "https://github.com/PHPCraftdream/ptrs-gesher"
+
+[lib]
+name = "bridge_line"
+
+[dependencies]
+thiserror = "2"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest = "1"
+
+[[bench]]
+name = "parse_bench"
+harness = false
