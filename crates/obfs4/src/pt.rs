@@ -253,6 +253,63 @@ mod test {
     use super::*;
 
     #[test]
+    fn client_options_with_cert() {
+        let mut cb = crate::ClientBuilder::default();
+        let mut args = Args::new();
+        args.add(
+            CERT_ARG,
+            crate::dev::CLIENT_ARGS.split("cert=").nth(1).unwrap().split(";").next().unwrap(),
+        );
+        args.add(IAT_ARG, "0");
+        let result =
+            <crate::ClientBuilder as ptrs::ClientBuilder<TcpStream>>::options(&mut cb, &args);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn client_options_missing_cert_and_node_id() {
+        let mut cb = crate::ClientBuilder::default();
+        let mut args = Args::new();
+        args.add(IAT_ARG, "0");
+        let result =
+            <crate::ClientBuilder as ptrs::ClientBuilder<TcpStream>>::options(&mut cb, &args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn client_options_missing_iat() {
+        let mut cb = crate::ClientBuilder::default();
+        let mut args = Args::new();
+        args.add(NODE_ID_ARG, "0000000000000000000000000000000000000000");
+        args.add(PUBLIC_KEY_ARG, "0000000000000000000000000000000000000000000000000000000000000000");
+        let result =
+            <crate::ClientBuilder as ptrs::ClientBuilder<TcpStream>>::options(&mut cb, &args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn server_options_valid() {
+        let mut sb = crate::ServerBuilder::<TcpStream>::default();
+        let args = Args::parse_client_parameters(crate::dev::SERVER_ARGS).unwrap();
+        let result =
+            <crate::ServerBuilder<TcpStream> as ptrs::ServerBuilder<TcpStream>>::options(
+                &mut sb, &args,
+            );
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn server_options_missing_args() {
+        let mut sb = crate::ServerBuilder::<TcpStream>::default();
+        let args = Args::new();
+        let result =
+            <crate::ServerBuilder<TcpStream> as ptrs::ServerBuilder<TcpStream>>::options(
+                &mut sb, &args,
+            );
+        assert!(result.is_err());
+    }
+
+    #[test]
     fn check_name() {
         let pt_name = <Obfs4PT as ptrs::PluggableTransport<TcpStream>>::name();
         assert_eq!(pt_name, Obfs4PT::NAME);

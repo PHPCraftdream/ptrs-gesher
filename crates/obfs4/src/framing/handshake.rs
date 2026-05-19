@@ -174,3 +174,103 @@ impl ClientHandshakeMessage {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use bytes::BytesMut;
+    use hmac::Mac;
+
+    fn test_repres() -> PublicRepresentative {
+        PublicRepresentative::from([0x42u8; 32])
+    }
+
+    fn test_hmac() -> HmacSha256 {
+        HmacSha256::new_from_slice(&[0xAB; 32]).unwrap()
+    }
+
+    #[test]
+    fn client_handshake_new_and_accessors() {
+        let repres = test_repres();
+        let msg = ClientHandshakeMessage::new(repres, 100, "12345".into());
+        assert_eq!(msg.pad_len, 100);
+        assert_eq!(msg.get_epoch_hr(), "12345");
+        assert_eq!(msg.get_representative(), repres);
+    }
+
+    #[test]
+    fn client_handshake_get_public_is_cached() {
+        let repres = test_repres();
+        let mut msg = ClientHandshakeMessage::new(repres, 0, String::new());
+        let pk1 = msg.get_public();
+        let pk2 = msg.get_public();
+        assert_eq!(pk1.as_bytes(), pk2.as_bytes());
+    }
+
+    #[test]
+    fn server_handshake_new_and_pubkey_cached() {
+        let repres = test_repres();
+        let auth = [0xDD; AUTHCODE_LENGTH];
+        let mut msg = ServerHandshakeMessage::new(repres, auth, "999".into());
+
+        let pk1 = msg.server_pubkey();
+        let pk2 = msg.server_pubkey();
+        assert_eq!(pk1.as_bytes(), pk2.as_bytes());
+    }
+
+    #[test]
+    fn server_handshake_auth() {
+        let repres = test_repres();
+        let auth = [0xCC; AUTHCODE_LENGTH];
+        let msg = ServerHandshakeMessage::new(repres, auth, "0".into());
+        assert_eq!(msg.server_auth(), auth);
+    }
+
+    #[test]
+    fn client_marshall_output_size() {
+        let repres = test_repres();
+        let pad_len = 50;
+        let mut msg = ClientHandshakeMessage::new(repres, pad_len, String::new());
+        let mut buf = BytesMut::new();
+        msg.marshall(&mut buf, test_hmac()).unwrap();
+        // X(32) + P_C(50) + M_C(16) + MAC(16) = 114
+        assert_eq!(buf.len(), 32 + pad_len + MARK_LENGTH + MARK_LENGTH);
+    }
+
+    #[test]
+    fn server_marshall_output_min_size() {
+        let repres = test_repres();
+        let auth = [0x00; AUTHCODE_LENGTH];
+        let mut msg = ServerHandshakeMessage::new(repres, auth, "0".into());
+        let mut buf = BytesMut::new();
+        msg.marshall(&mut buf, test_hmac()).unwrap();
+        // Y(32) + AUTH(32) + P_S(pad_len) + M_S(16) + MAC(16) = 96 + pad_len
+        let min = 32 + AUTHCODE_LENGTH + MARK_LENGTH + MAC_LENGTH;
+        assert!(buf.len() >= min);
+    }
+
+    #[test]
+    fn client_marshall_updates_epoch_hour() {
+        let repres = test_repres();
+        let mut msg = ClientHandshakeMessage::new(repres, 0, "old_value".into());
+        let mut buf = BytesMut::new();
+        msg.marshall(&mut buf, test_hmac()).unwrap();
+        assert_ne!(msg.get_epoch_hr(), "old_value");
+    }
+
+    #[test]
+    fn client_marshall_deterministic_mark() {
+        let repres = test_repres();
+        let mut msg1 = ClientHandshakeMessage::new(repres, 0, String::new());
+        let mut msg2 = ClientHandshakeMessage::new(repres, 0, String::new());
+
+        let h = test_hmac();
+        let mut buf1 = BytesMut::new();
+        let mut buf2 = BytesMut::new();
+        msg1.marshall(&mut buf1, h.clone()).unwrap();
+        msg2.marshall(&mut buf2, h).unwrap();
+
+        // First 32 bytes (representative) should be identical
+        assert_eq!(&buf1[..32], &buf2[..32]);
+    }
+}

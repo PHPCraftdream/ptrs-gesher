@@ -361,6 +361,45 @@ mod test {
     }
 
     #[test]
+    fn public_representative_from_bytes_roundtrip() {
+        let bytes = [0x42u8; 32];
+        let r = PublicRepresentative::from(bytes);
+        assert_eq!(r.to_bytes(), bytes);
+        assert_eq!(r.as_bytes(), &bytes);
+    }
+
+    #[test]
+    fn public_representative_to_pubkey_deterministic() {
+        let r = PublicRepresentative::from([0x11u8; 32]);
+        let pk1 = PublicKey::from(&r);
+        let pk2 = PublicKey::from(&r);
+        assert_eq!(pk1.as_bytes(), pk2.as_bytes());
+    }
+
+    #[test]
+    fn ephemeral_secret_dh_exchange() {
+        let alice = EphemeralSecret::random();
+        let bob = EphemeralSecret::random();
+
+        let alice_pk = PublicKey::from(&alice);
+        let bob_pk = PublicKey::from(&bob);
+
+        let alice_shared = alice.diffie_hellman(&bob_pk);
+        let bob_shared = bob.diffie_hellman(&alice_pk);
+        assert_eq!(alice_shared.as_bytes(), bob_shared.as_bytes());
+    }
+
+    #[test]
+    fn ephemeral_secret_from_parts_works() {
+        let secret = EphemeralSecret::random();
+        let sk_bytes = *secret.0.as_bytes();
+        let reconstructed = EphemeralSecret::from_parts(StaticSecret::from(sk_bytes), 0u8);
+        let pk_orig = PublicKey::from(&secret);
+        let pk_reconstructed = PublicKey::from(&reconstructed);
+        assert_eq!(pk_orig.as_bytes(), pk_reconstructed.as_bytes());
+    }
+
+    #[test]
     fn off_subgroup_check_edw() {
         let mut count = 0;
         let n_trials = 100;

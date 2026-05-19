@@ -185,4 +185,59 @@ mod test {
         }
         Ok(())
     }
+
+    #[test]
+    fn default_builder() {
+        let b = ClientBuilder::default();
+        assert_eq!(b.iat_mode, IAT::Off);
+        assert_eq!(b.station_pubkey, [0u8; KEY_LENGTH]);
+        assert!(b.statefile_path.is_none());
+    }
+
+    #[test]
+    fn builder_with_methods() {
+        let mut b = ClientBuilder::default();
+        let pk = [0xAA; KEY_LENGTH];
+        let id = [0xBB; NODE_ID_LENGTH];
+
+        b.with_node_pubkey(pk)
+            .with_node_id(id)
+            .with_iat_mode(IAT::Paranoid)
+            .with_statefile_path("/tmp/test");
+
+        assert_eq!(b.station_pubkey, pk);
+        assert_eq!(b.station_id, id);
+        assert_eq!(b.iat_mode, IAT::Paranoid);
+        assert_eq!(b.statefile_path.as_deref(), Some("/tmp/test"));
+    }
+
+    #[test]
+    fn builder_timeout_modes() {
+        let mut b = ClientBuilder::default();
+
+        b.with_handshake_timeout(Duration::from_secs(30));
+        assert!(matches!(b.handshake_timeout, MaybeTimeout::Length(_)));
+
+        b.fail_fast();
+        assert!(matches!(b.handshake_timeout, MaybeTimeout::Unset));
+
+        let deadline = Instant::now() + Duration::from_secs(60);
+        b.with_handshake_deadline(deadline);
+        assert!(matches!(b.handshake_timeout, MaybeTimeout::Fixed(_)));
+    }
+
+    #[test]
+    fn build_creates_client() {
+        let mut b = ClientBuilder::default();
+        b.with_node_pubkey([0x01; KEY_LENGTH])
+            .with_node_id([0x02; NODE_ID_LENGTH]);
+        let client = b.build();
+        assert_eq!(client.iat_mode, IAT::Off);
+    }
+
+    #[test]
+    fn from_statefile_sets_path() {
+        let b = ClientBuilder::from_statefile("/some/path").unwrap();
+        assert_eq!(b.statefile_path.as_deref(), Some("/some/path"));
+    }
 }

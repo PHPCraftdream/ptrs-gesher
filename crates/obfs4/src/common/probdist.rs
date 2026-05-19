@@ -267,4 +267,61 @@ mod test {
 
         Ok(())
     }
+
+    #[test]
+    fn reseed_changes_distribution() -> Result<()> {
+        let seed1 = drbg::Seed::from([0x11; drbg::SEED_LENGTH]);
+        let seed2 = drbg::Seed::from([0x22; drbg::SEED_LENGTH]);
+        let w = WeightedDist::new(seed1, 0, 100, false);
+
+        let mut samples_before = Vec::new();
+        for _ in 0..100 {
+            samples_before.push(w.sample());
+        }
+
+        w.reseed(seed2);
+
+        let mut samples_after = Vec::new();
+        for _ in 0..100 {
+            samples_after.push(w.sample());
+        }
+
+        // Statistically very unlikely to be identical
+        assert_ne!(samples_before, samples_after);
+        Ok(())
+    }
+
+    #[test]
+    fn biased_vs_uniform() -> Result<()> {
+        let seed = drbg::Seed::from([0xAA; drbg::SEED_LENGTH]);
+        let biased = WeightedDist::new(seed.clone(), 0, 100, true);
+        let uniform = WeightedDist::new(seed, 0, 100, false);
+
+        for _ in 0..100 {
+            let b = biased.sample();
+            let u = uniform.sample();
+            assert!((0..=100).contains(&b));
+            assert!((0..=100).contains(&u));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn sample_in_range() -> Result<()> {
+        let seed = drbg::Seed::new()?;
+        let w = WeightedDist::new(seed, 10, 50, false);
+        for _ in 0..1000 {
+            let s = w.sample();
+            assert!(s >= 10 && s <= 50, "sample {s} out of range [10, 50]");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn display_does_not_panic() -> Result<()> {
+        let seed = drbg::Seed::new()?;
+        let w = WeightedDist::new(seed, 0, 10, true);
+        let _ = format!("{w}");
+        Ok(())
+    }
 }

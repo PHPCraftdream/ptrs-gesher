@@ -184,4 +184,73 @@ mod test {
 
         Ok(())
     }
+
+    #[test]
+    fn padding_marshall_and_parse() -> Result<(), FrameError> {
+        init_subscriber();
+
+        let mut buf = BytesMut::new();
+        let msg = Messages::Padding(50);
+        msg.marshall(&mut buf)?;
+
+        // Padding has type=Payload(0x00), length=0, then pad bytes
+        assert_eq!(buf[0], 0x00); // type = Payload
+        assert_eq!(buf[1], 0x00); // length high
+        assert_eq!(buf[2], 0x00); // length low = 0
+
+        let parsed = Messages::try_parse(&mut buf)?;
+        assert!(matches!(parsed, Messages::Padding(_)));
+        Ok(())
+    }
+
+    #[test]
+    fn padding_oversized_returns_error() {
+        let msg = Messages::Padding(MAX_MESSAGE_PADDING_LENGTH + 1);
+        let mut buf = BytesMut::new();
+        let result = msg.marshall(&mut buf);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn padding_zero_length() -> Result<(), FrameError> {
+        let msg = Messages::Padding(0);
+        let mut buf = BytesMut::new();
+        msg.marshall(&mut buf)?;
+        // type(1) + length(2) = 3 bytes, no padding
+        assert_eq!(buf.len(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn unknown_message_type() {
+        let mut buf = BytesMut::new();
+        buf.put_u8(0xFF); // unknown type
+        buf.put_u16(0);
+        let result = Messages::try_parse(&mut buf);
+        assert!(matches!(result, Err(FrameError::UnknownMessageType(0xFF))));
+    }
+
+    #[test]
+    fn try_parse_too_short() {
+        let mut buf = BytesMut::new();
+        buf.put_u8(0x00); // only 1 byte, need 3
+        let result = Messages::try_parse(&mut buf);
+        assert!(matches!(result, Err(FrameError::InvalidMessage)));
+    }
+
+    #[test]
+    fn message_types_conversion_roundtrip() {
+        assert_eq!(u8::from(MessageTypes::Payload), 0x00);
+        assert_eq!(u8::from(MessageTypes::PrngSeed), 0x01);
+        assert_eq!(MessageTypes::try_from(0x00).unwrap(), MessageTypes::Payload);
+        assert_eq!(MessageTypes::try_from(0x01).unwrap(), MessageTypes::PrngSeed);
+        assert!(MessageTypes::try_from(0x02).is_err());
+    }
+
+    #[test]
+    fn messages_as_pt() {
+        assert_eq!(Messages::Payload(vec![]).as_pt(), MessageTypes::Payload);
+        assert_eq!(Messages::PrngSeed([0; SEED_LENGTH]).as_pt(), MessageTypes::PrngSeed);
+        assert_eq!(Messages::Padding(0).as_pt(), MessageTypes::Payload);
+    }
 }

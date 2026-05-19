@@ -15,3 +15,51 @@ pub(crate) fn bytes_eq(a: &[u8], b: &[u8]) -> bool {
     let choice = a.ct_eq(b);
     choice.unwrap_u8() == 1
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn bool_to_choice_true() {
+        let c = bool_to_choice(true);
+        assert_eq!(c.unwrap_u8(), 1);
+    }
+
+    #[test]
+    fn bool_to_choice_false() {
+        let c = bool_to_choice(false);
+        assert_eq!(c.unwrap_u8(), 0);
+    }
+
+    #[test]
+    fn bytes_eq_equal() {
+        assert!(bytes_eq(b"hello", b"hello"));
+    }
+
+    #[test]
+    fn bytes_eq_unequal_same_len() {
+        assert!(!bytes_eq(b"hello", b"world"));
+    }
+
+    #[test]
+    fn bytes_eq_different_len() {
+        assert!(!bytes_eq(b"hello", b"hi"));
+    }
+
+    #[test]
+    fn bytes_eq_empty() {
+        assert!(bytes_eq(b"", b""));
+    }
+
+    #[test]
+    fn bytes_eq_one_empty() {
+        assert!(!bytes_eq(b"a", b""));
+        assert!(!bytes_eq(b"", b"a"));
+    }
+
+    #[test]
+    fn bytes_eq_single_byte_diff() {
+        assert!(!bytes_eq(&[0x00], &[0x01]));
+        assert!(bytes_eq(&[0xff], &[0xff]));
+    }
+}

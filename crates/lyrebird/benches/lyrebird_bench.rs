@@ -63,10 +63,23 @@ fn bench_resolve_target_addr(c: &mut Criterion) {
     });
 }
 
+fn bench_arg_string_from_creds_edge(c: &mut Criterion) {
+    c.bench_function("arg_string_from_creds_empty_strings", |b| {
+        let creds = Some((String::new(), String::new()));
+        b.iter(|| lyrebird::arg_string_from_creds(black_box(creds.clone())));
+    });
+
+    c.bench_function("arg_string_from_creds_nul_password", |b| {
+        let creds = Some(("cert=AABBCC".to_string(), "\0".to_string()));
+        b.iter(|| lyrebird::arg_string_from_creds(black_box(creds.clone())));
+    });
+}
+
 criterion_group!(
     benches,
     bench_arg_string_from_creds,
     bench_arg_string_then_parse,
     bench_resolve_target_addr,
+    bench_arg_string_from_creds_edge,
 );
 criterion_main!(benches);

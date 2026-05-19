@@ -368,4 +368,120 @@ mod testing {
         assert_eq!(nb.next().unwrap_err(), FrameError::NonceCounterWrapped);
         Ok(())
     }
+
+    #[test]
+    fn nonce_box_new_and_increment() {
+        let prefix = [0xAA_u8; NONCE_PREFIX_LENGTH];
+        let mut nb = NonceBox::new(prefix);
+        assert_eq!(nb.counter, 1);
+
+        let n1 = nb.next().unwrap();
+        assert_eq!(&n1[..NONCE_PREFIX_LENGTH], &prefix);
+        assert_eq!(nb.counter, 2);
+
+        let n2 = nb.next().unwrap();
+        assert_ne!(n1, n2);
+        assert_eq!(&n2[..NONCE_PREFIX_LENGTH], &prefix);
+    }
+
+    #[test]
+    fn nonce_box_counter_in_nonce() {
+        let mut nb = NonceBox::new([0_u8; NONCE_PREFIX_LENGTH]);
+        let n = nb.next().unwrap();
+        // counter starts at 1, big-endian
+        assert_eq!(&n[NONCE_PREFIX_LENGTH..], &1u64.to_be_bytes());
+    }
+
+    #[test]
+    fn codec_roundtrip() -> Result<()> {
+        let enc_km = [0x42u8; KEY_MATERIAL_LENGTH];
+        let dec_km = [0x42u8; KEY_MATERIAL_LENGTH];
+        let mut codec_enc = EncryptingCodec::new(enc_km, dec_km);
+        let mut codec_dec = EncryptingCodec::new(dec_km, enc_km);
+
+        // Must marshall a proper Message into the plaintext
+        let payload_data = b"hello world test";
+        let msg = Messages::Payload(payload_data.to_vec());
+        let mut marshalled = BytesMut::new();
+        msg.marshall(&mut marshalled).unwrap();
+
+        let mut encrypted = BytesMut::new();
+        codec_enc.encode(marshalled, &mut encrypted)?;
+
+        assert!(!encrypted.is_empty());
+
+        let decoded = codec_dec.decode(&mut encrypted)?;
+        assert!(decoded.is_some());
+        if let Some(Messages::Payload(data)) = decoded {
+            assert_eq!(&data[..], &payload_data[..]);
+        } else {
+            panic!("expected Payload message, got {:?}", decoded);
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn codec_encode_oversized_payload() {
+        let enc_km = [0x11u8; KEY_MATERIAL_LENGTH];
+        let dec_km = [0x22u8; KEY_MATERIAL_LENGTH];
+        let mut codec = EncryptingCodec::new(enc_km, dec_km);
+        let big = BytesMut::from(vec![0u8; MAX_FRAME_PAYLOAD_LENGTH + 1].as_slice());
+        let mut dst = BytesMut::new();
+        let result = codec.encode(big, &mut dst);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn codec_decode_empty_buffer() {
+        let enc_km = [0x33u8; KEY_MATERIAL_LENGTH];
+        let dec_km = [0x44u8; KEY_MATERIAL_LENGTH];
+        let mut codec = EncryptingCodec::new(enc_km, dec_km);
+        let mut buf = BytesMut::new();
+        let result = codec.decode(&mut buf).unwrap();
+        assert!(result.is_none()); // needs more data
+    }
+
+    #[test]
+    fn codec_decode_short_buffer() {
+        let enc_km = [0x55u8; KEY_MATERIAL_LENGTH];
+        let dec_km = [0x66u8; KEY_MATERIAL_LENGTH];
+        let mut codec = EncryptingCodec::new(enc_km, dec_km);
+        let mut buf = BytesMut::from(&[0x00][..]);
+        let result = codec.decode(&mut buf).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn codec_handshake_complete_flag() {
+        let km = [0x77u8; KEY_MATERIAL_LENGTH];
+        let mut codec = EncryptingCodec::new(km, km);
+        assert!(!codec.handshake_complete);
+        codec.handshake_complete();
+        assert!(codec.handshake_complete);
+    }
+
+    #[test]
+    fn codec_multiple_frames() -> Result<()> {
+        let km1 = [0xAAu8; KEY_MATERIAL_LENGTH];
+        let km2 = [0xAAu8; KEY_MATERIAL_LENGTH];
+        let mut enc = EncryptingCodec::new(km1, km2);
+        let mut dec = EncryptingCodec::new(km2, km1);
+
+        for i in 0..5u8 {
+            let payload = vec![i; 100];
+            let msg = Messages::Payload(payload.clone());
+            let mut marshalled = BytesMut::new();
+            msg.marshall(&mut marshalled).unwrap();
+
+            let mut encrypted = BytesMut::new();
+            enc.encode(marshalled, &mut encrypted)?;
+
+            let decoded = dec.decode(&mut encrypted)?;
+            assert!(decoded.is_some(), "frame {i} decoded to None");
+            if let Some(Messages::Payload(data)) = decoded {
+                assert_eq!(data, payload);
+            }
+        }
+        Ok(())
+    }
 }

@@ -442,6 +442,76 @@ impl ServerSession<Initialized> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_pubkey() -> Obfs4NtorPublicKey {
+        Obfs4NtorPublicKey::new([0x01; NODE_PUBKEY_LENGTH], [0x02; NODE_ID_LENGTH])
+    }
+
+    #[test]
+    fn new_client_session_has_random_id() {
+        let s1 = new_client_session(test_pubkey(), IAT::Off);
+        let s2 = new_client_session(test_pubkey(), IAT::Off);
+        assert_ne!(s1.session_id, s2.session_id);
+    }
+
+    #[test]
+    fn client_session_id_format() {
+        let s = new_client_session(test_pubkey(), IAT::Off);
+        let id = s.session_id();
+        assert!(id.starts_with("c-"));
+    }
+
+    #[test]
+    fn client_set_session_id() {
+        let mut s = new_client_session(test_pubkey(), IAT::Off);
+        let new_id = [0xFF; SESSION_ID_LEN];
+        s.set_session_id(new_id);
+        assert_eq!(s.session_id, new_id);
+    }
+
+    #[test]
+    fn client_transition_preserves_fields() {
+        let s = new_client_session(test_pubkey(), IAT::Enabled);
+        let original_id = s.session_id;
+        let s2 = s.transition(ClientHandshaking {});
+        assert_eq!(s2.session_id, original_id);
+    }
+
+    #[test]
+    fn client_fault_preserves_fields() {
+        let s = new_client_session(test_pubkey(), IAT::Off);
+        let original_id = s.session_id;
+        let sf = s.fault(ClientHandshakeFailed {
+            details: "test".into(),
+        });
+        assert_eq!(sf.session_id, original_id);
+    }
+
+    #[test]
+    fn client_debug_format() {
+        let s = new_client_session(test_pubkey(), IAT::Paranoid);
+        let dbg = format!("{:?}", s);
+        assert!(dbg.contains("iat:Paranoid"));
+    }
+
+    #[test]
+    fn session_enum_client_accessors() {
+        let cs = new_client_session(test_pubkey(), IAT::Off);
+        let seed = cs.len_seed.clone();
+        let established = cs
+            .transition(ClientHandshaking {})
+            .transition(Established {});
+        let session = Session::Client(established);
+
+        assert!(session.id().starts_with("c"));
+        assert!(!session.biased());
+        assert_eq!(session.len_seed().as_bytes(), seed.as_bytes());
+    }
+}
+
 impl Server {
     /// Complete the handshake with the client. This function assumes that the
     /// client has already sent a message and that we do not know yet if the

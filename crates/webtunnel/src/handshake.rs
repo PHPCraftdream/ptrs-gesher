@@ -57,8 +57,7 @@ Sec-WebSocket-Version: 13\r\n\
 ///
 /// Returns `Ok((status_code, leftover_bytes))` on 101, or an error for
 /// any other status / parse failure. Lenient: only checks the status code.
-#[cfg(test)]
-pub(crate) fn parse_response(buf: &[u8]) -> Result<(u16, &[u8]), Error> {
+pub fn parse_response(buf: &[u8]) -> Result<(u16, &[u8]), Error> {
     let mut headers = [httparse::EMPTY_HEADER; 32];
     let mut resp = httparse::Response::new(&mut headers);
 
@@ -199,5 +198,89 @@ impl StreamWrapper for tokio_rustls::client::TlsStream<TcpStream> {
 impl StreamWrapper for TcpStream {
     fn wrap(self) -> Result<WebTunnelStream, Error> {
         Ok(WebTunnelStream::Plain(self))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::WebTunnelConfig;
+    use ptrs::args::Args;
+
+    fn make_config(url: &str) -> WebTunnelConfig {
+        let mut args = Args::new();
+        args.add("url", url);
+        WebTunnelConfig::from_args(&args).unwrap()
+    }
+
+    #[test]
+    fn websocket_key_is_base64_24_chars() {
+        let key = generate_websocket_key();
+        assert_eq!(key.len(), 24);
+        assert!(base64::engine::general_purpose::STANDARD.decode(&key).is_ok());
+    }
+
+    #[test]
+    fn websocket_key_is_random() {
+        let k1 = generate_websocket_key();
+        let k2 = generate_websocket_key();
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn build_upgrade_request_format() {
+        let config = make_config("https://example.com/secret");
+        let req = build_upgrade_request(&config);
+        assert!(req.starts_with("GET /secret HTTP/1.1\r\n"));
+        assert!(req.contains("Host: example.com\r\n"));
+        assert!(req.contains("Upgrade: websocket\r\n"));
+        assert!(req.contains("Connection: Upgrade\r\n"));
+        assert!(req.contains("Sec-WebSocket-Key: "));
+        assert!(req.contains("Sec-WebSocket-Version: 13\r\n"));
+        assert!(req.ends_with("\r\n\r\n"));
+    }
+
+    #[test]
+    fn build_upgrade_request_root_path() {
+        let config = make_config("https://example.com");
+        let req = build_upgrade_request(&config);
+        assert!(req.starts_with("GET / HTTP/1.1\r\n"));
+    }
+
+    #[test]
+    fn parse_response_101_ok() {
+        let resp = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: upgrade\r\n\r\n";
+        let (code, leftover) = parse_response(resp).unwrap();
+        assert_eq!(code, 101);
+        assert!(leftover.is_empty());
+    }
+
+    #[test]
+    fn parse_response_101_with_leftover() {
+        let resp = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\nEXTRADATA";
+        let (code, leftover) = parse_response(resp).unwrap();
+        assert_eq!(code, 101);
+        assert_eq!(leftover, b"EXTRADATA");
+    }
+
+    #[test]
+    fn parse_response_non_101() {
+        let resp = b"HTTP/1.1 404 Not Found\r\n\r\n";
+        let err = parse_response(resp).unwrap_err();
+        assert!(matches!(err, Error::Non101(_)));
+    }
+
+    #[test]
+    fn parse_response_incomplete() {
+        let resp = b"HTTP/1.1 101 Switch";
+        let err = parse_response(resp).unwrap_err();
+        assert!(matches!(err, Error::HttpParse(_)));
+    }
+
+    #[test]
+    fn parse_response_malformed() {
+        let resp = b"NOT HTTP AT ALL\r\n\r\n";
+        let err = parse_response(resp).unwrap_err();
+        assert!(matches!(err, Error::HttpParse(_)));
     }
 }

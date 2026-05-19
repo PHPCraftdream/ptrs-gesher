@@ -52,7 +52,7 @@ pub use messages_v1::{MessageTypes, Messages};
 mod codecs;
 pub use codecs::EncryptingCodec as Obfs4Codec;
 
-pub(crate) mod handshake;
+pub mod handshake;
 pub use handshake::*;
 
 // mod frame_builder;
@@ -91,7 +91,7 @@ pub(crate) const TAG_SIZE: usize = 16;
 
 /// This is the expected length of the Key material that is used to seed the
 /// encrypting / decryptong codec, i.e. in framing/codec and handshake/
-pub(crate) const KEY_MATERIAL_LENGTH: usize = KEY_LENGTH + NONCE_PREFIX_LENGTH + drbg::SEED_LENGTH;
+pub const KEY_MATERIAL_LENGTH: usize = KEY_LENGTH + NONCE_PREFIX_LENGTH + drbg::SEED_LENGTH;
 
 pub trait Marshall {
     fn marshall(&mut self, buf: &mut impl BufMut) -> Result<(), FrameError>;

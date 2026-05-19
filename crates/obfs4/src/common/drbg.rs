@@ -280,6 +280,73 @@ mod test {
         assert_eq!(i, i64::MAX);
     }
 
+    #[test]
+    fn seed_to_bytes_roundtrip() -> Result<()> {
+        let seed = Seed::new()?;
+        let bytes = seed.to_bytes();
+        assert_eq!(bytes.len(), SEED_LENGTH);
+        assert_eq!(seed.as_bytes(), &bytes);
+        let seed2 = Seed::from(bytes);
+        assert_eq!(seed, seed2);
+        Ok(())
+    }
+
+    #[test]
+    fn seed_display() -> Result<()> {
+        let seed = Seed([0xAB; SEED_LENGTH]);
+        let s = format!("{seed}");
+        assert_eq!(s, "ab".repeat(SEED_LENGTH));
+        Ok(())
+    }
+
+    #[test]
+    fn seed_to_pieces() -> Result<()> {
+        let mut raw = [0u8; SEED_LENGTH];
+        raw[..16].copy_from_slice(&[0x11; 16]);
+        raw[16..].copy_from_slice(&[0x22; SIZE]);
+        let seed = Seed(raw);
+        let (key, ofb) = seed.to_pieces();
+        assert_eq!(key, [0x11; 16]);
+        assert_eq!(ofb, [0x22; SIZE]);
+        Ok(())
+    }
+
+    #[test]
+    fn drbg_next_block_returns_8_bytes() -> Result<()> {
+        let seed = Seed::new()?;
+        let mut drbg = Drbg::new(Some(seed))?;
+        let block = drbg.next_block();
+        assert_eq!(block.len(), SIZE);
+        let block2 = drbg.next_block();
+        assert_ne!(block, block2);
+        Ok(())
+    }
+
+    #[test]
+    fn drbg_length_mask_deterministic() -> Result<()> {
+        let seed = Seed::from([0x42; SEED_LENGTH]);
+        let mut d1 = Drbg::new(Some(seed.clone()))?;
+        let mut d2 = Drbg::new(Some(seed))?;
+        for _ in 0..10 {
+            assert_eq!(d1.length_mask(), d2.length_mask());
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn seed_try_from_wrong_length() {
+        let short = vec![0u8; SEED_LENGTH - 1];
+        assert!(Seed::try_from(short.as_slice()).is_err());
+        let long = vec![0u8; SEED_LENGTH + 1];
+        assert!(Seed::try_from(long.as_slice()).is_err());
+    }
+
+    #[test]
+    fn seed_from_hex_invalid() {
+        assert!(Seed::from_hex("not_hex").is_err());
+        assert!(Seed::from_hex("ZZZZ").is_err());
+    }
+
     /// Ensure that we are compatible with the golang hash-drbg so that the
     /// libraries are interchangeable.
     #[test]

@@ -178,3 +178,65 @@ pub enum RelayHandshakeError {
 /// Type alias for results from a relay's attempt to handle a client's onion
 /// handshake.
 pub(crate) type RelayHandshakeResult<T> = std::result::Result<T, RelayHandshakeError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shake_key_generator_produces_output() {
+        let seed: SecretBuf = vec![0xAB; 32].into();
+        let kg = ShakeKeyGenerator::new(seed);
+        let result = kg.expand(64).unwrap();
+        assert_eq!(result.len(), 64);
+    }
+
+    #[test]
+    fn shake_key_generator_deterministic() {
+        let seed1: SecretBuf = vec![0x42; 32].into();
+        let seed2: SecretBuf = vec![0x42; 32].into();
+        let r1 = ShakeKeyGenerator::new(seed1).expand(48).unwrap();
+        let r2 = ShakeKeyGenerator::new(seed2).expand(48).unwrap();
+        assert_eq!(&r1[..], &r2[..]);
+    }
+
+    #[test]
+    fn shake_key_generator_different_seeds_differ() {
+        let r1 = ShakeKeyGenerator::new(vec![0x01; 32].into()).expand(32).unwrap();
+        let r2 = ShakeKeyGenerator::new(vec![0x02; 32].into()).expand(32).unwrap();
+        assert_ne!(&r1[..], &r2[..]);
+    }
+
+    #[test]
+    fn shake_key_generator_different_lengths() {
+        let seed: SecretBuf = vec![0xAA; 16].into();
+        let short = ShakeKeyGenerator::new(seed.clone()).expand(16).unwrap();
+        let long = ShakeKeyGenerator::new(seed).expand(64).unwrap();
+        assert_eq!(&short[..], &long[..16]);
+    }
+
+    #[test]
+    fn shake_key_generator_zero_length() {
+        let seed: SecretBuf = vec![0x00; 8].into();
+        let r = ShakeKeyGenerator::new(seed).expand(0).unwrap();
+        assert!(r.is_empty());
+    }
+
+    #[test]
+    fn relay_handshake_error_display() {
+        let e = RelayHandshakeError::EAgain;
+        assert!(e.to_string().contains("try again"));
+
+        let e = RelayHandshakeError::MissingKey;
+        assert!(e.to_string().contains("key"));
+
+        let e = RelayHandshakeError::BadClientHandshake;
+        assert!(e.to_string().contains("client"));
+
+        let e = RelayHandshakeError::BadServerHandshake;
+        assert!(e.to_string().contains("server"));
+
+        let e = RelayHandshakeError::ReplayedHandshake;
+        assert!(e.to_string().contains("replay"));
+    }
+}

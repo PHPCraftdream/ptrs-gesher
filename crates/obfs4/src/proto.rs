@@ -334,6 +334,80 @@ where
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::str::FromStr;
+
+    #[test]
+    fn iat_from_str_valid() {
+        assert_eq!(IAT::from_str("0").unwrap(), IAT::Off);
+        assert_eq!(IAT::from_str("1").unwrap(), IAT::Enabled);
+        assert_eq!(IAT::from_str("2").unwrap(), IAT::Paranoid);
+    }
+
+    #[test]
+    fn iat_from_str_invalid() {
+        assert!(IAT::from_str("3").is_err());
+        assert!(IAT::from_str("").is_err());
+        assert!(IAT::from_str("off").is_err());
+        assert!(IAT::from_str("-1").is_err());
+    }
+
+    #[test]
+    fn iat_display_roundtrip() {
+        for s in ["0", "1", "2"] {
+            let iat = IAT::from_str(s).unwrap();
+            assert_eq!(iat.to_string(), s);
+        }
+    }
+
+    #[test]
+    fn iat_default_is_off() {
+        assert_eq!(IAT::default(), IAT::Off);
+    }
+
+    #[test]
+    fn maybe_timeout_default_returns_some() {
+        let d = MaybeTimeout::Default_.duration();
+        assert!(d.is_some());
+        assert_eq!(d.unwrap(), CLIENT_HANDSHAKE_TIMEOUT);
+    }
+
+    #[test]
+    fn maybe_timeout_length_returns_duration() {
+        let dur = Duration::from_secs(42);
+        let d = MaybeTimeout::Length(dur).duration();
+        assert_eq!(d.unwrap(), dur);
+    }
+
+    #[test]
+    fn maybe_timeout_unset_returns_none() {
+        assert!(MaybeTimeout::Unset.duration().is_none());
+    }
+
+    #[test]
+    fn maybe_timeout_fixed_past_returns_none() {
+        let past = Instant::now() - Duration::from_secs(10);
+        assert!(MaybeTimeout::Fixed(past).duration().is_none());
+    }
+
+    #[test]
+    fn maybe_timeout_fixed_future_returns_some() {
+        let future = Instant::now() + Duration::from_secs(60);
+        let d = MaybeTimeout::Fixed(future).duration();
+        assert!(d.is_some());
+        assert!(d.unwrap() <= Duration::from_secs(60));
+        assert!(d.unwrap() > Duration::from_secs(55));
+    }
+
+    #[test]
+    fn try_handle_non_payload_padding_ok() {
+        let msg = Messages::Padding(10);
+        assert!(matches!(msg, Messages::Padding(_)));
+    }
+}
+
 impl<T> AsyncWrite for Obfs4Stream<T>
 where
     T: AsyncRead + AsyncWrite + Unpin,

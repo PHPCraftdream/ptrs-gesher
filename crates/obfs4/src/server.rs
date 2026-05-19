@@ -382,4 +382,122 @@ mod tests {
 
         Ok(())
     }
+
+    #[test]
+    fn server_builder_default() {
+        let sb = ServerBuilder::<TcpStream>::default();
+        assert_eq!(sb.iat_mode, IAT::Off);
+        assert!(sb.statefile_path.is_none());
+    }
+
+    #[test]
+    fn server_builder_methods() {
+        let mut sb = ServerBuilder::<TcpStream>::default();
+        sb.iat_mode(IAT::Enabled);
+        assert_eq!(sb.iat_mode, IAT::Enabled);
+
+        sb.statefile_path("/tmp/state");
+        assert_eq!(sb.statefile_path.as_deref(), Some("/tmp/state"));
+
+        sb.node_id([0xAA; NODE_ID_LENGTH]);
+        assert_eq!(
+            sb.identity_keys.pk.id.as_bytes(),
+            &[0xAA; NODE_ID_LENGTH]
+        );
+    }
+
+    #[test]
+    fn server_builder_timeout_modes() {
+        let mut sb = ServerBuilder::<TcpStream>::default();
+
+        sb.with_handshake_timeout(Duration::from_secs(10));
+        assert!(matches!(sb.handshake_timeout, MaybeTimeout::Length(_)));
+
+        sb.fail_fast();
+        assert!(matches!(sb.handshake_timeout, MaybeTimeout::Unset));
+    }
+
+    #[test]
+    fn server_builder_build() {
+        let sb = ServerBuilder::<TcpStream>::default();
+        let server = sb.build();
+        assert_eq!(server.iat_mode, IAT::Off);
+        assert!(!server.biased);
+    }
+
+    #[test]
+    fn server_builder_client_params_not_empty() {
+        let sb = ServerBuilder::<TcpStream>::default();
+        let params = sb.client_params();
+        assert!(!params.is_empty());
+        assert!(params.contains("cert="));
+    }
+
+    #[test]
+    fn server_new_from_known_key() {
+        let sec = [0x42u8; KEY_LENGTH];
+        let id = [0x00u8; NODE_ID_LENGTH];
+        let server = Server::new(sec, id);
+        assert_eq!(server.iat_mode, IAT::Off);
+    }
+
+    #[test]
+    fn server_getrandom_creates_server() {
+        let server = Server::getrandom();
+        assert_eq!(server.iat_mode, IAT::Off);
+    }
+
+    #[test]
+    fn server_client_params_returns_builder() {
+        let server = Server::getrandom();
+        let cb = server.client_params();
+        assert_eq!(cb.iat_mode, IAT::Off);
+    }
+
+    #[test]
+    fn server_new_server_session() {
+        let server = Server::getrandom();
+        let session = server.new_server_session();
+        assert!(session.is_ok());
+    }
+
+    #[test]
+    fn server_new_from_statefile_not_implemented() {
+        let result = Server::new_from_statefile();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_args_missing_fields() {
+        let args = Args::new();
+        let result = ServerBuilder::<TcpStream>::validate_args(&args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn validate_args_valid() {
+        let mut args = Args::new();
+        args.add(NODE_ID_ARG, "0000000000000000000000000000000000000000");
+        args.add(PRIVATE_KEY_ARG, "0123456789abcdeffedcba98765432100123456789abcdeffedcba9876543210");
+        args.add(SEED_ARG, "0a0b0c0d0e0f0a0b0c0d0e0f0a0b0c0d0e0f0a0b0c0d0e0f");
+        args.add(IAT_ARG, "0");
+        let result = ServerBuilder::<TcpStream>::validate_args(&args);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn parse_json_state_invalid_json() {
+        let mut args = Args::new();
+        let result = ServerBuilder::<TcpStream>::server_state_from_json("not json".as_bytes(), &mut args);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn json_extend_args_partial() {
+        let json_str = r#"{"node-id": "aabb"}"#;
+        let mut args = Args::new();
+        ServerBuilder::<TcpStream>::server_state_from_json(json_str.as_bytes(), &mut args).unwrap();
+        assert_eq!(args.retrieve(NODE_ID_ARG), Some("aabb".into()));
+        assert!(args.retrieve(PRIVATE_KEY_ARG).is_none());
+    }
 }
