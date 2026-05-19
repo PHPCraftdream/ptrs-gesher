@@ -579,6 +579,25 @@ mod testing {
                     }
                 }
             }
+
+            #[test]
+            fn encode_decode_roundtrip_arbitrary_key(
+                km in any::<[u8; KEY_MATERIAL_LENGTH]>(),
+                payload in prop::collection::vec(any::<u8>(), 1..1400)
+            ) {
+                let mut enc = EncryptingCodec::new(km, km);
+                let mut dec = EncryptingCodec::new(km, km);
+                let msg = Messages::Payload(payload.clone());
+                let mut marshalled = BytesMut::new();
+                msg.marshall(&mut marshalled).unwrap();
+                let mut encrypted = BytesMut::new();
+                enc.encode(marshalled, &mut encrypted).unwrap();
+                let decoded = dec.decode(&mut encrypted).unwrap();
+                match decoded {
+                    Some(Messages::Payload(data)) => prop_assert_eq!(data, payload),
+                    other => panic!("expected Payload, got {:?}", other),
+                }
+            }
         }
     }
 }

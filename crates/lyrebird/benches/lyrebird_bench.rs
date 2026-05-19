@@ -75,11 +75,51 @@ fn bench_arg_string_from_creds_edge(c: &mut Criterion) {
     });
 }
 
+fn bench_bidirectional_copy(c: &mut Criterion) {
+    use criterion::{BenchmarkId, Throughput};
+    use tokio::io::AsyncWriteExt;
+
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let mut group = c.benchmark_group("bidirectional_copy");
+    for &size in &[64 * 1024usize, 1024 * 1024] {
+        group.throughput(Throughput::Bytes(size as u64 * 2));
+        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
+            b.to_async(&rt).iter(|| async move {
+                let (a_out, a_in) = tokio::io::duplex(64 * 1024);
+                let (b_out, b_in) = tokio::io::duplex(64 * 1024);
+                let data = vec![0u8; size];
+                let d1 = data.clone();
+                let d2 = data;
+                let wa = tokio::spawn(async move {
+                    let mut a = a_out;
+                    a.write_all(&d1).await.unwrap();
+                    drop(a);
+                });
+                let wb = tokio::spawn(async move {
+                    let mut b = b_out;
+                    b.write_all(&d2).await.unwrap();
+                    drop(b);
+                });
+                let _ = lyrebird::bidirectional_copy(a_in, b_in).await.unwrap();
+                wa.await.unwrap();
+                wb.await.unwrap();
+            });
+        });
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_arg_string_from_creds,
     bench_arg_string_then_parse,
     bench_resolve_target_addr,
     bench_arg_string_from_creds_edge,
+    bench_bidirectional_copy,
 );
 criterion_main!(benches);

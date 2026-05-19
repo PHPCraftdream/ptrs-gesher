@@ -200,6 +200,23 @@ pub fn resolve_target_addr(addr: &TargetAddr) -> Result<SocketAddr> {
     }
 }
 
+/// Copy data bidirectionally between two async streams until one side
+/// returns EOF or an error. Returns `(a_to_b_bytes, b_to_a_bytes)`.
+pub async fn bidirectional_copy<A, B>(a: A, b: B) -> std::io::Result<(u64, u64)>
+where
+    A: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+    B: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    let (mut ar, mut aw) = tokio::io::split(a);
+    let (mut br, mut bw) = tokio::io::split(b);
+    let a_to_b = tokio::io::copy(&mut ar, &mut bw);
+    let b_to_a = tokio::io::copy(&mut br, &mut aw);
+    // When one direction hits EOF the other may get BrokenPipe — that's
+    // normal shutdown, not an error worth propagating.
+    let (r1, r2) = tokio::join!(a_to_b, b_to_a);
+    Ok((r1.unwrap_or(0), r2.unwrap_or(0)))
+}
+
 /// Run the lyrebird pluggable transport. Expects the standard
 /// `TOR_PT_*` environment variables set by the parent process (arti /
 /// tor) and speaks the PT-managed-transport protocol on stdin/stdout.
@@ -891,5 +908,46 @@ mod tests {
     fn arg_string_passwd_is_nul_only() {
         let creds = Some((String::new(), "\0".to_string()));
         assert_eq!(arg_string_from_creds(creds), "");
+    }
+
+    #[tokio::test]
+    async fn bidirectional_copy_proxies_data() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        // Two duplex pairs: proxy sits between them.
+        // a_client ↔ a_server ← bidirectional_copy → b_server ↔ b_client
+        let (mut a_client, a_server) = tokio::io::duplex(8192);
+        let (mut b_client, b_server) = tokio::io::duplex(8192);
+
+        let copy_task = tokio::spawn(async move {
+            bidirectional_copy(a_server, b_server).await.unwrap()
+        });
+
+        let msg_a_to_b = b"hello-from-A";
+        let msg_b_to_a = b"hello-from-B";
+
+        a_client.write_all(msg_a_to_b).await.unwrap();
+        b_client.write_all(msg_b_to_a).await.unwrap();
+        a_client.flush().await.unwrap();
+        b_client.flush().await.unwrap();
+
+        // Read what arrived on the other end
+        let mut buf_b = [0u8; 64];
+        let n = b_client.read(&mut buf_b).await.unwrap();
+        assert_eq!(&buf_b[..n], msg_a_to_b, "A→B data mismatch");
+
+        let mut buf_a = [0u8; 64];
+        let n = a_client.read(&mut buf_a).await.unwrap();
+        assert_eq!(&buf_a[..n], msg_b_to_a, "B→A data mismatch");
+
+        // Close both sides → copy finishes
+        drop(a_client);
+        drop(b_client);
+
+        let (n_ab, n_ba) = tokio::time::timeout(
+            std::time::Duration::from_secs(3), copy_task
+        ).await.unwrap().unwrap();
+        assert_eq!(n_ab, msg_a_to_b.len() as u64);
+        assert_eq!(n_ba, msg_b_to_a.len() as u64);
     }
 }
