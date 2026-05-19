@@ -461,6 +461,82 @@ mod testing {
     }
 
     #[test]
+    fn codec_tampered_ciphertext_rejected() -> Result<()> {
+        let km = [0x42u8; KEY_MATERIAL_LENGTH];
+        let mut enc = EncryptingCodec::new(km, km);
+        let mut dec = EncryptingCodec::new(km, km);
+
+        let msg = Messages::Payload(b"secret data".to_vec());
+        let mut marshalled = BytesMut::new();
+        msg.marshall(&mut marshalled).unwrap();
+
+        let mut encrypted = BytesMut::new();
+        enc.encode(marshalled, &mut encrypted)?;
+
+        // Flip a byte in the encrypted payload (after 2-byte length header)
+        if encrypted.len() > 4 {
+            encrypted[4] ^= 0xFF;
+        }
+
+        let result = dec.decode(&mut encrypted);
+        assert!(result.is_err(), "tampered ciphertext must be rejected");
+        Ok(())
+    }
+
+    #[test]
+    fn codec_mismatched_keys_fails_decrypt() -> Result<()> {
+        let km_enc = [0x11u8; KEY_MATERIAL_LENGTH];
+        let km_dec_wrong = [0x99u8; KEY_MATERIAL_LENGTH];
+        let mut enc = EncryptingCodec::new(km_enc, km_enc);
+        // Decoder uses wrong key material — cannot decrypt
+        let mut dec = EncryptingCodec::new(km_dec_wrong, km_dec_wrong);
+
+        let msg = Messages::Payload(b"test".to_vec());
+        let mut marshalled = BytesMut::new();
+        msg.marshall(&mut marshalled).unwrap();
+
+        let mut encrypted = BytesMut::new();
+        enc.encode(marshalled, &mut encrypted)?;
+
+        // The decode will fail: either the deobfuscated length is invalid
+        // (random-looking) or the decryption will fail with TagMismatch.
+        // In both cases it must not silently return data.
+        let mut attempts = encrypted.clone();
+        // Feed enough extra bytes to avoid the "waiting for more data" path
+        attempts.extend_from_slice(&[0u8; 2048]);
+        let result = dec.decode(&mut attempts);
+        // Either Err (crypto) or Ok(None) with next_length_invalid — never Ok(Some(..))
+        match result {
+            Ok(Some(m)) => panic!("mismatched keys produced plaintext: {m:?}"),
+            _ => {} // Err or Ok(None) — both acceptable
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn codec_truncated_frame_returns_none() -> Result<()> {
+        let km = [0xBB; KEY_MATERIAL_LENGTH];
+        let mut enc = EncryptingCodec::new(km, km);
+        let mut dec = EncryptingCodec::new(km, km);
+
+        let msg = Messages::Payload(b"data that will be truncated".to_vec());
+        let mut marshalled = BytesMut::new();
+        msg.marshall(&mut marshalled).unwrap();
+
+        let mut encrypted = BytesMut::new();
+        enc.encode(marshalled, &mut encrypted)?;
+
+        // Truncate: keep length header but only half the payload
+        let half = 2 + (encrypted.len() - 2) / 2;
+        encrypted.truncate(half);
+
+        // Decoder should return None (needs more data), not panic or corrupt
+        let result = dec.decode(&mut encrypted)?;
+        assert!(result.is_none(), "truncated frame must request more data");
+        Ok(())
+    }
+
+    #[test]
     fn codec_multiple_frames() -> Result<()> {
         let km1 = [0xAAu8; KEY_MATERIAL_LENGTH];
         let km2 = [0xAAu8; KEY_MATERIAL_LENGTH];

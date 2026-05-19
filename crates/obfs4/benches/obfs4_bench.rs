@@ -155,12 +155,30 @@ fn bench_codec_encrypt_decrypt(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_kdf(c: &mut Criterion) {
+fn bench_crypto(c: &mut Criterion) {
     use obfs4::common::drbg;
+    use obfs4::common::x25519_elligator2::{EphemeralSecret, PublicKey, PublicRepresentative};
 
     c.bench_function("ephemeral_key_generation", |b| {
         b.iter(|| {
-            black_box(obfs4::common::x25519_elligator2::EphemeralSecret::random());
+            black_box(EphemeralSecret::random());
+        });
+    });
+
+    c.bench_function("diffie_hellman_exchange", |b| {
+        let bob = EphemeralSecret::random();
+        let bob_pk = PublicKey::from(&bob);
+        b.iter(|| {
+            let alice = EphemeralSecret::random();
+            black_box(alice.diffie_hellman(&bob_pk));
+        });
+    });
+
+    c.bench_function("elligator2_representative_to_pubkey", |b| {
+        let secret = EphemeralSecret::random();
+        let repr = PublicRepresentative::from(&secret);
+        b.iter(|| {
+            black_box(PublicKey::from(&repr));
         });
     });
 
@@ -181,6 +199,6 @@ criterion_group!(
     bench_framing_build_and_marshall,
     bench_handshake_marshall,
     bench_codec_encrypt_decrypt,
-    bench_kdf,
+    bench_crypto,
 );
 criterion_main!(benches);
