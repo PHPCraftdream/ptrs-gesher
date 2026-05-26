@@ -506,9 +506,8 @@ mod testing {
         attempts.extend_from_slice(&[0u8; 2048]);
         let result = dec.decode(&mut attempts);
         // Either Err (crypto) or Ok(None) with next_length_invalid — never Ok(Some(..))
-        match result {
-            Ok(Some(m)) => panic!("mismatched keys produced plaintext: {m:?}"),
-            _ => {} // Err or Ok(None) — both acceptable
+        if let Ok(Some(m)) = result {
+            panic!("mismatched keys produced plaintext: {m:?}")
         }
         Ok(())
     }
@@ -571,13 +570,7 @@ mod testing {
                 let km = [0x42u8; KEY_MATERIAL_LENGTH];
                 let mut codec = EncryptingCodec::new(km, km);
                 let mut buf = BytesMut::from(&bytes[..]);
-                for _ in 0..3 {
-                    match codec.decode(&mut buf) {
-                        Ok(None) => break,
-                        Ok(Some(_)) => break,
-                        Err(_) => break,
-                    }
-                }
+                let _ = codec.decode(&mut buf);
             }
 
             #[test]

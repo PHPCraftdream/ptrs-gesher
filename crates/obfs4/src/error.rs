@@ -195,9 +195,7 @@ mod tests {
 
     #[test]
     fn test_display_io_error() {
-        let err = Error::IOError(std::io::Error::other(
-            "some io error",
-        ));
+        let err = Error::IOError(std::io::Error::other("some io error"));
         assert_eq!(format!("{}", err), "some io error");
     }
 
@@ -232,9 +230,7 @@ mod tests {
 
     #[test]
     fn test_from_other_error() {
-        let other_err = Box::new(std::io::Error::other(
-            "some other error",
-        ));
+        let other_err = Box::new(std::io::Error::other("some other error"));
         let err = Error::from(other_err);
         assert_eq!(format!("{}", err), "some other error");
     }

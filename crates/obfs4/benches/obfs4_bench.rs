@@ -131,7 +131,10 @@ fn bench_codec_encrypt_decrypt(c: &mut Criterion) {
             b.iter(|| {
                 let mut dst = bytes::BytesMut::with_capacity(size + 64);
                 codec
-                    .encode(bytes::BytesMut::from(black_box(payload.as_slice())), &mut dst)
+                    .encode(
+                        bytes::BytesMut::from(black_box(payload.as_slice())),
+                        &mut dst,
+                    )
                     .unwrap();
                 black_box(dst);
             });

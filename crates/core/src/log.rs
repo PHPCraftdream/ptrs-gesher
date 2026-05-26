@@ -1,3 +1,4 @@
+/// Trace-level logging (gated on `test` or `debug` feature).
 #[macro_export]
 macro_rules! trace {
     ($($tts:tt)*) => {
@@ -6,6 +7,7 @@ macro_rules! trace {
     }
 }
 
+/// Debug-level logging (gated on `test` or `debug` feature).
 #[macro_export]
 macro_rules! debug {
     ($($tts:tt)*) => {
@@ -14,6 +16,7 @@ macro_rules! debug {
     }
 }
 
+/// Warning-level logging.
 #[macro_export]
 macro_rules! warn {
     ($($tts:tt)*) => {
@@ -21,6 +24,7 @@ macro_rules! warn {
     }
 }
 
+/// Info-level logging.
 #[macro_export]
 macro_rules! info {
     ($($tts:tt)*) => {
@@ -28,6 +32,7 @@ macro_rules! info {
     }
 }
 
+/// Error-level logging.
 #[macro_export]
 macro_rules! error {
     ($($tts:tt)*) => {
@@ -35,6 +40,7 @@ macro_rules! error {
     }
 }
 
+/// Trace-level span (gated on `test` or `debug` feature).
 #[macro_export]
 macro_rules! trace_span {
     ($($tts:tt)*) => {
@@ -43,6 +49,7 @@ macro_rules! trace_span {
     }
 }
 
+/// Debug-level span (gated on `test` or `debug` feature).
 #[macro_export]
 macro_rules! debug_span {
     ($($tts:tt)*) => {
@@ -51,6 +58,7 @@ macro_rules! debug_span {
     }
 }
 
+/// Warning-level span.
 #[macro_export]
 macro_rules! warn_span {
     ($($tts:tt)*) => {
@@ -58,6 +66,7 @@ macro_rules! warn_span {
     }
 }
 
+/// Info-level span.
 #[macro_export]
 macro_rules! info_span {
     ($($tts:tt)*) => {
@@ -65,6 +74,7 @@ macro_rules! info_span {
     }
 }
 
+/// Error-level span.
 #[macro_export]
 macro_rules! error_span {
     ($($tts:tt)*) => {

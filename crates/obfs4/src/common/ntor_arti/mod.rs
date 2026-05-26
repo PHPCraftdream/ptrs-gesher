@@ -194,8 +194,12 @@ mod tests {
 
     #[test]
     fn shake_key_generator_different_seeds_differ() {
-        let r1 = ShakeKeyGenerator::new(vec![0x01; 32].into()).expand(32).unwrap();
-        let r2 = ShakeKeyGenerator::new(vec![0x02; 32].into()).expand(32).unwrap();
+        let r1 = ShakeKeyGenerator::new(vec![0x01; 32].into())
+            .expand(32)
+            .unwrap();
+        let r2 = ShakeKeyGenerator::new(vec![0x02; 32].into())
+            .expand(32)
+            .unwrap();
         assert_ne!(&r1[..], &r2[..]);
     }
 
@@ -206,5 +210,4 @@ mod tests {
         let long = ShakeKeyGenerator::new(seed).expand(64).unwrap();
         assert_eq!(&short[..], &long[..16]);
     }
-
 }

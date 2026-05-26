@@ -7,8 +7,8 @@ use std::time::Duration;
 use ptrs::args::Args;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use webtunnel::WebTunnelConfig;
 use webtunnel::handshake::connect;
+use webtunnel::WebTunnelConfig;
 
 async fn make_config(port: u16) -> WebTunnelConfig {
     let mut args = Args::new();
@@ -111,8 +111,8 @@ async fn webtunnel_leftover_bytes_in_prefix() {
         let mut buf = [0u8; 4096];
         let _ = sock.read(&mut buf).await.unwrap();
 
-        let mut response = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n"
-            .to_vec();
+        let mut response =
+            b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n".to_vec();
         response.extend_from_slice(&extra_clone);
         sock.write_all(&response).await.unwrap();
         sock.flush().await.unwrap();
@@ -130,7 +130,11 @@ async fn webtunnel_leftover_bytes_in_prefix() {
         .await
         .expect("read timed out")
         .unwrap();
-    assert_eq!(&buf[..n], extra, "leftover bytes must be preserved in PrefixStream");
+    assert_eq!(
+        &buf[..n],
+        extra,
+        "leftover bytes must be preserved in PrefixStream"
+    );
 }
 
 #[tokio::test]
@@ -154,5 +158,8 @@ async fn webtunnel_oversized_headers_rejected() {
 
     let config = make_config(port).await;
     let result = connect(&config).await;
-    assert!(result.is_err(), "oversized response headers must be rejected");
+    assert!(
+        result.is_err(),
+        "oversized response headers must be rejected"
+    );
 }

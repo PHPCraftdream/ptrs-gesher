@@ -14,10 +14,6 @@ proptest! {
         let km = [0x42u8; KEY_MATERIAL_LENGTH];
         let mut codec = Obfs4Codec::new(km, km);
         let mut buf = BytesMut::from(&bytes[..]);
-        for _ in 0..3 {
-            match codec.decode(&mut buf) {
-                Ok(None) | Ok(Some(_)) | Err(_) => break,
-            }
-        }
+        let _ = codec.decode(&mut buf);
     }
 }

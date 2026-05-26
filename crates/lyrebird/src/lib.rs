@@ -82,10 +82,13 @@
 //!   - use the better copy interactive for bidirectional copy
 
 #![allow(unused, dead_code)]
+#![deny(missing_docs)]
 
 use obfs4::{ClientBuilder, Obfs4PT};
 use ptrs::{error, info, warn};
-use ptrs::{ClientBuilder as _, ClientTransport, PluggableTransport, ServerBuilder, ServerTransport};
+use ptrs::{
+    ClientBuilder as _, ClientTransport, PluggableTransport, ServerBuilder, ServerTransport,
+};
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
@@ -157,8 +160,8 @@ fn init_logging_recvr(
     // filter mutes the chatty `fast_socks5` connection log; arti is
     // the one bashing through dozens of PT connections during
     // bootstrap and the per-conn lines drown the relevant signal.
-    let console_filter = tracing_subscriber::EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| {
+    let console_filter =
+        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
             tracing_subscriber::EnvFilter::new(
                 "info,fast_socks5=warn,obfs4::sessions=warn,lyrebird::handshake=info",
             )
@@ -336,8 +339,9 @@ async fn client_setup(
     // PT spec §3.3.3: announce our protocol version to the parent.
     pt_proto::print_version();
 
-    let mut listeners: Vec<std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>> =
-        Vec::new();
+    let mut listeners: Vec<
+        std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>,
+    > = Vec::new();
 
     for name in client_pt_info.methods {
         info!(name);
@@ -451,8 +455,9 @@ where
     // (auth method 0x02) and pack the per-bridge PT arguments into the
     // UNAME/PASSWD fields. We accept any creds (and also accept clients
     // that legitimately want NO_AUTH) — see `PtArgsAuth` below.
-    let mut config = fast_socks5::server::Config::<fast_socks5::server::DenyAuthentication>::default()
-        .with_authentication(PtArgsAuth);
+    let mut config =
+        fast_socks5::server::Config::<fast_socks5::server::DenyAuthentication>::default()
+            .with_authentication(PtArgsAuth);
     config.set_allow_no_auth(true);
     let socks5_conn = fast_socks5::server::Socks5Socket::new(conn, Arc::new(config));
 
@@ -753,10 +758,7 @@ struct PtArgsAuth;
 impl fast_socks5::server::Authentication for PtArgsAuth {
     type Item = (String, String);
 
-    async fn authenticate(
-        &self,
-        credentials: Option<(String, String)>,
-    ) -> Option<Self::Item> {
+    async fn authenticate(&self, credentials: Option<(String, String)>) -> Option<Self::Item> {
         // Propagate creds untouched. `None` (NO_AUTH path) is also fine —
         // we let it through as empty strings so the same plumbing applies.
         Some(credentials.unwrap_or_default())
@@ -893,7 +895,10 @@ mod tests {
     fn resolve_target_addr_domain_fails() {
         let addr = TargetAddr::Domain("example.com".into(), 443);
         let err = resolve_target_addr(&addr);
-        assert!(err.is_err(), "domain resolution should fail (PT doesn't do DNS)");
+        assert!(
+            err.is_err(),
+            "domain resolution should fail (PT doesn't do DNS)"
+        );
     }
 
     // -- arg_string edge cases --
@@ -919,9 +924,8 @@ mod tests {
         let (mut a_client, a_server) = tokio::io::duplex(8192);
         let (mut b_client, b_server) = tokio::io::duplex(8192);
 
-        let copy_task = tokio::spawn(async move {
-            bidirectional_copy(a_server, b_server).await.unwrap()
-        });
+        let copy_task =
+            tokio::spawn(async move { bidirectional_copy(a_server, b_server).await.unwrap() });
 
         let msg_a_to_b = b"hello-from-A";
         let msg_b_to_a = b"hello-from-B";
@@ -944,9 +948,10 @@ mod tests {
         drop(a_client);
         drop(b_client);
 
-        let (n_ab, n_ba) = tokio::time::timeout(
-            std::time::Duration::from_secs(3), copy_task
-        ).await.unwrap().unwrap();
+        let (n_ab, n_ba) = tokio::time::timeout(std::time::Duration::from_secs(3), copy_task)
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(n_ab, msg_a_to_b.len() as u64);
         assert_eq!(n_ba, msg_b_to_a.len() as u64);
     }

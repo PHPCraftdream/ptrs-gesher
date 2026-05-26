@@ -82,11 +82,6 @@ pub fn pipes_async() -> Result<(
 #[cfg(test)]
 mod test {
 
-    
-    
-
-    
-
     #[cfg(unix)]
     #[tokio::test]
     async fn build_async_pipes() {

@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 #![doc = include_str!("../README.md")]
 
 use std::{
@@ -16,20 +17,26 @@ pub mod args;
 mod helpers;
 pub use helpers::*;
 mod log;
+/// ORPort authentication and connection helpers.
 pub mod orport;
 
+/// Core trait for a pluggable transport, defining its builder types.
 pub trait PluggableTransport<InRW>
 where
     InRW: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
 {
+    /// The client-side builder type for this transport.
     type ClientBuilder: ClientBuilder<InRW>;
+    /// The server-side builder type for this transport.
     type ServerBuilder: ServerBuilder<InRW>;
 
     /// Returns a string identifier for this transport
     fn name() -> String;
 
+    /// Return a fresh client builder for this transport.
     fn client_builder() -> <Self as PluggableTransport<InRW>>::ClientBuilder;
 
+    /// Return a fresh server builder for this transport.
     fn server_builder() -> <Self as PluggableTransport<InRW>>::ServerBuilder;
 }
 
@@ -44,8 +51,11 @@ pub trait ClientBuilder<InRW>: Default + Clone
 where
     InRW: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
 {
+    /// Error type produced by builder methods.
     type Error: std::error::Error + Send + Sync;
+    /// The client transport produced by [`build`](ClientBuilder::build).
     type ClientPT: ClientTransport<InRW, Self::Error>;
+    /// The underlying transport type (used for associated-type matching).
     type Transport;
 
     /// Returns a string identifier for this transport
@@ -84,8 +94,11 @@ pub trait ClientTransport<InRW, InErr>
 where
     InRW: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
 {
+    /// Output stream type produced by the transport.
     type OutRW: AsyncRead + AsyncWrite + Send + Unpin;
+    /// Error type produced by the transport.
     type OutErr: std::error::Error + Send + Sync;
+    /// The builder type that creates this transport.
     type Builder: ClientBuilder<InRW>;
 
     /// Create a pluggable transport connection given a future that will return
@@ -112,8 +125,11 @@ pub trait ServerTransport<InRW>
 where
     InRW: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
 {
+    /// Output stream type produced by the server transport.
     type OutRW: AsyncRead + AsyncWrite + Send + Unpin;
+    /// Error type produced by the server transport.
     type OutErr: std::error::Error + Send + Sync;
+    /// The builder type that creates this transport.
     type Builder: ServerBuilder<InRW>;
 
     /// Create/accept a connection for the pluggable transport client using the
@@ -134,8 +150,11 @@ pub trait ServerBuilder<InRW>: Default
 where
     InRW: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
 {
+    /// The server transport produced by [`build`](ServerBuilder::build).
     type ServerPT: ServerTransport<InRW>;
+    /// Error type produced by builder methods.
     type Error: std::error::Error;
+    /// The underlying transport type (used for associated-type matching).
     type Transport;
 
     /// Returns a string identifier for this transport
@@ -182,10 +201,14 @@ where
 /// Creator1 defines a stream creator that could be applied to either the input
 /// stream feature or the resulting stream future making them composable.
 pub trait Conn {
+    /// Output connection type.
     type OutRW;
+    /// Error type for the connection future.
     type OutErr;
+    /// Future that resolves to the connected stream.
     type Future: Future<Output = Result<Self::OutRW, Self::OutErr>>;
 
+    /// Create a new connection future.
     fn new() -> Self::Future;
 }
 
@@ -193,10 +216,12 @@ pub trait Conn {
 /// the client / server traits for creating connections / pluggable transports.
 /// this is still in a TODO state.
 pub trait ConnectExt: Conn {
+    /// Connect with an absolute deadline.
     fn connect_with_deadline(
         &mut self,
         deadline: Instant,
     ) -> Result<Self::Future, tokio::time::error::Elapsed>;
+    /// Connect with a relative timeout.
     fn connect_with_timeout(
         &mut self,
         timeout: Duration,
@@ -234,8 +259,10 @@ pub type FutureResult<T, E> = Box<dyn Future<Output = Result<T, E>> + Send>;
 /// Read/Write tunnels once awaited.
 pub(crate) type F<T, E> = FutureResult<T, E>;
 
+/// Future resolving to a TCP stream or its error.
 pub type TcpStreamFut = Pin<FutureResult<tokio::net::TcpStream, std::io::Error>>;
 
+/// Future resolving to a UDP socket or its error.
 pub type UdpSocketFut = Pin<FutureResult<tokio::net::UdpSocket, std::io::Error>>;
 
 #[cfg(test)]

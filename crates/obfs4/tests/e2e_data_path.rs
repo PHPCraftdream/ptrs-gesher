@@ -41,13 +41,10 @@ async fn large_buffer_split_preserves_all_bytes() {
     let mut received = Vec::with_capacity(size);
     let mut buf = [0u8; 4096];
     loop {
-        let n = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            r.read(&mut buf),
-        )
-        .await
-        .expect("read timed out")
-        .expect("read failed");
+        let n = tokio::time::timeout(std::time::Duration::from_secs(10), r.read(&mut buf))
+            .await
+            .expect("read timed out")
+            .expect("read failed");
         if n == 0 {
             break;
         }
@@ -96,16 +93,17 @@ async fn sequential_varied_sizes_echo() {
     let mut received = Vec::with_capacity(total);
     let mut buf = [0u8; 8192];
     loop {
-        let n = tokio::time::timeout(
-            std::time::Duration::from_secs(10),
-            r.read(&mut buf),
-        )
-        .await
-        .expect("read timed out")
-        .expect("read error");
-        if n == 0 { break; }
+        let n = tokio::time::timeout(std::time::Duration::from_secs(10), r.read(&mut buf))
+            .await
+            .expect("read timed out")
+            .expect("read error");
+        if n == 0 {
+            break;
+        }
         received.extend_from_slice(&buf[..n]);
-        if received.len() >= total { break; }
+        if received.len() >= total {
+            break;
+        }
     }
 
     // Rebuild expected payload from same pattern

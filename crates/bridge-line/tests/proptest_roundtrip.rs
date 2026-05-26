@@ -5,10 +5,7 @@ use bridge_line::BridgeLine;
 use proptest::prelude::*;
 
 fn arb_transport() -> impl Strategy<Value = Option<String>> {
-    prop_oneof![
-        Just(None),
-        "[a-z][a-z0-9_-]{0,15}".prop_map(Some),
-    ]
+    prop_oneof![Just(None), "[a-z][a-z0-9_-]{0,15}".prop_map(Some),]
 }
 
 fn arb_socket_addr() -> impl Strategy<Value = SocketAddr> {
@@ -18,29 +15,26 @@ fn arb_socket_addr() -> impl Strategy<Value = SocketAddr> {
 }
 
 fn arb_fingerprint() -> impl Strategy<Value = Option<String>> {
-    prop_oneof![
-        Just(None),
-        "[0-9A-F]{40}".prop_map(Some),
-    ]
+    prop_oneof![Just(None), "[0-9A-F]{40}".prop_map(Some),]
 }
 
 fn arb_params() -> impl Strategy<Value = BTreeMap<String, String>> {
-    prop::collection::btree_map(
-        "[a-z][a-z0-9-]{0,10}",
-        "[a-zA-Z0-9/+]{1,50}",
-        0..5,
-    )
+    prop::collection::btree_map("[a-z][a-z0-9-]{0,10}", "[a-zA-Z0-9/+]{1,50}", 0..5)
 }
 
 fn arb_bridge_line() -> impl Strategy<Value = BridgeLine> {
-    (arb_transport(), arb_socket_addr(), arb_fingerprint(), arb_params()).prop_map(
-        |(transport, addr, fingerprint, params)| BridgeLine {
+    (
+        arb_transport(),
+        arb_socket_addr(),
+        arb_fingerprint(),
+        arb_params(),
+    )
+        .prop_map(|(transport, addr, fingerprint, params)| BridgeLine {
             transport,
             addr,
             fingerprint,
             params,
-        },
-    )
+        })
 }
 
 proptest! {

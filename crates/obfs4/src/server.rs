@@ -393,10 +393,7 @@ mod tests {
         assert_eq!(sb.statefile_path.as_deref(), Some("/tmp/state"));
 
         sb.node_id([0xAA; NODE_ID_LENGTH]);
-        assert_eq!(
-            sb.identity_keys.pk.id.as_bytes(),
-            &[0xAA; NODE_ID_LENGTH]
-        );
+        assert_eq!(sb.identity_keys.pk.id.as_bytes(), &[0xAA; NODE_ID_LENGTH]);
     }
 
     #[test]
@@ -449,7 +446,10 @@ mod tests {
     fn validate_args_valid() {
         let mut args = Args::new();
         args.add(NODE_ID_ARG, "0000000000000000000000000000000000000000");
-        args.add(PRIVATE_KEY_ARG, "0123456789abcdeffedcba98765432100123456789abcdeffedcba9876543210");
+        args.add(
+            PRIVATE_KEY_ARG,
+            "0123456789abcdeffedcba98765432100123456789abcdeffedcba9876543210",
+        );
         args.add(SEED_ARG, "0a0b0c0d0e0f0a0b0c0d0e0f0a0b0c0d0e0f0a0b0c0d0e0f");
         args.add(IAT_ARG, "0");
         let result = ServerBuilder::<TcpStream>::validate_args(&args);
@@ -459,7 +459,8 @@ mod tests {
     #[test]
     fn parse_json_state_invalid_json() {
         let mut args = Args::new();
-        let result = ServerBuilder::<TcpStream>::server_state_from_json("not json".as_bytes(), &mut args);
+        let result =
+            ServerBuilder::<TcpStream>::server_state_from_json("not json".as_bytes(), &mut args);
         assert!(result.is_err());
     }
 

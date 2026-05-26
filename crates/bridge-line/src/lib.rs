@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 //! Parser for Tor bridge lines (the `torrc` Bridge directive format).
 //!
 //! Grammar (informal):
@@ -56,20 +57,40 @@ pub struct BridgeLine {
     pub params: BTreeMap<String, String>,
 }
 
+/// Errors produced when parsing a bridge line.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
 pub enum ParseError {
+    /// The input string was empty.
     #[error("empty bridge line")]
     Empty,
+    /// No host:port token was found.
     #[error("missing host:port")]
     MissingAddress,
+    /// The host:port token could not be parsed.
     #[error("invalid host:port {addr:?}")]
-    InvalidAddress { addr: String },
+    InvalidAddress {
+        /// The token that failed to parse.
+        addr: String,
+    },
+    /// The fingerprint is not 40 hex characters.
     #[error("invalid fingerprint {value:?}: must be 40 hex characters")]
-    InvalidFingerprint { value: String },
+    InvalidFingerprint {
+        /// The token that was rejected.
+        value: String,
+    },
+    /// A parameter token does not contain `=`.
     #[error("invalid parameter {token:?}: expected key=value")]
-    InvalidParam { token: String },
+    InvalidParam {
+        /// The token that failed to parse.
+        token: String,
+    },
+    /// The transport name contains disallowed characters.
     #[error("invalid transport name {name:?}")]
-    InvalidTransport { name: String },
+    InvalidTransport {
+        /// The name that was rejected.
+        name: String,
+    },
+    /// More than one fingerprint was found in a single line.
     #[error("multiple fingerprints in one line")]
     DuplicateFingerprint,
 }
@@ -161,7 +182,9 @@ fn looks_like_address(s: &str) -> bool {
 }
 
 fn is_valid_transport_name(s: &str) -> bool {
-    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
 fn is_hex_fingerprint(s: &str) -> bool {
@@ -228,8 +251,7 @@ mod tests {
 
     #[test]
     fn parses_ipv6_with_transport() {
-        let line =
-            "obfs4 [2001:db8::1]:443 ABCDEF0123456789ABCDEF0123456789ABCDEF01 iat-mode=0";
+        let line = "obfs4 [2001:db8::1]:443 ABCDEF0123456789ABCDEF0123456789ABCDEF01 iat-mode=0";
         let b: BridgeLine = line.parse().unwrap();
         assert_eq!(b.transport.as_deref(), Some("obfs4"));
         assert_eq!(b.addr.to_string(), "[2001:db8::1]:443");
@@ -316,7 +338,10 @@ mod tests {
         let line = "webtunnel 192.0.2.3:1 ABCDEF0123456789ABCDEF0123456789ABCDEF01 url=https://example.com/secret ver=0.0.3";
         let b: BridgeLine = line.parse().unwrap();
         assert_eq!(b.transport.as_deref(), Some("webtunnel"));
-        assert_eq!(b.params.get("url").map(String::as_str), Some("https://example.com/secret"));
+        assert_eq!(
+            b.params.get("url").map(String::as_str),
+            Some("https://example.com/secret")
+        );
     }
 
     #[test]
@@ -340,11 +365,8 @@ mod proptests {
     }
 
     fn arb_fingerprint() -> impl Strategy<Value = String> {
-        proptest::collection::vec(
-            proptest::string::string_regex("[0-9A-F]").unwrap(),
-            40..=40,
-        )
-        .prop_map(|v| v.join(""))
+        proptest::collection::vec(proptest::string::string_regex("[0-9A-F]").unwrap(), 40..=40)
+            .prop_map(|v| v.join(""))
     }
 
     fn arb_transport() -> impl Strategy<Value = String> {

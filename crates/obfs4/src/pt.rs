@@ -256,7 +256,13 @@ mod test {
     fn client_options_with_cert_parses_pubkey_and_iat() {
         let mut cb = crate::ClientBuilder::default();
         let mut args = Args::new();
-        let cert = crate::dev::CLIENT_ARGS.split("cert=").nth(1).unwrap().split(";").next().unwrap();
+        let cert = crate::dev::CLIENT_ARGS
+            .split("cert=")
+            .nth(1)
+            .unwrap()
+            .split(";")
+            .next()
+            .unwrap();
         args.add(CERT_ARG, cert);
         args.add(IAT_ARG, "2");
         <crate::ClientBuilder as ptrs::ClientBuilder<TcpStream>>::options(&mut cb, &args).unwrap();
@@ -270,7 +276,13 @@ mod test {
     fn client_options_invalid_iat_rejected() {
         let mut cb = crate::ClientBuilder::default();
         let mut args = Args::new();
-        let cert = crate::dev::CLIENT_ARGS.split("cert=").nth(1).unwrap().split(";").next().unwrap();
+        let cert = crate::dev::CLIENT_ARGS
+            .split("cert=")
+            .nth(1)
+            .unwrap()
+            .split(";")
+            .next()
+            .unwrap();
         args.add(CERT_ARG, cert);
         args.add(IAT_ARG, "99");
         let result =
@@ -304,7 +316,10 @@ mod test {
         let mut cb = crate::ClientBuilder::default();
         let mut args = Args::new();
         args.add(NODE_ID_ARG, "0000000000000000000000000000000000000000");
-        args.add(PUBLIC_KEY_ARG, "0000000000000000000000000000000000000000000000000000000000000000");
+        args.add(
+            PUBLIC_KEY_ARG,
+            "0000000000000000000000000000000000000000000000000000000000000000",
+        );
         let result =
             <crate::ClientBuilder as ptrs::ClientBuilder<TcpStream>>::options(&mut cb, &args);
         assert!(result.is_err());
@@ -317,7 +332,8 @@ mod test {
         let args = Args::parse_client_parameters(crate::dev::SERVER_ARGS).unwrap();
         <crate::ServerBuilder<TcpStream> as ptrs::ServerBuilder<TcpStream>>::options(
             &mut sb, &args,
-        ).unwrap();
+        )
+        .unwrap();
         // identity_keys must have been overwritten from the dev key
         assert_ne!(sb.identity_keys.pk.id, original_id);
     }
@@ -326,10 +342,9 @@ mod test {
     fn server_options_missing_args() {
         let mut sb = crate::ServerBuilder::<TcpStream>::default();
         let args = Args::new();
-        let result =
-            <crate::ServerBuilder<TcpStream> as ptrs::ServerBuilder<TcpStream>>::options(
-                &mut sb, &args,
-            );
+        let result = <crate::ServerBuilder<TcpStream> as ptrs::ServerBuilder<TcpStream>>::options(
+            &mut sb, &args,
+        );
         assert!(result.is_err());
     }
 

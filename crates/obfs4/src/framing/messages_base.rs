@@ -71,7 +71,7 @@ mod tests {
     #[test]
     fn build_basic_payload() {
         let mut buf = BytesMut::new();
-        build_and_marshall(&mut buf, 0x01, &[0xAA, 0xBB], 0).unwrap();
+        build_and_marshall(&mut buf, 0x01, [0xAA, 0xBB], 0).unwrap();
         // type(1) + length(2) + payload(2) = 5
         assert_eq!(buf.len(), 5);
         assert_eq!(buf[0], 0x01); // type
@@ -84,7 +84,7 @@ mod tests {
     #[test]
     fn build_with_padding() {
         let mut buf = BytesMut::new();
-        build_and_marshall(&mut buf, 0x02, &[0xFF], 3).unwrap();
+        build_and_marshall(&mut buf, 0x02, [0xFF], 3).unwrap();
         // type(1) + length(2) + payload(1) + padding(3) = 7
         assert_eq!(buf.len(), 7);
         assert_eq!(buf[0], 0x02);
@@ -95,7 +95,7 @@ mod tests {
     #[test]
     fn build_empty_payload_no_padding() {
         let mut buf = BytesMut::new();
-        build_and_marshall(&mut buf, 0x00, &[], 0).unwrap();
+        build_and_marshall(&mut buf, 0x00, [].as_slice(), 0).unwrap();
         assert_eq!(buf.len(), 3); // type + length(0)
         assert_eq!(buf[1], 0x00);
         assert_eq!(buf[2], 0x00);
@@ -104,7 +104,7 @@ mod tests {
     #[test]
     fn build_empty_payload_with_padding() {
         let mut buf = BytesMut::new();
-        build_and_marshall(&mut buf, 0x00, &[], 5).unwrap();
+        build_and_marshall(&mut buf, 0x00, [].as_slice(), 5).unwrap();
         assert_eq!(buf.len(), 8); // type(1) + length(2) + padding(5)
     }
 
@@ -112,14 +112,14 @@ mod tests {
     fn build_rejects_oversized_total() {
         let mut buf = BytesMut::new();
         let big_payload = vec![0u8; MAX_MESSAGE_PAYLOAD_LENGTH];
-        let result = build_and_marshall(&mut buf, 0x01, &big_payload, 0);
+        let result = build_and_marshall(&mut buf, 0x01, big_payload, 0);
         assert!(result.is_err());
     }
 
     #[test]
     fn build_rejects_oversized_padding() {
         let mut buf = BytesMut::new();
-        let result = build_and_marshall(&mut buf, 0x01, &[], u16::MAX as usize + 1);
+        let result = build_and_marshall(&mut buf, 0x01, [].as_slice(), u16::MAX as usize + 1);
         assert!(result.is_err());
     }
 
@@ -127,7 +127,7 @@ mod tests {
     fn build_max_valid_payload() {
         let mut buf = BytesMut::new();
         let payload = vec![0u8; MAX_MESSAGE_PAYLOAD_LENGTH - 1];
-        build_and_marshall(&mut buf, 0x01, &payload, 0).unwrap();
+        build_and_marshall(&mut buf, 0x01, payload, 0).unwrap();
         assert_eq!(buf.len(), 3 + MAX_MESSAGE_PAYLOAD_LENGTH - 1);
     }
 

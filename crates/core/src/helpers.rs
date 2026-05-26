@@ -3,33 +3,40 @@ use crate::{
     debug,
 };
 
-use std::{
-    env,
-    fs::DirBuilder,
-    io::{Error, ErrorKind},
-    net::SocketAddr,
-    str::FromStr,
-};
 #[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt;
+use std::{env, fs::DirBuilder, io::Error, net::SocketAddr, str::FromStr};
 
 use itertools::Itertools;
 use tokio::net::TcpStream;
 use url::Url;
 
+/// PT-spec environment variable names and current protocol version.
 pub mod constants {
+    /// The only managed-transport protocol version we support.
     pub const CURRENT_TRANSPORT_VER: &str = "1";
 
+    /// `TOR_PT_MANAGED_TRANSPORT_VER`
     pub const MANAGED_VER: &str = "TOR_PT_MANAGED_TRANSPORT_VER";
+    /// `TOR_PT_STATE_LOCATION`
     pub const STATE_LOCATION: &str = "TOR_PT_STATE_LOCATION";
+    /// `TOR_PT_CLIENT_TRANSPORTS`
     pub const CLIENT_TRANSPORTS: &str = "TOR_PT_CLIENT_TRANSPORTS";
+    /// `TOR_PT_PROXY`
     pub const PROXY: &str = "TOR_PT_PROXY";
+    /// `TOR_PT_SERVER_TRANSPORTS`
     pub const SERVER_TRANSPORTS: &str = "TOR_PT_SERVER_TRANSPORTS";
+    /// `TOR_PT_SERVER_TRANSPORT_OPTIONS`
     pub const SERVER_TRANSPORT_OPTIONS: &str = "TOR_PT_SERVER_TRANSPORT_OPTIONS";
+    /// `TOR_PT_SERVER_BINDADDR`
     pub const SERVER_BINDADDR: &str = "TOR_PT_SERVER_BINDADDR";
+    /// `TOR_PT_AUTH_COOKIE_FILE`
     pub const AUTH_COOKIE_FILE: &str = "TOR_PT_AUTH_COOKIE_FILE";
+    /// `TOR_PT_ORPORT`
     pub const ORPORT: &str = "TOR_PT_ORPORT";
+    /// `TOR_PT_EXTENDED_SERVER_PORT`
     pub const EXTENDED_SERVER_PORT: &str = "TOR_PT_EXTENDED_SERVER_PORT";
+    /// `TOR_PT_EXIT_ON_STDIN_CLOSE`
     pub const EXIT_ON_STDIN_CLOSE: &str = "TOR_PT_EXIT_ON_STDIN_CLOSE";
 }
 
@@ -95,12 +102,16 @@ pub fn pt_should_exit_on_stdin_close() -> bool {
 //                            Client                                //
 // ================================================================ //
 
+/// Client-side PT configuration read from the environment.
 pub struct ClientInfo {
+    /// Transport names requested by the parent process.
     pub methods: Vec<String>,
+    /// Optional upstream proxy URL.
     pub uri: Option<Url>,
 }
 
 impl ClientInfo {
+    /// Read client info from `TOR_PT_*` environment variables.
     pub fn new() -> Result<Self, Error> {
         let _ver = get_managed_transport_ver()?;
         debug!("VERSION {_ver}");
@@ -270,13 +281,18 @@ pub(crate) fn validate_proxy_url(spec: &Url) -> Result<(), Error> {
 ///```
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct ServerInfo {
+    /// Parsed bind addresses for each server transport.
     pub bind_addrs: Vec<Bindaddr>,
+    /// Tor ORPort address.
     pub or_addr: Option<SocketAddr>,
+    /// Extended ORPort address.
     pub extended_or_addr: Option<SocketAddr>,
+    /// Path to the auth cookie file.
     pub auth_cookie_path: Option<String>,
 }
 
 impl ServerInfo {
+    /// Connect to the Tor ORPort (or extended ORPort if set).
     pub async fn connect_to_or(&self) -> Result<TcpStream, Error> {
         let conn = match self.or_addr {
             Some(addr) => TcpStream::connect(addr).await?,
@@ -294,6 +310,7 @@ impl ServerInfo {
 }
 
 impl ServerInfo {
+    /// Read server info from `TOR_PT_*` environment variables.
     pub fn new() -> Result<Self, Error> {
         let _ver = get_managed_transport_ver()?;
         debug!("VERSION {_ver}");
@@ -340,14 +357,16 @@ impl ServerInfo {
 /// A combination of a method name and an address, as extracted from `TOR_PT_SERVER_BINDADDR`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Bindaddr {
+    /// Transport method name (e.g. `obfs4`).
     pub method_name: String,
+    /// Address to bind/listen on.
     pub addr: SocketAddr,
-    // Options from TOR_PT_SERVER_TRANSPORT_OPTIONS that pertain to this
-    // transport.
+    /// Per-transport options from `TOR_PT_SERVER_TRANSPORT_OPTIONS`.
     pub options: Args,
 }
 
 impl Bindaddr {
+    /// Construct a new `Bindaddr` from its components.
     pub fn new(method: &str, addr: SocketAddr, options: Args) -> Self {
         Self {
             method_name: method.into(),
@@ -431,6 +450,7 @@ fn filter_bindaddrs(addrs: Vec<Bindaddr>, methods: &[&str]) -> Vec<Bindaddr> {
         .collect()
 }
 
+/// Parse a `host:port` string into a `SocketAddr`, rejecting unspecified hosts and port 0.
 pub fn resolve_addr(addr: impl AsRef<str>) -> Result<SocketAddr, Error> {
     let a = addr.as_ref();
     match SocketAddr::from_str(a) {
@@ -449,7 +469,7 @@ pub fn resolve_addr(addr: impl AsRef<str>) -> Result<SocketAddr, Error> {
 }
 
 fn to_io_other(e: impl std::fmt::Display) -> Error {
-    Error::new(ErrorKind::Other, format!("{e}"))
+    Error::other(format!("{e}"))
 }
 
 #[cfg(test)]

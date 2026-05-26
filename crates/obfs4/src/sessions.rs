@@ -450,6 +450,61 @@ impl ServerSession<Initialized> {
     }
 }
 
+impl Server {
+    /// Complete the handshake with the client. This function assumes that the
+    /// client has already sent a message and that we do not know yet if the
+    /// message is valid.
+    async fn complete_handshake<T>(
+        &self,
+        mut stream: T,
+        materials: SHSMaterials,
+        deadline: Option<Instant>,
+    ) -> Result<impl Obfs4Keygen>
+    where
+        T: AsyncRead + AsyncWrite + Unpin,
+    {
+        let session_id = materials.session_id.clone();
+
+        // wait for and attempt to consume the client hello message
+        let mut buf = [0_u8; MAX_HANDSHAKE_LENGTH];
+        loop {
+            let n = stream.read(&mut buf).await?;
+            if n == 0 {
+                stream.shutdown().await?;
+                return Err(IoError::from(IoErrorKind::UnexpectedEof).into());
+            }
+            trace!("{} successful read {n}B", session_id);
+
+            match self.server(
+                &mut |_: &()| Some(()),
+                std::slice::from_ref(&materials),
+                &buf[..n],
+            ) {
+                Ok((keygen, response)) => {
+                    stream.write_all(&response).await?;
+                    info!("{} handshake complete", session_id);
+                    return Ok(keygen);
+                }
+                Err(RelayHandshakeError::EAgain) => {
+                    trace!("{} reading more", session_id);
+                    continue;
+                }
+                Err(e) => {
+                    trace!("{} failed to parse client handshake: {e}", session_id);
+                    // if a deadline was set and has not passed already, discard
+                    // from the stream until the deadline, then close.
+                    if deadline.is_some_and(|d| d > Instant::now()) {
+                        debug!("{} discarding due to: {e}", session_id);
+                        discard(&mut stream, deadline.unwrap() - Instant::now()).await?
+                    }
+                    stream.shutdown().await?;
+                    return Err(e.into());
+                }
+            };
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -559,56 +614,5 @@ mod tests {
             details: "test".into(),
         });
         assert_eq!(sf.session_id, orig_id);
-    }
-}
-
-impl Server {
-    /// Complete the handshake with the client. This function assumes that the
-    /// client has already sent a message and that we do not know yet if the
-    /// message is valid.
-    async fn complete_handshake<T>(
-        &self,
-        mut stream: T,
-        materials: SHSMaterials,
-        deadline: Option<Instant>,
-    ) -> Result<impl Obfs4Keygen>
-    where
-        T: AsyncRead + AsyncWrite + Unpin,
-    {
-        let session_id = materials.session_id.clone();
-
-        // wait for and attempt to consume the client hello message
-        let mut buf = [0_u8; MAX_HANDSHAKE_LENGTH];
-        loop {
-            let n = stream.read(&mut buf).await?;
-            if n == 0 {
-                stream.shutdown().await?;
-                return Err(IoError::from(IoErrorKind::UnexpectedEof).into());
-            }
-            trace!("{} successful read {n}B", session_id);
-
-            match self.server(&mut |_: &()| Some(()), std::slice::from_ref(&materials), &buf[..n]) {
-                Ok((keygen, response)) => {
-                    stream.write_all(&response).await?;
-                    info!("{} handshake complete", session_id);
-                    return Ok(keygen);
-                }
-                Err(RelayHandshakeError::EAgain) => {
-                    trace!("{} reading more", session_id);
-                    continue;
-                }
-                Err(e) => {
-                    trace!("{} failed to parse client handshake: {e}", session_id);
-                    // if a deadline was set and has not passed already, discard
-                    // from the stream until the deadline, then close.
-                    if deadline.is_some_and(|d| d > Instant::now()) {
-                        debug!("{} discarding due to: {e}", session_id);
-                        discard(&mut stream, deadline.unwrap() - Instant::now()).await?
-                    }
-                    stream.shutdown().await?;
-                    return Err(e.into());
-                }
-            };
-        }
     }
 }

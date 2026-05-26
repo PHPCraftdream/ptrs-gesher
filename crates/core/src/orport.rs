@@ -1,11 +1,13 @@
-use std::io::{prelude::*, BufReader, Error, ErrorKind};
+use std::io::{prelude::*, BufReader, Error};
 use subtle::ConstantTimeEq;
 
 const AUTH_COOKIE_HEADER: &[u8; 32] = b"! Extended ORPort Auth Cookie !\x0a";
 
+/// Extended ORPort authentication and connection helper (placeholder).
 pub struct ORStream {}
 
 impl ORStream {
+    /// Connect to the extended ORPort (unimplemented placeholder).
     pub async fn connect() {
         read_auth_cookie_file("").unwrap();
         todo!()
@@ -17,14 +19,14 @@ fn read_auth_cookie(mut reader: impl BufRead) -> Result<[u8; 32], Error> {
 
     reader.read_exact(&mut buf)?;
     if !reader.fill_buf()?.is_empty() {
-        return Err(Error::new(ErrorKind::Other, "file is longer than 64 bytes"));
+        return Err(Error::other("file is longer than 64 bytes"));
     }
 
     let header: [u8; 32] = buf[..32].try_into().unwrap();
     let cookie: [u8; 32] = buf[32..64].try_into().unwrap();
 
     if header.ct_eq(AUTH_COOKIE_HEADER).unwrap_u8() == 0 {
-        return Err(Error::new(ErrorKind::Other, "missing auth cookie header"));
+        return Err(Error::other("missing auth cookie header"));
     }
 
     Ok(cookie)

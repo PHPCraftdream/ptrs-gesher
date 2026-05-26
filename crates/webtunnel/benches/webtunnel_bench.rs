@@ -38,7 +38,8 @@ fn bench_config_with_servername(c: &mut Criterion) {
 }
 
 fn bench_parse_response(c: &mut Criterion) {
-    let response_small = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: upgrade\r\n\r\n";
+    let response_small =
+        b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: upgrade\r\n\r\n";
     c.bench_function("parse_response_101_small", |b| {
         b.iter(|| webtunnel::handshake::parse_response(black_box(response_small)).unwrap());
     });

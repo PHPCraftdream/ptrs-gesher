@@ -297,7 +297,7 @@ mod test {
         let w = WeightedDist::new(seed, 10, 50, false);
         for _ in 0..1000 {
             let s = w.sample();
-            assert!(s >= 10 && s <= 50, "sample {s} out of range [10, 50]");
+            assert!((10..=50).contains(&s), "sample {s} out of range [10, 50]");
         }
         Ok(())
     }

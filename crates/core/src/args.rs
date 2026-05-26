@@ -83,10 +83,12 @@ macro_rules! hashmap {
 pub struct Args(pub(crate) HashMap<String, Vec<String>>);
 
 impl Args {
+    /// Create an empty `Args` bag.
     pub fn new() -> Self {
         Self(HashMap::new())
     }
 
+    /// Add a key-value pair. Appends to existing values for the same key.
     pub fn add(&mut self, key: &str, value: &str) {
         // value either exists or is allocated here.
         self.entry(key.to_string()).or_default();
@@ -95,6 +97,7 @@ impl Args {
         self.get_mut(key).unwrap().push(value.to_string());
     }
 
+    /// Retrieve the first value for a key, or `None` if absent / empty.
     pub fn retrieve(&self, key: impl AsRef<str>) -> Option<String> {
         let v = self.get(key.as_ref())?;
         if v.is_empty() {
@@ -220,7 +223,7 @@ fn backslash_escape(s: &str, set: Vec<char>) -> String {
 fn index_unescaped(s: &str, term: Vec<char>) -> Result<(usize, String), Error> {
     let mut unesc = String::new();
     let mut chars = s.char_indices();
-    let mut i: usize = 0;
+    let mut i: usize;
     while let Some((byte_pos, c)) = chars.next() {
         i = byte_pos;
 
@@ -251,6 +254,7 @@ fn index_unescaped(s: &str, term: Vec<char>) -> Result<(usize, String), Error> {
 pub struct Opts(HashMap<String, Args>);
 
 impl Opts {
+    /// Create an empty `Opts` bag.
     pub fn new() -> Self {
         Self(HashMap::new())
     }

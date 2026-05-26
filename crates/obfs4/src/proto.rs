@@ -334,6 +334,44 @@ where
     }
 }
 
+impl<T> AsyncWrite for Obfs4Stream<T>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<StdResult<usize, IoError>> {
+        let this = self.project();
+        this.s.poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<StdResult<(), IoError>> {
+        let this = self.project();
+        this.s.poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<StdResult<(), IoError>> {
+        let this = self.project();
+        this.s.poll_shutdown(cx)
+    }
+}
+
+impl<T> AsyncRead for Obfs4Stream<T>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<StdResult<(), IoError>> {
+        let this = self.project();
+        this.s.poll_read(cx, buf)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -386,44 +424,5 @@ mod tests {
         assert!(d.is_some());
         assert!(d.unwrap() <= Duration::from_secs(60));
         assert!(d.unwrap() > Duration::from_secs(55));
-    }
-
-}
-
-impl<T> AsyncWrite for Obfs4Stream<T>
-where
-    T: AsyncRead + AsyncWrite + Unpin,
-{
-    fn poll_write(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &[u8],
-    ) -> Poll<StdResult<usize, IoError>> {
-        let this = self.project();
-        this.s.poll_write(cx, buf)
-    }
-
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<StdResult<(), IoError>> {
-        let this = self.project();
-        this.s.poll_flush(cx)
-    }
-
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<StdResult<(), IoError>> {
-        let this = self.project();
-        this.s.poll_shutdown(cx)
-    }
-}
-
-impl<T> AsyncRead for Obfs4Stream<T>
-where
-    T: AsyncRead + AsyncWrite + Unpin,
-{
-    fn poll_read(
-        self: Pin<&mut Self>,
-        cx: &mut Context<'_>,
-        buf: &mut ReadBuf<'_>,
-    ) -> Poll<StdResult<(), IoError>> {
-        let this = self.project();
-        this.s.poll_read(cx, buf)
     }
 }

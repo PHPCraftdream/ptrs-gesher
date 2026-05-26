@@ -7,7 +7,9 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 fn bench_args_via_umbrella(c: &mut Criterion) {
     c.bench_function("umbrella::Args::parse_client_parameters", |b| {
-        b.iter(|| ptrs_gesher::Args::parse_client_parameters(black_box("cert=AAA;iat-mode=0")).unwrap());
+        b.iter(|| {
+            ptrs_gesher::Args::parse_client_parameters(black_box("cert=AAA;iat-mode=0")).unwrap()
+        });
     });
 
     c.bench_function("umbrella::Args::add+retrieve", |b| {
@@ -48,10 +50,18 @@ criterion_group!(
 );
 
 #[cfg(all(feature = "bridge-line", not(feature = "webtunnel")))]
-criterion_group!(benches, bench_args_via_umbrella, bench_bridge_line_via_umbrella);
+criterion_group!(
+    benches,
+    bench_args_via_umbrella,
+    bench_bridge_line_via_umbrella
+);
 
 #[cfg(all(not(feature = "bridge-line"), feature = "webtunnel"))]
-criterion_group!(benches, bench_args_via_umbrella, bench_webtunnel_via_umbrella);
+criterion_group!(
+    benches,
+    bench_args_via_umbrella,
+    bench_webtunnel_via_umbrella
+);
 
 #[cfg(not(any(feature = "bridge-line", feature = "webtunnel")))]
 criterion_group!(benches, bench_args_via_umbrella);

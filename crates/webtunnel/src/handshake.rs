@@ -18,7 +18,7 @@ use base64::Engine;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use crate::{Error, WebTunnelConfig, WebTunnelStream, PrefixStream};
+use crate::{Error, PrefixStream, WebTunnelConfig, WebTunnelStream};
 
 /// Generate a Sec-WebSocket-Key (16 random bytes, base64-encoded).
 pub fn generate_websocket_key() -> String {
@@ -121,7 +121,10 @@ async fn tls_connect(
 
 /// Send the HTTP Upgrade request, read the 101 response, return the stream
 /// in raw-byte mode. `S` is either `TlsStream<TcpStream>` or `TcpStream`.
-async fn upgrade_and_return<S>(mut stream: S, config: &WebTunnelConfig) -> Result<PrefixStream<WebTunnelStream>, Error>
+async fn upgrade_and_return<S>(
+    mut stream: S,
+    config: &WebTunnelConfig,
+) -> Result<PrefixStream<WebTunnelStream>, Error>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin + StreamWrapper + 'static,
 {
@@ -217,7 +220,9 @@ mod tests {
     fn websocket_key_is_base64_24_chars() {
         let key = generate_websocket_key();
         assert_eq!(key.len(), 24);
-        assert!(base64::engine::general_purpose::STANDARD.decode(&key).is_ok());
+        assert!(base64::engine::general_purpose::STANDARD
+            .decode(&key)
+            .is_ok());
     }
 
     #[test]

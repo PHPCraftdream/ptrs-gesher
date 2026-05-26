@@ -64,7 +64,7 @@ async fn replayed_client_hello_rejected() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     drop(replay1_write);
 
-    let first_result = tokio::time::timeout(Duration::from_secs(3), first_attempt)
+    let _first_result = tokio::time::timeout(Duration::from_secs(3), first_attempt)
         .await
         .expect("first attempt hung")
         .expect("first attempt panicked");

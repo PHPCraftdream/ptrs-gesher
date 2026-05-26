@@ -1,10 +1,18 @@
+// TODO(0.2): document the remaining ~100 internal-ish pub items and
+// promote this to `#![deny(missing_docs)]` like the other crates.
+#![allow(missing_docs)]
 #![doc = include_str!("../README.md")]
 
+/// obfs4 client types.
 pub mod client;
+/// Shared cryptographic primitives and utilities.
 pub mod common;
+/// obfs4 server types.
 pub mod server;
 
+/// Framing codec and message types.
 pub mod framing;
+/// IAT mode and stream types.
 pub mod proto;
 pub use client::{Client, ClientBuilder};
 pub use server::{Server, ServerBuilder};
@@ -22,12 +30,14 @@ pub use pt::{Obfs4PT, Transport};
 mod error;
 pub use error::{Error, Result};
 
+/// The transport name string.
 pub const OBFS4_NAME: &str = "obfs4";
 
 #[cfg(test)]
 pub(crate) mod test_utils;
 
 #[cfg(any(test, debug_assertions))]
+#[allow(missing_docs)]
 pub mod dev {
     /// Pre-generated / shared key for use while running in debug mode.
     pub const DEV_PRIV_KEY: &[u8; 32] = b"0123456789abcdeffedcba9876543210";

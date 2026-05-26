@@ -1,3 +1,4 @@
+#![deny(missing_docs)]
 //! # ptrs-gesher
 //!
 //! Umbrella crate for the

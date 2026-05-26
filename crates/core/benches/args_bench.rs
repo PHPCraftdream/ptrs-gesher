@@ -30,5 +30,10 @@ fn bench_args_add_retrieve(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_args_parse_client_parameters, bench_args_encode_smethod, bench_args_add_retrieve);
+criterion_group!(
+    benches,
+    bench_args_parse_client_parameters,
+    bench_args_encode_smethod,
+    bench_args_add_retrieve
+);
 criterion_main!(benches);

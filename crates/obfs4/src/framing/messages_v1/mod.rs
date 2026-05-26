@@ -246,14 +246,20 @@ mod test {
         assert_eq!(u8::from(MessageTypes::Payload), 0x00);
         assert_eq!(u8::from(MessageTypes::PrngSeed), 0x01);
         assert_eq!(MessageTypes::try_from(0x00).unwrap(), MessageTypes::Payload);
-        assert_eq!(MessageTypes::try_from(0x01).unwrap(), MessageTypes::PrngSeed);
+        assert_eq!(
+            MessageTypes::try_from(0x01).unwrap(),
+            MessageTypes::PrngSeed
+        );
         assert!(MessageTypes::try_from(0x02).is_err());
     }
 
     #[test]
     fn messages_as_pt() {
         assert_eq!(Messages::Payload(vec![]).as_pt(), MessageTypes::Payload);
-        assert_eq!(Messages::PrngSeed([0; SEED_LENGTH]).as_pt(), MessageTypes::PrngSeed);
+        assert_eq!(
+            Messages::PrngSeed([0; SEED_LENGTH]).as_pt(),
+            MessageTypes::PrngSeed
+        );
         assert_eq!(Messages::Padding(0).as_pt(), MessageTypes::Payload);
     }
 

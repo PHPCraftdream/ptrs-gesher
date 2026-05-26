@@ -217,5 +217,4 @@ mod test {
         b.with_handshake_deadline(deadline);
         assert!(matches!(b.handshake_timeout, MaybeTimeout::Fixed(_)));
     }
-
 }

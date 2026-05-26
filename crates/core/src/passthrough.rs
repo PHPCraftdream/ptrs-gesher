@@ -263,7 +263,7 @@ mod design_tests {
         let conn_fut =
             establish_using_pt::<TcpStream, std::io::Error, Passthrough>(Box::pin(tcp_fut))
                 .await
-                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{e}")))?;
+                .map_err(|e| std::io::Error::other(format!("{e}")))?;
 
         info!("connecting to tcp and pt");
         let mut conn = conn_fut.await?;
@@ -338,7 +338,7 @@ mod design_tests {
 
         let conn_fut = establish_using_builder(Box::pin(tcp_fut), builder)
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{e}")))?;
+            .map_err(|e| std::io::Error::other(format!("{e}")))?;
 
         info!("connecting to tcp and pt");
         let mut conn = conn_fut.await?;
@@ -412,7 +412,7 @@ mod design_tests {
         info!("connecting to pt over tcp");
         let conn_fut = wrap_using_pt::<TcpStream, std::io::Error, Passthrough>(tcp_conn)
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{e}")))?;
+            .map_err(|e| std::io::Error::other(format!("{e}")))?;
 
         let mut conn = conn_fut.await?;
 
@@ -485,7 +485,7 @@ mod design_tests {
 
         let mut conn = wrap_conn_in_builder(tcp_conn, builder)
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{e}")))?
+            .map_err(|e| std::io::Error::other(format!("{e}")))?
             .await?;
 
         let msg = b"a man a plan a canal panama";
@@ -563,7 +563,7 @@ mod design_tests {
         info!("connecting to pt over tcp");
         let conn_fut = wrap_using_pt::<TcpStream, std::io::Error, Passthrough>(tcp_conn)
             .await
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, format!("{e}")))?;
+            .map_err(|e| std::io::Error::other(format!("{e}")))?;
 
         let mut conn = conn_fut.await?;
 
