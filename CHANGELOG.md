@@ -23,12 +23,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Benchmarks for handshake latency, tunnel throughput, DH/keygen/
   elligator2, codec encode/decode, args parsing.
 - CI coverage workflow via cargo-llvm-cov → Codecov.
+- Runnable `examples/` directory in every crate (6 examples total).
+- CI gates: `cargo fmt --check`, `cargo clippy --all-targets -D warnings`, `cargo-deny`.
+- `#![deny(missing_docs)]` enforced on all six crates.
+- Captured benchmark baseline under `docs/BENCHMARKS.md`.
 
 ### Changed
 
 - Source-compatible with `jmwample/ptrs` via Cargo `package =` rename.
 - API-compatible umbrella crate `ptrs-gesher` re-exporting flat
   top-level types (`Args`, `BridgeLine`, `Obfs4PT`, `WebTunnelBuilder`).
+- Workspace MSRV unified to 1.75.
+- Bench groups retuned to ~4 min full-run wall-clock (down from ~20 min).
 
 ### Fixed
 
@@ -36,6 +42,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (byte/char index confusion). Found via proptest.
 - `messages_v1::try_parse` for `PrngSeed` could underflow on a short
   buffer. Found via proptest.
+- Resolved 15 pre-existing intra-doc-link and unclosed-HTML-tag warnings in `core` and `obfs4` rustdoc.
+- Documented ~103 previously-undocumented public items in obfs4.
+- Fixed deadlock in `bidirectional_copy/1048576` bench (duplex-buffer backpressure).
 
 ### Removed
 

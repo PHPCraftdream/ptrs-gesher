@@ -11,6 +11,7 @@ git diff --exit-code
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace --release
+cargo bench --workspace            # ~4 min, sanity-check for regressions
 ```
 
 ## 2. Update CHANGELOG
