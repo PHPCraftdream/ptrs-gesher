@@ -1,4 +1,13 @@
+use std::time::Duration;
+
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
+
+fn fast_criterion() -> Criterion {
+    Criterion::default()
+        .sample_size(20)
+        .warm_up_time(Duration::from_millis(500))
+        .measurement_time(Duration::from_secs(1))
+}
 
 fn bench_args_parse_client_parameters(c: &mut Criterion) {
     let params = "cert=AAA;iat-mode=0";
@@ -30,10 +39,11 @@ fn bench_args_add_retrieve(c: &mut Criterion) {
     });
 }
 
-criterion_group!(
-    benches,
-    bench_args_parse_client_parameters,
-    bench_args_encode_smethod,
-    bench_args_add_retrieve
-);
+criterion_group! {
+    name = benches;
+    config = fast_criterion();
+    targets = bench_args_parse_client_parameters,
+              bench_args_encode_smethod,
+              bench_args_add_retrieve
+}
 criterion_main!(benches);

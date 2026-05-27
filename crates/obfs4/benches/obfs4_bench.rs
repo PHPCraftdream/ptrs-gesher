@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 
 use obfs4::common::drbg::{Drbg, Seed};
@@ -53,20 +55,21 @@ fn bench_seed_generation(c: &mut Criterion) {
 
 fn bench_replay_filter_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("replay_filter_scaling");
-    for &size in &[1_000u64, 10_000, 100_000] {
-        let filter = ReplayFilter::new(std::time::Duration::from_secs(3600));
-        let now = std::time::Instant::now();
-        for i in 0..size {
-            filter.test_and_set(now, i.to_le_bytes());
-        }
-        group.bench_function(format!("lookup_after_{size}_inserts"), |b| {
-            let mut j = size;
-            b.iter(|| {
-                j += 1;
-                filter.test_and_set(now, black_box(j.to_le_bytes()))
-            });
-        });
+    // Mid-size only; lookup is O(1) so the scaling sweep does not buy
+    // signal worth the wall-clock cost.
+    let size: u64 = 10_000;
+    let filter = ReplayFilter::new(std::time::Duration::from_secs(3600));
+    let now = std::time::Instant::now();
+    for i in 0..size {
+        filter.test_and_set(now, i.to_le_bytes());
     }
+    group.bench_function(format!("lookup_after_{size}_inserts"), |b| {
+        let mut j = size;
+        b.iter(|| {
+            j += 1;
+            filter.test_and_set(now, black_box(j.to_le_bytes()))
+        });
+    });
     group.finish();
 }
 
@@ -192,16 +195,24 @@ fn bench_crypto(c: &mut Criterion) {
     });
 }
 
-criterion_group!(
-    benches,
-    bench_drbg,
-    bench_replay_filter,
-    bench_weighted_dist,
-    bench_seed_generation,
-    bench_replay_filter_scaling,
-    bench_framing_build_and_marshall,
-    bench_handshake_marshall,
-    bench_codec_encrypt_decrypt,
-    bench_crypto,
-);
+fn fast_criterion() -> Criterion {
+    Criterion::default()
+        .sample_size(20)
+        .warm_up_time(Duration::from_millis(500))
+        .measurement_time(Duration::from_secs(1))
+}
+
+criterion_group! {
+    name = benches;
+    config = fast_criterion();
+    targets = bench_drbg,
+              bench_replay_filter,
+              bench_weighted_dist,
+              bench_seed_generation,
+              bench_replay_filter_scaling,
+              bench_framing_build_and_marshall,
+              bench_handshake_marshall,
+              bench_codec_encrypt_decrypt,
+              bench_crypto
+}
 criterion_main!(benches);

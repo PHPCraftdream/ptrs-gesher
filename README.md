@@ -115,7 +115,9 @@ To report a security issue, see `SECURITY.md`.
 - `cargo test --workspace --release` — recommended for the
   10k-iteration fuzz-like proptest files.
 - `cargo bench --workspace` — Criterion benchmarks (HTML reports
-  under `target/criterion/`).
+  under `target/criterion/`; full run ≈4 min on a modern laptop).
+- See [`docs/BENCHMARKS.md`](docs/BENCHMARKS.md) for the captured
+  performance baseline and instructions for regression-checking.
 
 ## License
 

@@ -6,10 +6,19 @@
 //! the `poll_write` chunking loop, `poll_read` framed-reader loop, IAT/length
 //! distribution sampling, or cumulative cost of many frames at runtime.
 
+use std::time::Duration;
+
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use obfs4::Server;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::runtime::Runtime;
+
+fn fast_criterion() -> Criterion {
+    Criterion::default()
+        .sample_size(20)
+        .warm_up_time(Duration::from_millis(500))
+        .measurement_time(Duration::from_secs(1))
+}
 
 /// Build a runtime once and reuse it across iterations to keep tokio startup
 /// out of the measured path.
@@ -73,14 +82,15 @@ fn bench_tunnel_throughput(c: &mut Criterion) {
     let mut group = c.benchmark_group("obfs4_tunnel_throughput");
     // Use 1KB and 32KB; the duplex buffer is 64KB so 32KB still fits in one
     // wakeup and lets us see if larger chunks amortise framing overhead.
-    for &size in &[1024usize, 32 * 1024] {
-        group.throughput(Throughput::Bytes(size as u64));
-        group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
-            b.to_async(&rt).iter(|| async move {
-                echo_n_bytes(black_box(size)).await;
-            });
+    // Large size only; the small case is dominated by setup overhead
+    // and adds no signal proportional to its wall-clock cost.
+    let size: usize = 32 * 1024;
+    group.throughput(Throughput::Bytes(size as u64));
+    group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
+        b.to_async(&rt).iter(|| async move {
+            echo_n_bytes(black_box(size)).await;
         });
-    }
+    });
     group.finish();
 }
 
@@ -103,5 +113,9 @@ fn bench_handshake_only(c: &mut Criterion) {
     });
 }
 
-criterion_group!(benches, bench_tunnel_throughput, bench_handshake_only);
+criterion_group! {
+    name = benches;
+    config = fast_criterion();
+    targets = bench_tunnel_throughput, bench_handshake_only
+}
 criterion_main!(benches);

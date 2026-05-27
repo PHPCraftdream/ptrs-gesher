@@ -1,5 +1,14 @@
+use std::time::Duration;
+
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use ptrs::args::Args;
+
+fn fast_criterion() -> Criterion {
+    Criterion::default()
+        .sample_size(20)
+        .warm_up_time(Duration::from_millis(500))
+        .measurement_time(Duration::from_secs(1))
+}
 
 fn make_args() -> Args {
     let mut args = Args::new();
@@ -61,12 +70,13 @@ fn bench_parse_response(c: &mut Criterion) {
     });
 }
 
-criterion_group!(
-    benches,
-    bench_websocket_key,
-    bench_config_from_args,
-    bench_build_upgrade_request,
-    bench_config_with_servername,
-    bench_parse_response,
-);
+criterion_group! {
+    name = benches;
+    config = fast_criterion();
+    targets = bench_websocket_key,
+              bench_config_from_args,
+              bench_build_upgrade_request,
+              bench_config_with_servername,
+              bench_parse_response
+}
 criterion_main!(benches);
