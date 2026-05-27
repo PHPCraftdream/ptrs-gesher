@@ -21,7 +21,7 @@ confidence-threshold = 0.93
 
 [advisories]
 yanked = "deny"
-unmaintained = "warn"
+unmaintained = "workspace"
 
 [bans]
 multiple-versions = "warn"
