@@ -2271,6 +2271,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "ptrs-gesher-examples"
+version = "0.0.0"
+dependencies = [
+ "ptrs-gesher",
+ "ptrs-gesher-bridge-line",
+ "ptrs-gesher-core",
+ "ptrs-gesher-lyrebird",
+ "ptrs-gesher-obfs4",
+ "ptrs-gesher-webtunnel",
+ "tokio",
+]
+
+[[package]]
 name = "ptrs-gesher-lyrebird"
 version = "0.1.0"
 dependencies = [

@@ -95,6 +95,8 @@ let client = builder.build();
 // client.establish(tcp_future).await yields an AsyncRead+AsyncWrite tunnel.
 ```
 
+For longer end-to-end examples, see the [`examples/`](examples/) directory.
+
 ## Threat model — what this protects, what it does not
 
 - **Goal:** make Tor traffic look like something other than Tor to a

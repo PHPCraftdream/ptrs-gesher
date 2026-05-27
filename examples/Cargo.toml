@@ -1,0 +1,38 @@
+[package]
+name = "ptrs-gesher-examples"
+version = "0.0.0"
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Usage examples for the ptrs-gesher pluggable-transport framework"
+
+[dependencies]
+ptrs-gesher = { path = "../crates/ptrs-gesher", features = ["obfs4", "webtunnel", "bridge-line"] }
+# Pull deeper sub-crate types where needed by examples:
+ptrs        = { path = "../crates/core",        package = "ptrs-gesher-core" }
+obfs4       = { path = "../crates/obfs4",       package = "ptrs-gesher-obfs4" }
+webtunnel   = { path = "../crates/webtunnel",   package = "ptrs-gesher-webtunnel" }
+bridge_line = { path = "../crates/bridge-line",  package = "ptrs-gesher-bridge-line" }
+lyrebird    = { path = "../crates/lyrebird",     package = "ptrs-gesher-lyrebird", optional = true }
+
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "net", "time"] }
+
+[features]
+default = []
+embed-lyrebird = ["lyrebird"]
+
+[[example]]
+name = "bridge_line_to_obfs4_client"
+
+[[example]]
+name = "obfs4_echo_over_tcp"
+
+[[example]]
+name = "dispatch_bridge"
+
+[[example]]
+name = "args_roundtrip_table"
+
+[[example]]
+name = "embed_lyrebird"
+required-features = ["embed-lyrebird"]
