@@ -29,6 +29,23 @@ cargo bench --workspace
 
 HTML reports are written to `target/criterion/`.
 
+## Examples
+
+Each crate ships minimal smoke examples under `crates/*/examples/`.
+Longer, end-to-end demonstrations live in the top-level
+`ptrs-gesher-examples` crate. Run any of them with:
+
+```sh
+cargo run -p ptrs-gesher-examples --example obfs4_echo_over_tcp
+cargo run -p ptrs-gesher-examples --example dispatch_bridge
+cargo run -p ptrs-gesher-examples --example bridge_line_to_obfs4_client
+cargo run -p ptrs-gesher-examples --example args_roundtrip_table
+cargo run -p ptrs-gesher-examples --example embed_lyrebird --features embed-lyrebird
+```
+
+`cargo build --workspace --examples` is enforced by CI, so adding an
+`[[example]]` makes it a public-API regression catcher.
+
 ## Code style
 
 - **Formatting:** `cargo fmt` — CI checks `cargo fmt --all -- --check`.

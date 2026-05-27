@@ -134,6 +134,9 @@ Mirror of the client flow, but entry is via `ServerBuilder`:
    creates a builder + listener for it.
 5. **Add tests** — E2E tests under `tests/`, property tests under
    `tests/proptest_*.rs` or `tests/fuzz_*.rs`.
+6. **Add an example** — see `examples/` (top-level) and
+   `crates/*/examples/` for templates. A new transport should ship at
+   least a minimal demonstration so users know how to wire it up.
 
 ## Test layout
 

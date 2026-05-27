@@ -1,10 +1,3 @@
-<p align="center">
-<img
- alt="lyrebird logo: a lyrebird making noises you would never expect from a bird."
- width="200px"
- src="../../doc/lyrebird_logo.png"/>
-</p>
-
 # ptrs-gesher-lyrebird
 
 <p>
