@@ -4,6 +4,17 @@ on:
   push:
     tags:
       - 'v*'
+  # Manual re-trigger from the Actions UI.  Pick this when a tagged release
+  # half-succeeded (e.g. crates.io rate-limited the last crate) and you need
+  # the workflow to retry with the latest main-branch logic, not the workflow
+  # frozen at the tag's commit.  The version input must match the versions in
+  # Cargo.toml; idempotent steps will skip crates already on the registry.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to (re-)publish, without the v prefix (e.g. 0.1.0)'
+        required: true
+        type: string
 
 env:
   CARGO_TERM_COLOR: always
@@ -24,8 +35,12 @@ jobs:
       - name: Verify tag matches crate versions
         run: |
           set -euo pipefail
-          TAG="${GITHUB_REF_NAME#v}"
-          echo "tag version: $TAG"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.version }}"
+          else
+            TAG="${GITHUB_REF_NAME#v}"
+          fi
+          echo "target version: $TAG"
           mismatch=0
           for crate in core bridge-line obfs4 webtunnel lyrebird ptrs-gesher; do
             v=$(cargo metadata --no-deps --format-version 1 \
@@ -44,35 +59,43 @@ jobs:
       - name: Run tests
         run: cargo test --workspace --all-targets --locked --no-fail-fast
 
-      # cargo publish (cargo >= 1.66) blocks until the freshly-uploaded crate
-      # is discoverable in the registry index (60s default timeout), so the
-      # next step can immediately depend on it without an explicit sleep.
+      - name: Make publish script executable
+        run: chmod +x .github/scripts/publish.sh
+
+      # Each publish step is idempotent:
+      #   - "already exists" -> skip with success (re-runs of partial releases work)
+      #   - "429 Too Many Requests" -> retry with backoff (crates.io rate-limits
+      #     new crate names at ~1 per 10 min for fresh accounts; 600s waits the
+      #     window out)
+      # Cargo >=1.66 itself blocks on the registry index until the freshly-
+      # published crate is discoverable (default 60s), so no sleep between
+      # steps is needed for dependency ordering.
       - name: Publish ptrs-gesher-core
-        run: cargo publish -p ptrs-gesher-core --locked
+        run: .github/scripts/publish.sh ptrs-gesher-core
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Publish ptrs-gesher-bridge-line
-        run: cargo publish -p ptrs-gesher-bridge-line --locked
+        run: .github/scripts/publish.sh ptrs-gesher-bridge-line
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Publish ptrs-gesher-obfs4
-        run: cargo publish -p ptrs-gesher-obfs4 --locked
+        run: .github/scripts/publish.sh ptrs-gesher-obfs4
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Publish ptrs-gesher-webtunnel
-        run: cargo publish -p ptrs-gesher-webtunnel --locked
+        run: .github/scripts/publish.sh ptrs-gesher-webtunnel
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Publish ptrs-gesher-lyrebird
-        run: cargo publish -p ptrs-gesher-lyrebird --locked
+        run: .github/scripts/publish.sh ptrs-gesher-lyrebird
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
 
       - name: Publish ptrs-gesher (umbrella)
-        run: cargo publish -p ptrs-gesher --locked
+        run: .github/scripts/publish.sh ptrs-gesher
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
