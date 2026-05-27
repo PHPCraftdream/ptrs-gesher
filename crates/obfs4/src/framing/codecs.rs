@@ -259,10 +259,10 @@ impl<T: Buf> Encoder<T> for EncryptingCodec {
 
     /// Encode encodes a single frame worth of payload and returns. Plaintext
     /// should either be a handshake message OR a buffer containing one or more
-    /// [`Message`]s already properly marshalled. The proided plaintext can
-    /// be no longer than [`MAX_FRAME_PAYLOAD_LENGTH`].
+    /// Messages already properly marshalled. The proided plaintext can
+    /// be no longer than `MAX_FRAME_PAYLOAD_LENGTH`.
     ///
-    /// [`InvalidPayloadLength`] is recoverable, all other errors MUST be
+    /// [`FrameError::InvalidPayloadLength`] is recoverable, all other errors MUST be
     /// treated as fatal and the session aborted.
     fn encode(&mut self, plaintext: T, dst: &mut BytesMut) -> std::result::Result<(), Self::Error> {
         trace!(

@@ -26,9 +26,9 @@ PTRS is a library for writing pluggable transports in Rust.
 ## Library Usage
 
 This library (currently) revolves around the abstraction of connections as anything that implement
-the traits [`tokio::io:AsyncRead`] + [`tokio::io::AsyncWrite`] + `Unpin + Send + Sync`. This allows
+the traits [`tokio::io::AsyncRead`] + [`tokio::io::AsyncWrite`] + `Unpin + Send + Sync`. This allows
 us to define the expected shared behavior of pluggable transports as a transform of these
-[`Stream`]s.
+streams.
 
 ```rust ignore
 /// Future containing a generic result. We use this for functions that take

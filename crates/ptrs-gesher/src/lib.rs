@@ -32,7 +32,7 @@
 //!   Upgrade transport.
 //! - [`bridge_line`] (feature `bridge-line`, default) — torrc `Bridge`
 //!   directive parser.
-//! - [`lyrebird`] (feature `lyrebird`, off by default) — PT-manager
+//! - `lyrebird` (feature `lyrebird`, off by default) — PT-manager
 //!   loop usable as a library or busybox-style binary.
 //!
 //! ## Provenance

@@ -108,7 +108,7 @@ impl std::error::Error for FrameError {}
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum FrameError {
-    /// is the error returned when [`encode`] rejects the payload length.
+    /// is the error returned when encoding rejects the payload length.
     InvalidPayloadLength(usize),
 
     /// A cryptographic error occured.
@@ -117,10 +117,10 @@ pub enum FrameError {
     /// An error occured with the I/O processing
     IO(String),
 
-    /// Returned when [`decode`] requires more data to continue.
+    /// Returned when the decoder requires more data to continue.
     EAgain,
 
-    /// Returned when [`decode`] failes to authenticate a frame.
+    /// Returned when the decoder failes to authenticate a frame.
     TagMismatch,
 
     /// Returned when the NaCl secretbox nonce's counter wraps (FATAL).

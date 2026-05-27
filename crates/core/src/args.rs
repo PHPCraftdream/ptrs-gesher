@@ -110,7 +110,7 @@ impl Args {
     ///
     /// From `pt-spec.txt`:
     ///
-    /// "First the '<Key>=<Value>' formatted arguments MUST be escaped, such that all
+    /// "First the `Key=Value` formatted arguments MUST be escaped, such that all
     /// backslash, equal sign, and semicolon characters are escaped with a
     /// backslash.
     ///
@@ -261,8 +261,8 @@ impl Opts {
 
     /// Parse a transport–name–value mapping as from TOR_PT_SERVER_TRANSPORT_OPTIONS.
     ///
-    /// "...a semicolon-separated list of <key>:<value> pairs, where <key> is a PT
-    /// name and <value> is a k=v string value with options that are to be passed to
+    /// "...a semicolon-separated list of `key`:`value` pairs, where `key` is a PT
+    /// name and `value` is a k=v string value with options that are to be passed to
     /// the transport. Colons, semicolons, equal signs and backslashes must be
     /// escaped with a backslash."
     ///
