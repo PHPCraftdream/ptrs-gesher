@@ -67,7 +67,9 @@ impl WeightedDist {
 
         // flip a coin that comes up heads with probability $prob[i]$.
         getrandom::getrandom(&mut buf).unwrap();
-        let f = f64::from_ne_bytes(buf);
+        let bits = u64::from_le_bytes(buf);
+        let f = (bits >> 11) as f64 / ((1u64 << 53) as f64);
+        // f is now uniform in [0.0, 1.0)
         if f < dist.prob[i] {
             // if the coin comes up "heads", use $i$
             dist.min_value + dist.values[i]

@@ -172,6 +172,13 @@ pub(crate) struct Obfs4NtorSecretKey {
     pub(crate) sk: StaticSecret,
 }
 
+impl Drop for Obfs4NtorSecretKey {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.sk.zeroize();
+    }
+}
+
 impl Obfs4NtorSecretKey {
     /// Construct a new Obfs4NtorSecretKey from its components.
     #[allow(unused)]

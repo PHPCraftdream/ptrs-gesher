@@ -141,6 +141,15 @@ pub struct Drbg {
     ofb: [u8; SIZE],
 }
 
+impl Drop for Drbg {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.ofb.zeroize();
+        // TODO: SipHasher24 does not implement Zeroize and its fields are private,
+        // so the hasher state cannot be explicitly zeroed here.
+    }
+}
+
 impl Drbg {
     /// Makes a 'Drbg' instance based off an optional seed.  The seed
     /// is truncated to SeedLength.

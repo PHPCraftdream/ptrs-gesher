@@ -89,8 +89,6 @@ impl Display for Error {
     }
 }
 
-unsafe impl Send for Error {}
-
 impl Error {
     /// Wrap any error value as an `Other` variant.
     pub fn new<T: Into<Box<dyn std::error::Error + Send + Sync>>>(e: T) -> Self {

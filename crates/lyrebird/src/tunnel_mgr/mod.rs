@@ -34,6 +34,11 @@ pub trait Metric {
 /// This function assumes that the writer might need to be flushed for
 /// any buffered data to be sent.  It tries to minimize the number of
 /// flushes, however, by only flushing the writer when the reader has no data.
+/// # Cancel safety
+///
+/// This function is **not cancel-safe**. Dropping the returned future
+/// mid-copy may leave the underlying streams in a partially-written
+/// state. Wrap in `tokio::spawn` if cancellation is possible.
 pub async fn copy_interactive<'s, R, W>(mut reader: R, mut writer: W) -> IoResult<()>
 where
     R: AsyncRead + Unpin + 's,

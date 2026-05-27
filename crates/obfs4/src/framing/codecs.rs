@@ -84,6 +84,13 @@ struct EncryptingDecoder {
     next_length_invalid: bool,
 }
 
+impl Drop for EncryptingDecoder {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.key.zeroize();
+    }
+}
+
 impl EncryptingDecoder {
     // Creates a new Decoder instance.  It must be supplied a slice
     // containing exactly KeyLength bytes of keying material.
@@ -238,6 +245,13 @@ struct EncryptingEncoder {
     drbg: Drbg,
 }
 
+impl Drop for EncryptingEncoder {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.key.zeroize();
+    }
+}
+
 impl EncryptingEncoder {
     /// Creates a new Encoder instance. It must be supplied a slice
     /// containing exactly KeyLength bytes of keying material
@@ -317,6 +331,13 @@ impl<T: Buf> Encoder<T> for EncryptingCodec {
 pub(crate) struct NonceBox {
     prefix: [u8; NONCE_PREFIX_LENGTH],
     counter: u64,
+}
+
+impl Drop for NonceBox {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.prefix.zeroize();
+    }
 }
 
 impl NonceBox {

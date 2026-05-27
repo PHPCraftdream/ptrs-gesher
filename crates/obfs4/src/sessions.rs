@@ -172,6 +172,12 @@ impl ClientSession<Initialized> {
     /// TODO: make sure failure modes align with golang obfs4
     /// - FIN/RST based on buffered data.
     /// - etc.
+    ///
+    /// # Cancel safety
+    ///
+    /// This function is **not cancel-safe**. Dropping the returned future
+    /// mid-handshake may leave the underlying stream in a partially-written
+    /// state. Wrap in `tokio::spawn` if cancellation is possible.
     pub async fn handshake<T>(
         self,
         mut stream: T,
@@ -392,6 +398,12 @@ impl<S: ServerSessionState> ServerSession<S> {
 
 impl ServerSession<Initialized> {
     /// Attempt to complete the handshake with a new client connection.
+    ///
+    /// # Cancel safety
+    ///
+    /// This function is **not cancel-safe**. Dropping the returned future
+    /// mid-handshake may leave the underlying stream in a partially-written
+    /// state. Wrap in `tokio::spawn` if cancellation is possible.
     pub async fn handshake<T>(
         self,
         server: &Server,

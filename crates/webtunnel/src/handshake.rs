@@ -82,6 +82,12 @@ pub fn parse_response(buf: &[u8]) -> Result<(u16, &[u8]), Error> {
 }
 
 /// Perform the full webtunnel handshake: TCP → (optional TLS) → HTTP Upgrade.
+///
+/// # Cancel safety
+///
+/// This function is **not cancel-safe**. Dropping the returned future
+/// mid-handshake may leave the underlying stream in a partially-written
+/// state. Wrap in `tokio::spawn` if cancellation is possible.
 pub async fn connect(config: &WebTunnelConfig) -> Result<PrefixStream<WebTunnelStream>, Error> {
     let target = config.connect_host_port()?;
     let tcp = TcpStream::connect(&target).await?;

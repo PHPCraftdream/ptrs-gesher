@@ -158,6 +158,10 @@ impl<T> ServerBuilder<T> {
         let mut file_path = String::from(statedir.as_ref());
         file_path.push_str(STATE_FILENAME);
 
+        // NOTE: This uses blocking I/O (std::fs::read) rather than tokio::fs::read
+        // because this function is called from the sync `ServerBuilder::options()`
+        // trait method. This is acceptable: it runs once at server init, not on
+        // the hot path, and the file is small (< 1 KiB).
         let state_str = std::fs::read(file_path)?;
 
         Self::server_state_from_json(&state_str[..], args)
@@ -321,6 +325,12 @@ impl Server {
     }
 
     /// Perform the ntor handshake with a client and return an encrypted stream.
+    ///
+    /// # Cancel safety
+    ///
+    /// This function is **not cancel-safe**. Dropping the returned future
+    /// mid-handshake may leave the underlying stream in a partially-written
+    /// state. Wrap in `tokio::spawn` if cancellation is possible.
     pub async fn wrap<T>(self, stream: T) -> Result<Obfs4Stream<T>>
     where
         T: AsyncRead + AsyncWrite + Unpin,

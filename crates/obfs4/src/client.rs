@@ -154,6 +154,12 @@ impl Client {
 
     /// On a failed handshake the client will read for the remainder of the
     /// handshake timeout and then close the connection.
+    ///
+    /// # Cancel safety
+    ///
+    /// This function is **not cancel-safe**. Dropping the returned future
+    /// mid-handshake may leave the underlying stream in a partially-written
+    /// state. Wrap in `tokio::spawn` if cancellation is possible.
     pub async fn wrap<'a, T>(self, mut stream: T) -> Result<Obfs4Stream<T>>
     where
         T: AsyncRead + AsyncWrite + Unpin + 'a,
@@ -167,6 +173,12 @@ impl Client {
 
     /// On a failed handshake the client will read for the remainder of the
     /// handshake timeout and then close the connection.
+    ///
+    /// # Cancel safety
+    ///
+    /// This function is **not cancel-safe**. Dropping the returned future
+    /// mid-handshake may leave the underlying stream in a partially-written
+    /// state. Wrap in `tokio::spawn` if cancellation is possible.
     pub async fn establish<'a, T, E>(
         self,
         mut stream_fut: Pin<ptrs::FutureResult<T, E>>,

@@ -205,6 +205,12 @@ pub fn resolve_target_addr(addr: &TargetAddr) -> Result<SocketAddr> {
 
 /// Copy data bidirectionally between two async streams until one side
 /// returns EOF or an error. Returns `(a_to_b_bytes, b_to_a_bytes)`.
+///
+/// # Cancel safety
+///
+/// This function is **not cancel-safe**. It internally uses
+/// `tokio::io::copy`, which may lose data if the future is dropped
+/// between reading from one side and writing to the other.
 pub async fn bidirectional_copy<A, B>(a: A, b: B) -> std::io::Result<(u64, u64)>
 where
     A: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -223,6 +229,12 @@ where
 /// Run the lyrebird pluggable transport. Expects the standard
 /// `TOR_PT_*` environment variables set by the parent process (arti /
 /// tor) and speaks the PT-managed-transport protocol on stdin/stdout.
+///
+/// # Cancel safety
+///
+/// This function is **not cancel-safe**. It manages long-lived server
+/// state and open connections. Dropping the future will abandon all
+/// active tunnels without graceful shutdown.
 pub async fn run() -> Result<()> {
     let args = Args::parse();
 

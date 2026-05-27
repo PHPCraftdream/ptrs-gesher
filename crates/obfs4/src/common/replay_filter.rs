@@ -50,6 +50,13 @@ struct InnerReplayFilter {
     max_cap: usize,
 }
 
+impl Drop for InnerReplayFilter {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.key.zeroize();
+    }
+}
+
 impl InnerReplayFilter {
     fn new(ttl_limit: Duration, max_cap: usize) -> Self {
         let mut key = [0_u8; 16];
