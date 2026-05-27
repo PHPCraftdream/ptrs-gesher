@@ -11,36 +11,54 @@ use crate::common::ntor_arti::RelayHandshakeError;
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Errors that can occur when using the transports, including wrapped from dependencies.
-impl std::error::Error for Error {}
 #[derive(Debug)]
 pub enum Error {
+    /// An internal logic error detected via `tor_error::Bug`.
     Bug(tor_error::Bug),
 
+    /// A boxed error from an unclassified source.
     Other(Box<dyn std::error::Error + Send + Sync>),
+    /// A wrapped I/O error.
     IOError(std::io::Error),
+    /// An error that occurred while encoding or decoding data.
     EncodeError(Box<dyn std::error::Error + Send + Sync>),
+    /// A UTF-8 string conversion error.
     Utf8Error(FromUtf8Error),
+    /// The system random number source failed.
     RngSourceErr(getrandom::Error),
+    /// A cryptographic operation failed with a descriptive message.
     Crypto(String),
+    /// The transport is not configured (null/unconfigured state).
     NullTransport,
+    /// The requested operation has not been implemented yet.
     NotImplemented,
+    /// The requested operation is not supported in this context.
     NotSupported,
+    /// The operation was cancelled before completion.
     Cancelled,
+    /// The ntor handshake did not complete within the allotted time.
     HandshakeTimeout,
+    /// The circuit handshake authentication check failed.
     BadCircHandshakeAuth,
+    /// Requested more KDF-extracted key material than the KDF can produce.
     InvalidKDFOutputLength,
 
     // TODO: do we need to keep this?
+    /// Failed to decode a Tor cell of the named type.
     CellDecodeErr {
         /// What we were trying to parse.
         object: &'static str,
         /// The error that occurred while parsing it.
         err: tor_cell::Error,
     },
+    /// The ntor handshake returned an error.
     HandshakeErr(RelayHandshakeError),
 
+    /// An error that occurred while processing an obfs4 frame.
     Obfs4Framing(crate::framing::FrameError),
 }
+
+impl std::error::Error for Error {}
 
 impl Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -74,6 +92,7 @@ impl Display for Error {
 unsafe impl Send for Error {}
 
 impl Error {
+    /// Wrap any error value as an `Other` variant.
     pub fn new<T: Into<Box<dyn std::error::Error + Send + Sync>>>(e: T) -> Self {
         Error::Other(e.into())
     }

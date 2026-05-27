@@ -33,8 +33,11 @@ use tor_llcrypto::pk::rsa::RsaIdentity;
 
 const STATE_FILENAME: &str = "obfs4_state.json";
 
+/// Builder for constructing an obfs4 [`Server`] with identity key material.
 pub struct ServerBuilder<T> {
+    /// IAT (inter-arrival time) obfuscation mode for the server.
     pub iat_mode: IAT,
+    /// Optional path to the directory where server state is persisted.
     pub statefile_path: Option<String>,
     pub(crate) identity_keys: Obfs4NtorSecretKey,
     pub(crate) handshake_timeout: MaybeTimeout,
@@ -66,36 +69,43 @@ impl<T> ServerBuilder<T> {
         self
     }
 
+    /// Set the directory path where the server's state file will be stored.
     pub fn statefile_path(&mut self, path: &str) -> &Self {
         self.statefile_path = Some(path.into());
         self
     }
 
+    /// Set the server's 20-byte node ID (RSA identity fingerprint).
     pub fn node_id(&mut self, id: [u8; NODE_ID_LENGTH]) -> &Self {
         self.identity_keys.pk.id = id.into();
         self
     }
 
+    /// Set the IAT (inter-arrival time) obfuscation mode for this server.
     pub fn iat_mode(&mut self, iat: IAT) -> &Self {
         self.iat_mode = iat;
         self
     }
 
+    /// Set a fixed duration after which an incoming handshake will be aborted.
     pub fn with_handshake_timeout(&mut self, d: Duration) -> &Self {
         self.handshake_timeout = MaybeTimeout::Length(d);
         self
     }
 
+    /// Set an absolute deadline after which an incoming handshake will be aborted.
     pub fn with_handshake_deadline(&mut self, deadline: Instant) -> &Self {
         self.handshake_timeout = MaybeTimeout::Fixed(deadline);
         self
     }
 
+    /// Disable the handshake timeout so failed handshakes close immediately.
     pub fn fail_fast(&mut self) -> &Self {
         self.handshake_timeout = MaybeTimeout::Unset;
         self
     }
 
+    /// Encode the server's public parameters as a bridge-line argument string for clients.
     pub fn client_params(&self) -> String {
         let mut params = Args::new();
         params.insert(CERT_ARG.into(), vec![self.identity_keys.pk.to_string()]);
@@ -103,6 +113,7 @@ impl<T> ServerBuilder<T> {
         params.encode_smethod_args()
     }
 
+    /// Consume this builder and produce a [`Server`] ready to accept connections.
     pub fn build(&self) -> Server {
         Server(Arc::new(ServerInner {
             identity_keys: self.identity_keys.clone(),
@@ -115,6 +126,7 @@ impl<T> ServerBuilder<T> {
         }))
     }
 
+    /// Validate that the provided argument map contains all required server parameters.
     pub fn validate_args(args: &Args) -> Result<()> {
         let _ = RequiredServerState::try_from(args)?;
 
@@ -234,9 +246,11 @@ impl TryFrom<&Args> for RequiredServerState {
     }
 }
 
+/// An obfs4 server that accepts and unwraps client connections.
 #[derive(Clone)]
 pub struct Server(Arc<ServerInner>);
 
+/// Shared inner state for an obfs4 server, held behind an `Arc`.
 pub struct ServerInner {
     pub(crate) handshake_timeout: Option<tokio::time::Duration>,
     pub(crate) iat_mode: IAT,
@@ -255,6 +269,7 @@ impl Deref for Server {
 }
 
 impl Server {
+    /// Construct a server from a raw 32-byte secret key and 20-byte node ID.
     pub fn new(sec: [u8; KEY_LENGTH], id: [u8; NODE_ID_LENGTH]) -> Self {
         let sk = StaticSecret::from(sec);
         let pk = Obfs4NtorPublicKey {
@@ -279,6 +294,7 @@ impl Server {
         }))
     }
 
+    /// Construct a server with a freshly generated identity key from the provided RNG.
     pub fn new_from_random<R: RngCore + CryptoRng>(mut rng: R) -> Self {
         let mut id = [0_u8; 20];
         // Random bytes will work for testing, but aren't necessarily actually a valid id.
@@ -298,11 +314,13 @@ impl Server {
         Self::new_from_key(identity_keys)
     }
 
+    /// Construct a server with a freshly generated identity key using the system RNG.
     pub fn getrandom() -> Self {
         let identity_keys = Obfs4NtorSecretKey::getrandom();
         Self::new_from_key(identity_keys)
     }
 
+    /// Perform the ntor handshake with a client and return an encrypted stream.
     pub async fn wrap<T>(self, stream: T) -> Result<Obfs4Stream<T>>
     where
         T: AsyncRead + AsyncWrite + Unpin,
@@ -318,18 +336,22 @@ impl Server {
     //     self
     // }
 
+    /// Apply dynamic transport arguments to this server's configuration.
     pub fn set_args(&mut self, args: &dyn std::any::Any) -> Result<&Self> {
         Ok(self)
     }
 
+    /// Load a server from a persistent state file (not yet implemented).
     pub fn new_from_statefile() -> Result<Self> {
         Err(Error::NotImplemented)
     }
 
+    /// Persist the server's state to the given file (not yet implemented).
     pub fn write_statefile(f: std::fs::File) -> Result<()> {
         Err(Error::NotImplemented)
     }
 
+    /// Return a [`ClientBuilder`] pre-configured with this server's public parameters.
     pub fn client_params(&self) -> ClientBuilder {
         ClientBuilder {
             station_pubkey: *self.identity_keys.pk.pk.as_bytes(),

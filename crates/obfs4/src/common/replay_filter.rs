@@ -22,11 +22,11 @@ struct Entry {
     first_seen: Instant,
 }
 
-// ReplayFilter is a simple filter designed only to detect if a given byte
-// sequence has been seen in the recent history.
+/// Thread-safe replay detection filter that tracks recently seen byte sequences by their SipHash-2-4 digest.
 pub struct ReplayFilter(Arc<Mutex<InnerReplayFilter>>);
 
 impl ReplayFilter {
+    /// Create a new replay filter that evicts entries older than `ttl`.
     pub fn new(ttl: Duration) -> Self {
         Self(Arc::new(Mutex::new(InnerReplayFilter::new(
             ttl,
@@ -34,8 +34,7 @@ impl ReplayFilter {
         ))))
     }
 
-    // Queries the filter for a given byte sequence, inserts the
-    // sequence, and returns if it was present before the insertion operation.
+    /// Test whether `buf` has been seen before, then record it; returns `true` if it was a replay.
     pub fn test_and_set(&self, now: Instant, buf: impl AsRef<[u8]>) -> bool {
         let mut inner = self.0.lock().unwrap();
         inner.test_and_set(now, buf)

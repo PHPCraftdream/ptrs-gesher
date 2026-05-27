@@ -52,6 +52,7 @@ pub use messages_v1::{MessageTypes, Messages};
 mod codecs;
 pub use codecs::EncryptingCodec as Obfs4Codec;
 
+/// Handshake message types for the obfs4 framing layer.
 pub mod handshake;
 pub use handshake::*;
 
@@ -93,12 +94,17 @@ pub(crate) const TAG_SIZE: usize = 16;
 /// encrypting / decryptong codec, i.e. in framing/codec and handshake/
 pub const KEY_MATERIAL_LENGTH: usize = KEY_LENGTH + NONCE_PREFIX_LENGTH + drbg::SEED_LENGTH;
 
+/// Trait for types that can serialize themselves into an obfs4 frame buffer.
 pub trait Marshall {
+    /// Serialize this value into `buf` as an obfs4 frame, returning an error on failure.
     fn marshall(&mut self, buf: &mut impl BufMut) -> Result<(), FrameError>;
 }
 
+/// Trait for types that can attempt to deserialize themselves from a frame buffer.
 pub trait TryParse {
+    /// The successfully parsed output type.
     type Output;
+    /// Attempt to parse one item from `buf`; returns `EAgain` if more data is needed.
     fn try_parse(&mut self, buf: &mut impl Buf) -> Result<Self::Output, FrameError>
     where
         Self: Sized;
@@ -106,6 +112,7 @@ pub trait TryParse {
 
 impl std::error::Error for FrameError {}
 
+/// Errors that can occur while encoding or decoding an obfs4 frame.
 #[derive(Debug, PartialEq, Eq)]
 pub enum FrameError {
     /// is the error returned when encoding rejects the payload length.

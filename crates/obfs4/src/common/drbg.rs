@@ -21,6 +21,7 @@ pub(crate) const SEED_LENGTH: usize = 16 + SIZE;
 pub struct Seed([u8; SEED_LENGTH]);
 
 impl Seed {
+    /// Generate a fresh Hash-DRBG seed from the system random source.
     pub fn new() -> Result<Self> {
         let mut seed = Self([0_u8; SEED_LENGTH]);
         getrandom(&mut seed.0)?;
@@ -43,10 +44,12 @@ impl Seed {
         }
     }
 
+    /// Return the seed as a fixed-size byte array.
     pub fn to_bytes(&self) -> [u8; SEED_LENGTH] {
         self.0
     }
 
+    /// Return a reference to the seed's underlying bytes.
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }
@@ -131,6 +134,7 @@ impl fmt::Display for Seed {
     }
 }
 
+/// SipHash-2-4-based Hash-DRBG that produces deterministic pseudo-random output from a [`Seed`].
 pub struct Drbg {
     #[allow(deprecated)]
     hash: SipHasher24,

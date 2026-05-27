@@ -21,13 +21,16 @@ use tokio::{
     net::TcpStream,
 };
 
+/// Concrete obfs4 pluggable transport bound to [`TcpStream`].
 pub type Obfs4PT = Transport<TcpStream>;
 
+/// Generic obfs4 pluggable transport parameterised over an underlying stream type.
 #[derive(Debug, Default)]
 pub struct Transport<T> {
     _p: PhantomData<T>,
 }
 impl<T> Transport<T> {
+    /// The canonical name of this pluggable transport protocol.
     pub const NAME: &'static str = OBFS4_NAME;
 }
 

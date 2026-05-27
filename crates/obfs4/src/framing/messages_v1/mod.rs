@@ -31,9 +31,12 @@ use tokio_util::bytes::{Buf, BufMut};
 
 const PAD: [u8; MAX_MESSAGE_PADDING_LENGTH] = [0u8; MAX_MESSAGE_PADDING_LENGTH];
 
+/// Discriminant for the v1 obfs4 protocol message types.
 #[derive(Debug, PartialEq)]
 pub enum MessageTypes {
+    /// A data payload message carrying application bytes.
     Payload,
+    /// A PRNG seed delivery message sent by the server after handshake.
     PrngSeed,
 }
 
@@ -63,10 +66,14 @@ impl TryFrom<u8> for MessageTypes {
     }
 }
 
+/// A decoded v1 obfs4 protocol message.
 #[derive(Debug, PartialEq)]
 pub enum Messages {
+    /// Application data payload bytes.
     Payload(Vec<u8>),
+    /// A PRNG seed delivered inline by the server during the handshake.
     PrngSeed([u8; SEED_LENGTH]),
+    /// Padding bytes with no application-data content.
     Padding(usize),
 }
 

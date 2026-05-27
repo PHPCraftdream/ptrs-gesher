@@ -21,14 +21,17 @@ pub struct EphemeralSecret(x25519_dalek::StaticSecret, u8);
 
 #[allow(unused)]
 impl EphemeralSecret {
+    /// Generate a new elligator2-representable ephemeral secret using the system RNG.
     pub fn random() -> Self {
         Keys::random_ephemeral()
     }
 
+    /// Generate a new elligator2-representable ephemeral secret using the provided CSPRNG.
     pub fn random_from_rng<T: RngCore + CryptoRng>(csprng: T) -> Self {
         Keys::ephemeral_from_rng(csprng)
     }
 
+    /// Perform an x25519 Diffie-Hellman exchange with the given public key.
     pub fn diffie_hellman(&self, their_public: &PublicKey) -> SharedSecret {
         self.0.diffie_hellman(their_public)
     }
@@ -152,6 +155,7 @@ impl From<PublicRepresentative> for PublicKey {
 
 use rand_core::{CryptoRng, RngCore};
 
+/// Length in bytes of an elligator2 public key representative.
 pub const REPRESENTATIVE_LENGTH: usize = 32;
 
 /// A collection of functions for generating x25519 keys wrapping `x25519_dalek`.

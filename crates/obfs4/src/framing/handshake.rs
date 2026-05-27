@@ -15,6 +15,7 @@ use rand::Rng;
 
 // -----------------------------[ Server ]-----------------------------
 
+/// Serializable server hello message for the obfs4 ntor handshake.
 pub struct ServerHandshakeMessage {
     server_auth: [u8; AUTHCODE_LENGTH],
     pad_len: usize,
@@ -24,6 +25,7 @@ pub struct ServerHandshakeMessage {
 }
 
 impl ServerHandshakeMessage {
+    /// Construct a server handshake message from its elligator2 representative, auth code, and epoch hour.
     pub fn new(
         repres: PublicRepresentative,
         server_auth: [u8; AUTHCODE_LENGTH],
@@ -38,6 +40,7 @@ impl ServerHandshakeMessage {
         }
     }
 
+    /// Derive and return the server's x25519 public key from the stored elligator2 representative.
     pub fn server_pubkey(&mut self) -> PublicKey {
         match self.pubkey {
             Some(pk) => pk,
@@ -49,10 +52,12 @@ impl ServerHandshakeMessage {
         }
     }
 
+    /// Consume this message and return the ntor auth MAC tag.
     pub fn server_auth(self) -> Authcode {
         self.server_auth
     }
 
+    /// Serialize this server handshake message into `buf` using `h` as the HMAC key.
     pub fn marshall(&mut self, buf: &mut impl BufMut, mut h: HmacSha256) -> Result<()> {
         trace!("serializing server handshake");
 
@@ -103,6 +108,7 @@ pub struct ClientHandshakeMessage {
 }
 
 impl ClientHandshakeMessage {
+    /// Construct a new client handshake message with the given elligator2 representative, padding length, and epoch hour.
     pub fn new(repres: PublicRepresentative, pad_len: usize, epoch_hour: String) -> Self {
         Self {
             pad_len,
@@ -114,6 +120,7 @@ impl ClientHandshakeMessage {
         }
     }
 
+    /// Derive and return the x25519 public key from the stored elligator2 representative.
     pub fn get_public(&mut self) -> PublicKey {
         trace!("repr: {}", hex::encode(self.repres));
         match self.pubkey {
@@ -137,6 +144,7 @@ impl ClientHandshakeMessage {
         self.epoch_hour.clone()
     }
 
+    /// Serialize this client handshake message into `buf` using `h` as the HMAC key.
     pub fn marshall(&mut self, buf: &mut impl BufMut, mut h: HmacSha256) -> Result<()> {
         trace!("serializing client handshake");
 

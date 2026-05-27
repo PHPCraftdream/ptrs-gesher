@@ -10,17 +10,23 @@ pub(crate) mod kdf;
 mod skip;
 pub use skip::discard;
 
+/// Hash-DRBG used for length-mask generation and seeded pseudo-random distributions.
 pub mod drbg;
 // pub mod ntor;
+/// ntor handshake implementation adapted from arti.
 pub mod ntor_arti;
 pub mod probdist;
+/// Replay-detection filter used to reject replayed handshake messages.
 pub mod replay_filter;
 // public for now, but may be made private in the future
 pub mod x25519_elligator2;
 
+/// Trait for types that can parse their own arguments from the environment.
 pub trait ArgParse {
+    /// The parsed output type produced on success.
     type Output;
 
+    /// Parse and return the configured output, or an error.
     fn parse_args() -> Result<Self::Output>;
 }
 

@@ -1,6 +1,4 @@
-// TODO(0.2): document the remaining ~100 internal-ish pub items and
-// promote this to `#![deny(missing_docs)]` like the other crates.
-#![allow(missing_docs)]
+#![deny(missing_docs)]
 #![doc = include_str!("../README.md")]
 
 /// obfs4 client types.

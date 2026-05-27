@@ -13,13 +13,21 @@ pub(crate) const MAX_MESSAGE_PAYLOAD_LENGTH: usize =
     framing::MAX_FRAME_PAYLOAD_LENGTH - MESSAGE_OVERHEAD;
 // pub(crate) const MAX_MESSAGE_PADDING_LENGTH: usize = MAX_MESSAGE_PAYLOAD_LENGTH;
 
+/// A single-byte packet-type discriminant used in obfs4 frame headers.
 pub type MessageType = u8;
+
+/// Trait for obfs4 protocol messages that can be serialized and deserialized.
 pub trait Message {
+    /// The successfully parsed output type returned by `try_parse`.
     type Output;
+
+    /// Return the `MessageType` discriminant byte for this message.
     fn as_pt(&self) -> MessageType;
 
+    /// Serialize this message into `dst`.
     fn marshall<T: BufMut>(&self, dst: &mut T) -> Result<(), FrameError>;
 
+    /// Attempt to parse one message from `buf`.
     fn try_parse<T: BufMut + Buf>(buf: &mut T) -> Result<Self::Output, FrameError>;
 }
 

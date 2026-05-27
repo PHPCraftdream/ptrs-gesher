@@ -27,12 +27,16 @@ use std::{
 
 use super::framing::{FrameError, Messages};
 
+/// IAT (inter-arrival time) traffic shaping mode for obfs4 connections.
 #[allow(dead_code, unused)]
 #[derive(Default, Debug, Clone, Copy, PartialEq)]
 pub enum IAT {
+    /// No inter-arrival time obfuscation is applied.
     #[default]
     Off,
+    /// Moderate IAT obfuscation is applied to outbound packets.
     Enabled,
+    /// Aggressive IAT obfuscation that may significantly impact throughput.
     Paranoid,
 }
 
@@ -84,6 +88,7 @@ impl MaybeTimeout {
     }
 }
 
+/// An obfs4-encrypted bidirectional stream wrapping an inner async transport.
 #[pin_project]
 pub struct Obfs4Stream<T>
 where

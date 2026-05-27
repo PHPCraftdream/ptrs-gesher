@@ -43,6 +43,7 @@ pub(crate) const TAG_SIZE: usize = 16;
 
 pub(crate) const KEY_MATERIAL_LENGTH: usize = KEY_LENGTH + NONCE_PREFIX_LENGTH + drbg::SEED_LENGTH;
 
+/// XSalsa20-Poly1305 frame encoder/decoder for the obfs4 data channel.
 // TODO: make this (Codec) threadsafe
 pub struct EncryptingCodec {
     // key: [u8; KEY_LENGTH],
@@ -53,6 +54,7 @@ pub struct EncryptingCodec {
 }
 
 impl EncryptingCodec {
+    /// Construct a new codec from separate encoder and decoder KDF-extracted key material.
     pub fn new(
         encoder_key_material: [u8; KEY_MATERIAL_LENGTH],
         decoder_key_material: [u8; KEY_MATERIAL_LENGTH],
