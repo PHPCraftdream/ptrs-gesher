@@ -1,0 +1,78 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish:
+    name: Publish to crates.io
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Verify tag matches crate versions
+        run: |
+          set -euo pipefail
+          TAG="${GITHUB_REF_NAME#v}"
+          echo "tag version: $TAG"
+          mismatch=0
+          for crate in core bridge-line obfs4 webtunnel lyrebird ptrs-gesher; do
+            v=$(cargo metadata --no-deps --format-version 1 \
+                 | jq -r ".packages[] | select(.manifest_path | endswith(\"crates/$crate/Cargo.toml\")) | .version")
+            echo "$crate: $v"
+            if [ "$v" != "$TAG" ]; then
+              echo "::error::crates/$crate version $v != tag $TAG"
+              mismatch=1
+            fi
+          done
+          exit $mismatch
+
+      - name: Build workspace
+        run: cargo build --workspace --all-targets --locked
+
+      - name: Run tests
+        run: cargo test --workspace --all-targets --locked --no-fail-fast
+
+      # cargo publish (cargo >= 1.66) blocks until the freshly-uploaded crate
+      # is discoverable in the registry index (60s default timeout), so the
+      # next step can immediately depend on it without an explicit sleep.
+      - name: Publish ptrs-gesher-core
+        run: cargo publish -p ptrs-gesher-core --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish ptrs-gesher-bridge-line
+        run: cargo publish -p ptrs-gesher-bridge-line --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish ptrs-gesher-obfs4
+        run: cargo publish -p ptrs-gesher-obfs4 --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish ptrs-gesher-webtunnel
+        run: cargo publish -p ptrs-gesher-webtunnel --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish ptrs-gesher-lyrebird
+        run: cargo publish -p ptrs-gesher-lyrebird --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+      - name: Publish ptrs-gesher (umbrella)
+        run: cargo publish -p ptrs-gesher --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
