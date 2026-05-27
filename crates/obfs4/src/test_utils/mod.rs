@@ -6,12 +6,16 @@ pub(crate) use fake_prng::*;
 
 use std::env;
 #[cfg(unix)]
+use std::io;
+#[cfg(unix)]
+use std::io::{Read, Result, Write};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::str::FromStr;
 use std::sync::Once;
 
 #[cfg(unix)]
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 #[cfg(unix)]
 use tokio::net::UnixStream as AsyncUnixStream;
 use tracing_subscriber::filter::LevelFilter;
@@ -81,6 +85,13 @@ pub fn pipes_async() -> Result<(
 
 #[cfg(test)]
 mod test {
+    #[cfg(unix)]
+    use super::*;
+
+    #[cfg(unix)]
+    use std::io::Result;
+    #[cfg(unix)]
+    use std::thread;
 
     #[cfg(unix)]
     #[tokio::test]
