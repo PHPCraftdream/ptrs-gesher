@@ -12,6 +12,14 @@
   </a>
 </p>
 
+> **Server-side is experimental and incomplete — do not run in production.**
+> The bridge-side (`ServerTransportPlugin`) code path is gated behind the
+> `experimental-server` cargo feature, is not built by default, and panics
+> with `unimplemented!` at connection time. The PT handshake is not wired
+> and there is no ExtORPort dial; enabling this feature on a real bridge
+> would expose an unauthenticated proxy. Only the client-side
+> (`ClientTransportPlugin`) path is usable today.
+
 PT-manager loop for Tor pluggable transports. Usable as a library
 (`lyrebird::run()`) or as a standalone binary. Dispatches `obfs4` and
 `webtunnel` transports over the Tor PT protocol (SOCKS5 on the client

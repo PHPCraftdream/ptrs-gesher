@@ -49,7 +49,7 @@ pub(super) fn client_handshake_obfs4(
     materials: &HandshakeMaterials,
 ) -> Result<(NtorHandshakeState, Vec<u8>)> {
     let rng = rand::thread_rng();
-    let my_sk = Keys::ephemeral_from_rng(rng);
+    let my_sk = Keys::ephemeral_from_rng(rng)?;
     client_handshake_obfs4_no_keygen(my_sk, materials.clone())
 }
 

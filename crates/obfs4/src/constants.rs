@@ -56,7 +56,8 @@ pub const CERT_ARG: &str = "cert";
 
 pub const BIAS_CMD_ARG: &str = "obfs4-distBias";
 
-pub const REPLAY_TTL: Duration = Duration::from_secs(60);
+// Must cover the server's epoch_hour MAC slack window (±1h) with margin.
+pub const REPLAY_TTL: Duration = Duration::from_secs(30 * 3600);
 #[cfg(test)]
 pub const CLIENT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(5);
 #[cfg(test)]

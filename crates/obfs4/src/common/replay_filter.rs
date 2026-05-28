@@ -258,4 +258,11 @@ mod test {
 
         Ok(())
     }
+
+    #[test]
+    fn replay_ttl_covers_mac_slack_window() {
+        // Server accepts MACs computed for epoch_hour ± 1, so a recorded
+        // handshake can be re-presented up to ~2h after capture.
+        assert!(crate::constants::REPLAY_TTL >= Duration::from_secs(2 * 3600));
+    }
 }

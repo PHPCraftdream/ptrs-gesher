@@ -53,7 +53,8 @@ impl Server {
         T: AsRef<[u8]>,
     {
         let rng = thread_rng();
-        let session_sk = Keys::ephemeral_from_rng(rng);
+        let session_sk = Keys::ephemeral_from_rng(rng)
+            .map_err(into_internal!("failed to derive elligator2 server keypair"))?;
 
         self.server_handshake_obfs4_no_keygen(session_sk, msg, materials)
     }

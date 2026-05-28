@@ -12,6 +12,11 @@ repository = "https://github.com/PHPCraftdream/ptrs-gesher"
 [features]
 default = []
 debug = ["ptrs/debug", "obfs4/debug"]
+# Server-side PT-manager loop is INCOMPLETE and INSECURE.
+# The PT handshake is not wired and there is no ExtORPort dial — enabling
+# this feature in production would expose an unauthenticated proxy.
+# Opt-in only for development of the missing pieces.
+experimental-server = []
 
 [lib]
 name = "lyrebird"

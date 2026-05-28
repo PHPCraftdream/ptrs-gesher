@@ -9,6 +9,8 @@ use getrandom::getrandom;
 #[allow(unused)]
 pub use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
 
+use crate::{Error, Result};
+
 /// Ephemeral Key for X25519 Handshakes which intentionally makes writing out the
 /// private key value difficult.
 ///
@@ -22,13 +24,19 @@ pub struct EphemeralSecret(x25519_dalek::StaticSecret, u8);
 #[allow(unused)]
 impl EphemeralSecret {
     /// Generate a new elligator2-representable ephemeral secret using the system RNG.
+    ///
+    /// Convenience wrapper that panics on RNG failure; security-sensitive callers
+    /// should use [`Keys::random_ephemeral`] which returns a `Result`.
     pub fn random() -> Self {
-        Keys::random_ephemeral()
+        Keys::random_ephemeral().expect("system RNG failed for elligator2 keygen")
     }
 
     /// Generate a new elligator2-representable ephemeral secret using the provided CSPRNG.
+    ///
+    /// Convenience wrapper that panics on RNG failure; security-sensitive callers
+    /// should use [`Keys::ephemeral_from_rng`] which returns a `Result`.
     pub fn random_from_rng<T: RngCore + CryptoRng>(csprng: T) -> Self {
-        Keys::ephemeral_from_rng(csprng)
+        Keys::ephemeral_from_rng(csprng).expect("CSPRNG failed for elligator2 keygen")
     }
 
     /// Perform an x25519 Diffie-Hellman exchange with the given public key.
@@ -183,54 +191,51 @@ impl Keys {
 
     /// Generate a new Elligator2 representable ['EphemeralSecret'] with the supplied RNG.
     ///
-    /// May panic if the provided csprng fails to generate random values such that no generated
-    /// secret key maps to a valid elligator2 representative. This should never happen
-    /// when system CSPRNGs are used (i.e `rand::thread_rng`).
-    pub fn ephemeral_from_rng<R: RngCore + CryptoRng>(mut csprng: R) -> EphemeralSecret {
-        let mut private = StaticSecret::random_from_rng(&mut csprng);
-
-        // tweak only needs generated once as it doesn't affect the elligator2 representative validity.
-        let mut tweak = [0u8];
-        csprng.fill_bytes(&mut tweak);
-
-        let mut repres: Option<[u8; 32]> =
-            Randomized::to_representative(&private.to_bytes(), tweak[0]).into();
-
+    /// Returns `Err` only if every retry within `RETRY_LIMIT` fails to produce a
+    /// representable point. With a sound CSPRNG this should be statistically
+    /// unreachable, but the error surface keeps the server's handshake path from
+    /// panicking on hostile input or RNG starvation.
+    pub fn ephemeral_from_rng<R: RngCore + CryptoRng>(mut csprng: R) -> Result<EphemeralSecret> {
+        // Re-roll private *and* tweak each iteration: the same tweak with the
+        // same RNG output would otherwise be retried forever in the unlikely
+        // case the initial pair maps to None.
         for _ in 0..Self::RETRY_LIMIT {
+            let private = StaticSecret::random_from_rng(&mut csprng);
+            let mut tweak = [0u8];
+            csprng.fill_bytes(&mut tweak);
+
+            let repres: Option<[u8; 32]> =
+                Randomized::to_representative(&private.to_bytes(), tweak[0]).into();
             if repres.is_some() {
-                return EphemeralSecret(private, tweak[0]);
+                return Ok(EphemeralSecret(private, tweak[0]));
             }
-            private = StaticSecret::random_from_rng(&mut csprng);
-            repres = Randomized::to_representative(&private.to_bytes(), tweak[0]).into();
         }
 
-        panic!("failed to generate representable secret, bad RNG provided");
+        Err(Error::Crypto(
+            "elligator2: no representable secret within retry limit".into(),
+        ))
     }
 
-    /// Generate a new Elligator2 representable ['EphemeralSecret'].
+    /// Generate a new Elligator2 representable ['EphemeralSecret'] using the system RNG.
     ///
-    /// May panic if the system random genereator fails such that no generated
-    /// secret key maps to a valid elligator2 representative. This should never
-    /// happen under normal use.
-    pub fn random_ephemeral() -> EphemeralSecret {
-        let mut private = StaticSecret::random();
-        //
-        // tweak only needs generated once as it doesn't affect the elligator2 representative validity.
-        let mut tweak = [0u8];
-        getrandom(&mut tweak);
-
-        let mut repres: Option<[u8; 32]> =
-            Randomized::to_representative(&private.to_bytes(), tweak[0]).into();
-
+    /// Returns `Err` if the OS RNG fails or no representable secret is found within
+    /// `RETRY_LIMIT` retries.
+    pub fn random_ephemeral() -> Result<EphemeralSecret> {
         for _ in 0..Self::RETRY_LIMIT {
+            let private = StaticSecret::random();
+            let mut tweak = [0u8];
+            getrandom(&mut tweak)?;
+
+            let repres: Option<[u8; 32]> =
+                Randomized::to_representative(&private.to_bytes(), tweak[0]).into();
             if repres.is_some() {
-                return EphemeralSecret(private, tweak[0]);
+                return Ok(EphemeralSecret(private, tweak[0]));
             }
-            private = StaticSecret::random();
-            repres = Randomized::to_representative(&private.to_bytes(), tweak[0]).into();
         }
 
-        panic!("failed to generate representable secret, getrandom failed");
+        Err(Error::Crypto(
+            "elligator2: no representable secret within retry limit".into(),
+        ))
     }
 }
 
@@ -391,6 +396,17 @@ mod test {
         let alice_shared = alice.diffie_hellman(&bob_pk);
         let bob_shared = bob.diffie_hellman(&alice_pk);
         assert_eq!(alice_shared.as_bytes(), bob_shared.as_bytes());
+    }
+
+    #[test]
+    fn keys_ephemeral_from_rng_returns_ok_on_happy_path() {
+        // Regression: the security-sensitive server handshake path calls
+        // Keys::ephemeral_from_rng; it must return Ok on a healthy CSPRNG.
+        let result = Keys::ephemeral_from_rng(rand::thread_rng());
+        assert!(result.is_ok(), "expected Ok from healthy CSPRNG");
+
+        let result = Keys::random_ephemeral();
+        assert!(result.is_ok(), "expected Ok from system RNG");
     }
 
     #[test]

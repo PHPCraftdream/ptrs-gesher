@@ -1,13 +1,14 @@
 //! # Lyrebird - Pluggable Transport Proxy Applications
 //!
-//! This crates contains multiple binary exceutables designed specifically to work
-//! with and pluggable transport library implementing the ['ptrs'] interface.
+//! This crate provides a PT-manager loop usable as a library
+//! (`lyrebird::run()`) or as a standalone binary that implements the
+//! Tor pluggable-transport spec on top of the [`ptrs`] interface.
 //!
-//! ⚠️  🚧 WARNING This crate is still under construction 🚧 ⚠️
-//! - interface subject to change at any time
-//! - Not production ready
-//!   - do not rely on this for any security critical applications
-//!
+//! **Stability**: the public API is unstable and subject to change
+//! without notice; do not rely on this crate for security-critical
+//! applications. The server-side path is incomplete and gated behind
+//! the `experimental-server` cargo feature — it must not be enabled in
+//! production.
 //!
 //! ## Lyrebird Pluggable Transport Bridge
 //!
@@ -73,13 +74,11 @@
 //!    `DataDir/pt_state/obfs4_state.json`.  To ease deployment, the client side
 //!    bridge line is written to `DataDir/pt_state/obfs4_bridgeline.txt`.
 //!
-//! ---
-//!
-//! TODO: (priority: after mvp)
-//!   - use tunnel_manager for managing proxy connections so we can track metrics
-//!     about tunnel failures and bytes transferred.
-//!   - find a way to apply a rate limit to copy bidirectional
-//!   - use the better copy interactive for bidirectional copy
+// Follow-up work tracked in the issue tracker, not in rustdoc:
+//   - tunnel-level metrics (failures, byte counters).
+//   - rate-limiting for the bidirectional copy.
+//   - replace `tokio::io::copy_bidirectional` with an interactive copy
+//     that flushes only when the reader stalls.
 
 #![allow(unused, dead_code)]
 #![deny(missing_docs)]
@@ -257,7 +256,24 @@ pub async fn run() -> Result<()> {
         client_setup(&statedir, cancel_token.clone()).await?
     } else {
         // running as SERVER
-        server_setup(&statedir, cancel_token.clone()).await?
+        //
+        // Server-side is gated behind `experimental-server` because the PT
+        // handshake is not yet wired and the ExtORPort dial is missing.
+        // Without the feature we refuse to start rather than silently
+        // exposing an unauthenticated proxy.
+        #[cfg(feature = "experimental-server")]
+        {
+            server_setup(&statedir, cancel_token.clone()).await?
+        }
+        #[cfg(not(feature = "experimental-server"))]
+        {
+            let _ = &statedir;
+            let _ = &cancel_token;
+            return Err(anyhow!(
+                "lyrebird server-side is not implemented; rebuild with \
+                 `--features experimental-server` for development use only"
+            ));
+        }
     };
 
     info!("accepting connections");
@@ -628,7 +644,13 @@ where
 // ================================================================ //
 //                            Server                                //
 // ================================================================ //
+//
+// All server-side plumbing is gated behind the `experimental-server`
+// cargo feature. The PT handshake and ExtORPort dial are not wired
+// (see `server_handle_connection`), so compiling this in by default
+// would risk operators standing up an unauthenticated proxy.
 
+#[cfg(feature = "experimental-server")]
 async fn server_setup(
     statedir: &str,
     cancel_token: CancellationToken,
@@ -688,6 +710,7 @@ async fn server_setup(
     Ok(rx)
 }
 
+#[cfg(feature = "experimental-server")]
 async fn server_listen_loop<In, S>(
     listener: TcpListener,
     server: S,
@@ -728,6 +751,7 @@ where
     Ok(())
 }
 
+#[cfg(feature = "experimental-server")]
 async fn server_handle_connection<In, S>(
     mut conn: In,
     server: Arc<S>,
@@ -740,19 +764,17 @@ where
     S: ptrs::ServerTransport<In> + Send + Sync + ptrs::ServerTransport<TcpStream>,
     <S as ptrs::ServerTransport<In>>::OutErr: 'static,
 {
-    // let mut conn_pt = server.reveal(conn).await.context("server handshake failed {client_addr}")?;
-
-    // let mut conn_or = server.connect_to_or().await?;
-    let mut conn_or = TcpStream::connect("127.0.0.1:8000").await?;
-
-    if let Err(e) = copy_bidirectional(&mut conn, &mut conn_or).await {
-        warn!(
-            address = sensitive(client_addr).to_string(),
-            "tunnel closed with error {e:#?}"
-        )
-    }
-
-    Ok(())
+    let _ = (&mut conn, server, client_addr);
+    // Two pieces are still missing here:
+    //   1) server.reveal(conn) to complete the PT handshake;
+    //   2) a real ExtORPort dial to the parent ORPort.
+    // The previous code shipped neither and instead unconditionally
+    // dialed a hardcoded 127.0.0.1:8000, which would have stood up an
+    // unauthenticated TCP proxy on any host running this build.
+    unimplemented!(
+        "lyrebird server-side PT handshake is not implemented; \
+         do not enable experimental-server in production"
+    );
 }
 
 // ================================================================ //

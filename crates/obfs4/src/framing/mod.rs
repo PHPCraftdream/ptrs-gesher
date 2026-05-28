@@ -140,6 +140,11 @@ pub enum FrameError {
     /// encoding is of an innapropriate type for the context.
     InvalidMessage,
 
+    /// Returned when a frame header carries a length field that is out of the
+    /// permitted range after demasking. Fatal: the AEAD nonce counter has
+    /// already advanced for this frame, so the session cannot recover.
+    InvalidFrame,
+
     /// Failed while trying to parse a handshake message
     InvalidHandshake,
 
@@ -168,6 +173,7 @@ impl std::fmt::Display for FrameError {
                 "framing: provided bytes buffer was too short for payload"
             ),
             FrameError::InvalidMessage => write!(f, "framing: incorrect message for context"),
+            FrameError::InvalidFrame => write!(f, "framing: frame length out of range"),
             FrameError::InvalidHandshake => write!(f, "framing: failed to parse handshake message"),
             FrameError::ReplayedHandshake => write!(f, "framing: handshake replayed within TTL"),
             FrameError::UnknownMessageType(pt) => write!(f, "framing: unknown packet type ({pt})"),

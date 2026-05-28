@@ -10,7 +10,6 @@ use crypto_secretbox::{
     XSalsa20Poly1305,
 };
 use ptrs::{debug, error, trace};
-use rand::prelude::*;
 use tokio_util::codec::{Decoder, Encoder};
 
 /// MaximumSegmentLength is the length of the largest possible segment
@@ -81,7 +80,6 @@ struct EncryptingDecoder {
 
     next_nonce: [u8; NONCE_LENGTH],
     next_length: u16,
-    next_length_invalid: bool,
 }
 
 impl Drop for EncryptingDecoder {
@@ -108,7 +106,6 @@ impl EncryptingDecoder {
 
             next_nonce: [0_u8; NONCE_LENGTH],
             next_length: 0,
-            next_length_invalid: false,
         }
     }
 }
@@ -125,15 +122,13 @@ impl Decoder for EncryptingCodec {
         src: &mut BytesMut,
     ) -> std::result::Result<Option<Self::Item>, Self::Error> {
         trace!(
-            "decoding src:{}B {} {}",
+            "decoding src:{}B next_length={}",
             src.remaining(),
             self.decoder.next_length,
-            self.decoder.next_length_invalid
         );
-        // A length of 0 indicates that we do not know the expected size of
-        // the next frame. we use this to store the length of a packet when we
-        // receive the length at the beginning, but not the whole packet, since
-        // future reads may not have the who packet (including length) available
+        // `next_length == 0` is the marker for "no frame length parsed yet";
+        // a real frame always has length >= MIN_FRAME_LENGTH > 0, so this is
+        // not ambiguous with a valid in-progress frame.
         if self.decoder.next_length == 0 {
             // Attempt to pull out the next frame length
             if LENGTH_LENGTH > src.remaining() {
@@ -143,8 +138,6 @@ impl Decoder for EncryptingCodec {
             // derive the nonce that the peer would have used
             self.decoder.next_nonce = self.decoder.nonce.next()?;
 
-            // Remove the field length from the buffer
-            // let mut len_buf: [u8; LENGTH_LENGTH] = src[..LENGTH_LENGTH].try_into().unwrap();
             let mut length = src.get_u16();
 
             // De-obfuscate the length field
@@ -155,27 +148,16 @@ impl Decoder for EncryptingCodec {
             );
             length ^= length_mask;
             if MAX_FRAME_LENGTH < length as usize || MIN_FRAME_LENGTH > length as usize {
-                // Per "Plaintext Recovery Attacks Against SSH" by
-                // Martin R. Albrecht, Kenneth G. Paterson and Gaven J. Watson,
-                // there are a class of attacks againt protocols that use similar
-                // sorts of framing schemes.
-                //
-                // While obfs4 should not allow plaintext recovery (CBC mode is
-                // not used), attempt to mitigate out of bound frame length errors
-                // by pretending that the length was a random valid range as pe
-                // the countermeasure suggested by Denis Bider in section 6 of the
-                // paper.
-
-                let invalid_length = length;
-                self.decoder.next_length_invalid = true;
-
-                length = rand::thread_rng().gen::<u16>()
-                    % (MAX_FRAME_LENGTH - MIN_FRAME_LENGTH) as u16
-                    + MIN_FRAME_LENGTH as u16;
-                error!(
-                    "invalid length {invalid_length} {length} {}",
-                    self.decoder.next_length_invalid
-                );
+                // The obfs4 data channel is AEAD-protected (XSalsa20-Poly1305),
+                // so the Albrecht/Paterson/Watson SSH-CBC plaintext-recovery
+                // attack and the Bider countermeasure do not apply. An
+                // out-of-range length here can only mean a corrupted, tampered,
+                // or desynchronised stream. We must reject immediately: the
+                // nonce counter has already been consumed for this frame, so
+                // any attempt to keep reading would desynchronise the AEAD
+                // nonces for the remainder of the session.
+                error!("invalid frame length after demask: {length}");
+                return Err(FrameError::InvalidFrame);
             }
 
             self.decoder.next_length = length;
@@ -184,22 +166,15 @@ impl Decoder for EncryptingCodec {
         let next_len = self.decoder.next_length as usize;
 
         if next_len > src.len() {
-            // The full string has not yet arrived.
-            //
-            // We reserve more space in the buffer. This is not strictly
-            // necessary, but is a good idea performance-wise.
-            if !self.decoder.next_length_invalid {
-                src.reserve(next_len - src.len());
-            }
+            // The full frame has not yet arrived. Reserve space and ask the
+            // caller for more bytes.
+            src.reserve(next_len - src.len());
 
             trace!(
-                "next_len > src.len --> reading more {} {}",
+                "next_len > src.len --> reading more {}",
                 self.decoder.next_length,
-                self.decoder.next_length_invalid
             );
 
-            // We inform the Framed that we need more bytes to form the next
-            // frame.
             return Ok(None);
         }
 
@@ -581,6 +556,49 @@ mod testing {
             }
         }
         Ok(())
+    }
+
+    /// T1 regression: an out-of-range frame length after DRBG demasking must
+    /// fail synchronously with `FrameError::InvalidFrame`. The session is
+    /// permanently desynchronised at this point (the nonce counter has been
+    /// consumed), so subsequent decode calls on the same codec must keep
+    /// returning errors instead of silently re-buffering bytes.
+    #[test]
+    fn codec_invalid_length_rejected_immediately() {
+        let km = [0xC3u8; KEY_MATERIAL_LENGTH];
+        let mut codec = EncryptingCodec::new(km, km);
+
+        // Recreate the decoder-side DRBG locally so we know the first mask
+        // the codec will XOR onto the length bytes.
+        let seed = Seed::try_from(&km[KEY_LENGTH + NONCE_PREFIX_LENGTH..]).unwrap();
+        let mut shadow_drbg = Drbg::new(Some(seed)).unwrap();
+        let mask = shadow_drbg.length_mask();
+
+        // Pick a wire length that becomes 0 after demasking — 0 is below
+        // MIN_FRAME_LENGTH=16 so it must be rejected.
+        let wire_bytes = mask.to_be_bytes();
+        let mut buf = BytesMut::from(&wire_bytes[..]);
+        // Feed plenty of trailing bytes to make sure we are not hitting the
+        // "need more data" path: that path is for valid-length frames.
+        buf.extend_from_slice(&[0u8; 2048]);
+
+        let first = codec.decode(&mut buf);
+        match first {
+            Err(FrameError::InvalidFrame) => {}
+            other => panic!("expected InvalidFrame on out-of-range length, got {other:?}"),
+        }
+
+        // After a fatal frame error the codec must not silently resynchronise
+        // on the remaining stream bytes — every further decode must keep
+        // failing (either InvalidFrame again or a crypto error from an AEAD
+        // attempt with a wrong nonce). Notably it must never return Ok(Some).
+        for _ in 0..3 {
+            match codec.decode(&mut buf) {
+                Ok(None) => {}
+                Err(_) => {}
+                Ok(Some(m)) => panic!("codec resynced after fatal frame error: {m:?}"),
+            }
+        }
     }
 
     mod proptest_codec {

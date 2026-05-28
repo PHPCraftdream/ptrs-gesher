@@ -121,6 +121,14 @@ impl Messages {
         let length = buf.get_u16() as usize;
         trace!("parsing msg: type:{type_u8} frame_len={_r} msg_len={length}");
 
+        // `Buf::take(n)` silently clamps to `buf.remaining()`, so without this
+        // explicit check a wire-side `length > remaining` would yield a
+        // truncated payload instead of an error. For the PrngSeed slot in
+        // particular, a malicious bridge could otherwise control how much of
+        // the client's buffer is consumed and fingerprint the client.
+        // The `length == 0` Payload branch is the padding case and consumes
+        // all remaining bytes — that is the wire-level meaning of a zero
+        // length here, so no out-of-bound check is needed there.
         match pt {
             MessageTypes::Payload => {
                 let mut dst = vec![];
@@ -131,6 +139,9 @@ impl Messages {
                     buf.advance(n);
                     return Ok(Messages::Padding(n));
                 }
+                if buf.remaining() < length {
+                    return Err(FrameError::InvalidMessage);
+                }
                 trace!("content payload len={_r}");
 
                 dst.put(buf.take(length));
@@ -139,7 +150,10 @@ impl Messages {
             }
 
             MessageTypes::PrngSeed => {
-                if buf.remaining() < SEED_LENGTH {
+                if length != SEED_LENGTH {
+                    return Err(FrameError::InvalidMessage);
+                }
+                if buf.remaining() < length {
                     return Err(FrameError::InvalidMessage);
                 }
                 let mut seed = [0_u8; SEED_LENGTH];
@@ -268,6 +282,62 @@ mod test {
             MessageTypes::PrngSeed
         );
         assert_eq!(Messages::Padding(0).as_pt(), MessageTypes::Payload);
+    }
+
+    /// T2 regression: a Payload header that claims more bytes than remain in
+    /// the buffer must fail rather than yield a silently-truncated payload.
+    /// `Buf::take(n)` clamps to `buf.remaining()`, so without an explicit
+    /// length check this would return a short payload and the higher layers
+    /// would never notice the inconsistency.
+    #[test]
+    fn try_parse_payload_length_exceeds_buffer() {
+        let mut buf = BytesMut::new();
+        buf.put_u8(MessageTypes::PAYLOAD); // type
+        buf.put_u16(1000); // claimed length
+        buf.put_bytes(0xAA, 500); // only 500 bytes actually present
+
+        let result = Messages::try_parse(&mut buf);
+        assert!(
+            matches!(result, Err(FrameError::InvalidMessage)),
+            "expected InvalidMessage on payload length > remaining, got {result:?}",
+        );
+    }
+
+    /// T2 regression: the PrngSeed slot must require an exact `length ==
+    /// SEED_LENGTH`. A shorter wire length used to fall through to
+    /// `copy_to_slice(SEED_LENGTH)`, which on the boundary could mis-read
+    /// bytes belonging to the next message or panic; a longer wire length
+    /// would leave the next message offset out of sync. Either way, that is
+    /// an attacker-controllable parse desync.
+    #[test]
+    fn try_parse_prng_seed_length_must_match_seed_length() {
+        let mut buf = BytesMut::new();
+        buf.put_u8(MessageTypes::PRNG_SEED);
+        buf.put_u16(10); // not SEED_LENGTH
+        buf.put_bytes(0xBB, 10);
+
+        let result = Messages::try_parse(&mut buf);
+        assert!(
+            matches!(result, Err(FrameError::InvalidMessage)),
+            "expected InvalidMessage on PrngSeed length != SEED_LENGTH, got {result:?}",
+        );
+    }
+
+    /// T2 regression: a PrngSeed header that claims exactly SEED_LENGTH bytes
+    /// but is followed by fewer than SEED_LENGTH bytes must error rather than
+    /// underread.
+    #[test]
+    fn try_parse_prng_seed_buffer_too_short() {
+        let mut buf = BytesMut::new();
+        buf.put_u8(MessageTypes::PRNG_SEED);
+        buf.put_u16(SEED_LENGTH as u16);
+        buf.put_bytes(0xCC, SEED_LENGTH - 1);
+
+        let result = Messages::try_parse(&mut buf);
+        assert!(
+            matches!(result, Err(FrameError::InvalidMessage)),
+            "expected InvalidMessage when PrngSeed body shorter than declared length, got {result:?}",
+        );
     }
 
     mod proptest_msgs {
