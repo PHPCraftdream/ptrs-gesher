@@ -187,10 +187,43 @@ impl Server {
         Ok(buf.to_vec())
     }
 
+    /// Production entry point: parse a client handshake against the *current*
+    /// wall-clock epoch hour.
+    ///
+    /// This is a thin wrapper around [`Self::try_parse_client_handshake_at`]
+    /// that supplies the real epoch hour. Keeping the time source in this single
+    /// line (and out of the parsing core) is what makes the ±1h MAC slack window
+    /// deterministically testable: tests drive the core with an explicit
+    /// `server_epoch_hour` instead of `SystemTime::now()`. The public API and the
+    /// window width are unchanged — only the seam moved.
     fn try_parse_client_handshake(
         &self,
         buf: impl AsRef<[u8]>,
         materials: &mut HandshakeMaterials,
+    ) -> Result<ClientHandshakeMessage> {
+        self.try_parse_client_handshake_at(buf, materials, get_epoch_hour())
+    }
+
+    /// Core of client-handshake parsing, with the server's "current" epoch hour
+    /// injected as `server_epoch_hour`.
+    ///
+    /// INVARIANT (security-critical): the client folds an epoch-hour string `E`
+    /// into its handshake MAC but does *not* transmit `E` on the wire. The server
+    /// therefore cannot read `E` directly; it reproduces the MAC for each of the
+    /// candidate hours `server_epoch_hour + offset` for `offset ∈ {0, -1, +1}`
+    /// and accepts iff one of them matches in constant time. That `{-1, 0, +1}`
+    /// set *is* the ±1h clock-desync slack window. Widening it enlarges the
+    /// replay / anti-probing surface; narrowing it causes spurious rejections of
+    /// honest clients whose clock differs by up to an hour. The offset set must
+    /// not change.
+    ///
+    /// `server_epoch_hour` is the base hour around which those offsets are tried
+    /// — i.e. the value that production reads from `get_epoch_hour()`.
+    pub(crate) fn try_parse_client_handshake_at(
+        &self,
+        buf: impl AsRef<[u8]>,
+        materials: &mut HandshakeMaterials,
+        server_epoch_hour: u64,
     ) -> Result<ClientHandshakeMessage> {
         let buf = buf.as_ref();
         let mut h = materials.get_hmac();
@@ -236,9 +269,12 @@ impl Server {
         let mut mac_found = false;
         let mut epoch_hr = String::new();
         for offset in [0_i64, -1, 1] {
-            // Allow the epoch to be off by up to one hour in either direction
+            // Allow the epoch to be off by up to one hour in either direction.
+            // The offset set {0, -1, +1} is the ±1h slack window (see the
+            // function-level INVARIANT) — do not widen or narrow it. The base
+            // hour is injected so this window is testable without wall-clock.
             trace!("server trying offset: {offset}");
-            let eh = format!("{}", offset + get_epoch_hour() as i64);
+            let eh = format!("{}", offset + server_epoch_hour as i64);
 
             h.reset();
             h.update(&buf[..pos + MARK_LENGTH]);
@@ -284,5 +320,128 @@ impl Server {
             repres, 0, // pad_len doesn't matter when we are reading client handshake msg
             epoch_hr,
         ))
+    }
+}
+
+#[cfg(test)]
+mod epoch_window_tests {
+    //! Deterministic coverage of the server's ±1h epoch MAC slack window.
+    //!
+    //! The client bakes an epoch-hour string `E` into its handshake MAC but
+    //! never sends `E` on the wire, so the server reproduces the MAC for the
+    //! candidate hours `base + {0, -1, +1}` and accepts iff one matches. This
+    //! test pins that window directly: with a client hello built for a fixed
+    //! `E`, the server accepts when its injected base hour is `E`, `E-1`, or
+    //! `E+1` (the slack), and rejects at `E-2` / `E+2` (just outside). It uses
+    //! the injected-base seam (`try_parse_client_handshake_at`) so it needs
+    //! neither the network nor the real clock.
+
+    use super::*;
+    use crate::common::x25519_elligator2::{EphemeralSecret, Keys};
+    use rand::rngs::OsRng;
+
+    /// Reproduce the exact client-hello wire format
+    /// `X | P_C | M_C | MAC(X | P_C | M_C | E)` for an explicit epoch hour `E`.
+    ///
+    /// We can't go through `ClientHandshakeMessage::marshall`, because that
+    /// overwrites the epoch hour with `get_epoch_hour()` at marshal time, which
+    /// is exactly the wall-clock dependency this test is designed to avoid. So
+    /// we build the bytes here with `E` chosen by the caller, mirroring
+    /// `framing::handshake::ClientHandshakeMessage::marshall`. `h` must be the
+    /// server-identity-keyed HMAC (`materials.get_hmac()`), since the mark/MAC
+    /// are keyed by `serverIdentity | NodeID`.
+    fn build_client_hello(repres: &PublicRepresentative, pad_len: usize, e: u64, mut h: HmacSha256) -> Vec<u8> {
+        // M_C = HMAC(serverIdentity | NodeID, X)
+        h.reset();
+        h.update(repres.as_bytes().as_ref());
+        let mark = h.finalize_reset().into_bytes()[..MARK_LENGTH].to_vec();
+
+        let pad = make_hs_pad(pad_len).expect("test padding generation");
+
+        // X | P_C | M_C
+        let mut params = Vec::new();
+        params.extend_from_slice(repres.as_bytes());
+        params.extend_from_slice(&pad);
+        params.extend_from_slice(&mark);
+
+        // MAC = HMAC(serverIdentity | NodeID, X | P_C | M_C | E)
+        h.update(&params);
+        h.update(format!("{e}").as_bytes());
+        let mac = h.finalize_reset().into_bytes()[..MAC_LENGTH].to_vec();
+
+        let mut hello = params;
+        hello.extend_from_slice(&mac);
+        hello
+    }
+
+    /// Build a fresh server + a client hello keyed to it, for a chosen epoch
+    /// hour `E`. A fresh `Server` (hence fresh replay filter) is returned with
+    /// each call so the replay filter never confuses the window assertions:
+    /// the same MAC accepted at `base = E` would otherwise be rejected as a
+    /// replay when re-checked at `base = E±1`.
+    fn server_and_hello_for_epoch(e: u64) -> (Server, Vec<u8>, HandshakeMaterials) {
+        let mut rng = OsRng;
+        let identity = Obfs4NtorSecretKey::generate_for_test(&mut rng);
+        let server = Server::new_from_key(identity.clone());
+
+        let materials = HandshakeMaterials::new(&identity, "epoch-window-test".into(), [0u8; SEED_LENGTH]);
+
+        // A real elligator2 ephemeral so the representative is on the wire form
+        // the server expects; the DH result is irrelevant to MAC validation.
+        let ephem: EphemeralSecret = Keys::ephemeral_from_rng(rng).expect("ephemeral key");
+        let repres = PublicRepresentative::from(&ephem);
+
+        // Padding must satisfy the server's minimum-handshake-length checks.
+        let hello = build_client_hello(&repres, CLIENT_MIN_PAD_LENGTH, e, materials.get_hmac());
+        (server, hello, materials)
+    }
+
+    /// Helper: does the server accept this hello when its base hour is `base`?
+    /// Returns `Ok(())` on accept, `Err(variant)` on the rejection variant.
+    fn parse_at(server: &Server, hello: &[u8], mut materials: HandshakeMaterials, base: u64) -> Result<()> {
+        server
+            .try_parse_client_handshake_at(hello, &mut materials, base)
+            .map(|_| ())
+    }
+
+    /// The fixed client epoch hour used across the window assertions. A concrete
+    /// historical value (2021-07-01T00:00 UTC / 3600) keeps the test fully
+    /// independent of the real clock.
+    const E: u64 = 1_625_097_600 / 3600;
+
+    #[test]
+    fn epoch_hour_exact_match_accepted() {
+        let (server, hello, mat) = server_and_hello_for_epoch(E);
+        parse_at(&server, &hello, mat, E).expect("hello built for E must be accepted at base=E");
+    }
+
+    #[test]
+    fn epoch_hour_within_slack_accepted() {
+        // base = E-1 and base = E+1 are the inclusive edges of the ±1h window:
+        // the client's E lands at the server's +1 / -1 offset respectively.
+        for base in [E - 1, E + 1] {
+            let (server, hello, mat) = server_and_hello_for_epoch(E);
+            parse_at(&server, &hello, mat, base)
+                .unwrap_or_else(|e| panic!("hello for E must be accepted at base={base} (slack edge), got {e:?}"));
+        }
+    }
+
+    #[test]
+    fn epoch_hour_outside_slack_rejected_as_bad_client_handshake() {
+        // base = E-2 and base = E+2 are one hour past the window: the candidate
+        // hours {base-1, base, base+1} never include E, so no MAC matches and
+        // the parse fails with the specific BadClientHandshake variant (the
+        // no-MAC-found arm), not some unrelated error. If the window were ever
+        // widened to ±2h these would start being accepted and this test fails.
+        for base in [E - 2, E + 2] {
+            let (server, hello, mat) = server_and_hello_for_epoch(E);
+            match parse_at(&server, &hello, mat, base) {
+                Err(Error::HandshakeErr(RelayHandshakeError::BadClientHandshake)) => {}
+                other => panic!(
+                    "hello for E must be rejected at base={base} (outside ±1h) with \
+                     HandshakeErr(BadClientHandshake); got: {other:?}"
+                ),
+            }
+        }
     }
 }

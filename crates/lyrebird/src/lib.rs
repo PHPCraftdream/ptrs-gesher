@@ -107,7 +107,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::Level;
 use tracing_subscriber::{filter::LevelFilter, prelude::*};
 
-use std::{env, net::SocketAddr, str::FromStr, sync::Arc};
+use std::{env, net::SocketAddr, pin::Pin, str::FromStr, sync::Arc};
 
 /// Client Socks address to listen on.
 const CLIENT_SOCKS_ADDR: &str = "127.0.0.1:0";
@@ -511,26 +511,17 @@ where
 
     let remote_addr = resolve_target_addr(target_addr).context("no remote address")?;
 
-    let remote = tokio::net::TcpStream::connect(remote_addr);
+    // The outgoing OR-port dial. Boxing it as a `FutureResult` is the seam
+    // exercised by tests: `establish_pt_conn` only ever sees a pinned
+    // future yielding the underlying socket, so an in-memory
+    // `tokio::io::duplex()` half can stand in for the real `TcpStream`.
+    let remote: Pin<ptrs::FutureResult<TcpStream, std::io::Error>> =
+        Box::pin(tokio::net::TcpStream::connect(remote_addr));
 
     // build the pluggable transport client and then dial, completing the
-    // connection and handshake when the `wrap(..)` is await-ed.
+    // connection and handshake when the future is await-ed.
     let pt_client = builder.build();
-    let mut pt_conn = match ptrs::ClientTransport::<TcpStream, std::io::Error>::establish(
-        pt_client,
-        Box::pin(remote),
-    )
-    .await
-    {
-        Err(e) => {
-            warn!(
-                address = sensitive(client_addr).to_string(),
-                "handshake failed: {e:#?}"
-            );
-            return Err(obfs4::Error::from(e.to_string())).context("handshake failed");
-        }
-        Ok(c) => c,
-    };
+    let mut pt_conn = establish_pt_conn(pt_client, remote, client_addr).await?;
 
     if let Err(e) = copy_bidirectional(&mut socks5_conn.into_inner(), &mut pt_conn).await {
         warn!(
@@ -539,6 +530,50 @@ where
         );
     }
     Ok(())
+}
+
+/// Drive a built pluggable-transport client to completion against a dial
+/// future, returning the wrapped tunnel stream.
+///
+/// This is the outgoing-connection seam carved out of
+/// [`client_handle_connection`]. The dial is supplied as an already-pinned
+/// [`ptrs::FutureResult`] (the same shape `establish` consumes) rather than
+/// being created inline with `TcpStream::connect`, so tests can inject an
+/// in-memory `tokio::io::duplex()` half — or a future that fails — and
+/// observe the handshake behaviour without touching the network.
+///
+/// On handshake failure the client address is logged (scrubbed) and a typed
+/// error is returned; the function never panics on a dial or handshake
+/// error reachable from the network.
+///
+/// # Cancel safety
+///
+/// cancel-safe: NO — `establish` runs the obfs4/webtunnel handshake, which
+/// writes to the underlying socket. Dropping this future mid-handshake can
+/// leave the peer expecting bytes that were never sent. The caller
+/// (`client_handle_connection`) runs inside a dedicated `tokio::spawn` task,
+/// so it is not composed under a `select!`/`timeout` cancellation point.
+pub(crate) async fn establish_pt_conn<In2, C2>(
+    pt_client: C2,
+    dial: Pin<ptrs::FutureResult<In2, std::io::Error>>,
+    client_addr: SocketAddr,
+) -> Result<C2::OutRW>
+where
+    // The dialed socket must be usable as an async connection. These are the
+    // same bounds the transport traits require of their `InRW` parameter.
+    In2: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
+    C2: ptrs::ClientTransport<In2, std::io::Error> + Send,
+{
+    match ptrs::ClientTransport::<In2, std::io::Error>::establish(pt_client, dial).await {
+        Err(e) => {
+            warn!(
+                address = sensitive(client_addr).to_string(),
+                "handshake failed: {e:#?}"
+            );
+            Err(obfs4::Error::from(e.to_string())).context("handshake failed")
+        }
+        Ok(c) => Ok(c),
+    }
 }
 
 /// This function assumes that the provided connection / socket manages reconstruction
@@ -988,5 +1023,152 @@ mod tests {
             .unwrap();
         assert_eq!(n_ab, msg_a_to_b.len() as u64);
         assert_eq!(n_ba, msg_b_to_a.len() as u64);
+    }
+
+    // -- establish_pt_conn (outgoing-dial seam) --
+    //
+    // These exercise the client outgoing-connection path
+    // (`client_handle_connection` → `establish_pt_conn`) that was previously
+    // unreachable in tests because it created a real `TcpStream::connect`
+    // inline. The dial is now an injectable `Pin<FutureResult<_, _>>`, so a
+    // `tokio::io::duplex()` half (or a deliberately-failing future) stands in
+    // for the OR-port socket. We drive the *ptrs trait* surface end to end:
+    // build an obfs4 client from a bridge-line arg string exactly the way
+    // `client_handle_connection` does (`Args` → `ClientBuilder::options` →
+    // `build`), then run the real obfs4 handshake over the duplex against a
+    // matching obfs4 `Server`.
+
+    use ptrs::ClientBuilder as _;
+    use tokio::io::DuplexStream;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    /// Build an obfs4 client transport from a bridge-line arg string via the
+    /// same `ptrs` builder path lyrebird uses for a real SOCKS connection:
+    /// parse the args, apply them through `ptrs::ClientBuilder::options`, then
+    /// `build`. The obfs4 builder/transport impls are generic over the socket
+    /// type, so we pin `InRW = DuplexStream` here (an in-memory stand-in for
+    /// the OR-port `TcpStream`).
+    fn obfs4_client_from_args(arg_string: &str) -> obfs4::Client {
+        let args = ptrs::args::Args::from_str(arg_string).expect("parse bridge-line args");
+        let mut builder = obfs4::ClientBuilder::default();
+        <obfs4::ClientBuilder as ptrs::ClientBuilder<DuplexStream>>::options(&mut builder, &args)
+            .expect("apply obfs4 args to builder");
+        <obfs4::ClientBuilder as ptrs::ClientBuilder<DuplexStream>>::build(&builder)
+    }
+
+    #[tokio::test]
+    async fn establish_pt_conn_obfs4_handshake_and_proxies_bytes() {
+        // A fresh obfs4 server with a random identity and the bridge-line
+        // arg string that a client must present to reach it.
+        let server_builder = obfs4::ServerBuilder::<DuplexStream>::default();
+        let arg_string = server_builder.client_params();
+        let server = server_builder.build();
+
+        // In-memory stand-in for the OR-port socket.
+        let (client_side, server_side) = tokio::io::duplex(65_536);
+
+        // Server peer: complete the obfs4 handshake, then echo one message.
+        let server_task = tokio::spawn(async move {
+            let mut s = server.wrap(server_side).await.expect("server handshake");
+            let mut buf = [0u8; 64];
+            let n = s.read(&mut buf).await.expect("server read");
+            s.write_all(&buf[..n]).await.expect("server echo write");
+            s.flush().await.expect("server flush");
+        });
+
+        // Client: build through the ptrs trait, then drive the seam with a
+        // dial future that yields the duplex half instead of a TcpStream.
+        let client = obfs4_client_from_args(&arg_string);
+        let dial: Pin<ptrs::FutureResult<DuplexStream, std::io::Error>> =
+            Box::pin(async move { Ok(client_side) });
+        let client_addr: SocketAddr = "127.0.0.1:9050".parse().unwrap();
+
+        let mut tunnel = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            establish_pt_conn(client, dial, client_addr),
+        )
+        .await
+        .expect("establish_pt_conn timed out")
+        .expect("establish_pt_conn should complete the obfs4 handshake");
+
+        // Bytes written into the obfs4 tunnel must come back through the
+        // server echo — proving `establish` consumed the injected dial
+        // stream and a real encrypted session is in place.
+        let msg = b"through-the-obfs4-tunnel";
+        tunnel.write_all(msg).await.expect("client write");
+        tunnel.flush().await.expect("client flush");
+
+        let mut got = vec![0u8; msg.len()];
+        tokio::time::timeout(std::time::Duration::from_secs(5), tunnel.read_exact(&mut got))
+            .await
+            .expect("client read timed out")
+            .expect("client read");
+        assert_eq!(&got, msg, "data must round-trip through the obfs4 tunnel");
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), server_task)
+            .await
+            .expect("server task timed out")
+            .expect("server task panicked");
+    }
+
+    #[tokio::test]
+    async fn establish_pt_conn_dial_failure_is_error_not_panic() {
+        // The dial future itself fails (e.g. OR-port connection refused).
+        // `establish` must surface this as an `Err` without panicking — this
+        // path is reachable from the network, so a regression to `unwrap`
+        // would be a remote DoS.
+        let server_builder = obfs4::ServerBuilder::<DuplexStream>::default();
+        let arg_string = server_builder.client_params();
+        let client = obfs4_client_from_args(&arg_string);
+
+        let dial: Pin<ptrs::FutureResult<DuplexStream, std::io::Error>> = Box::pin(async {
+            Err(std::io::Error::new(
+                std::io::ErrorKind::ConnectionRefused,
+                "dial refused",
+            ))
+        });
+        let client_addr: SocketAddr = "127.0.0.1:9050".parse().unwrap();
+
+        let result = establish_pt_conn(client, dial, client_addr).await;
+        assert!(
+            result.is_err(),
+            "a failed dial must produce an error, not a tunnel"
+        );
+    }
+
+    #[tokio::test]
+    async fn establish_pt_conn_handshake_eof_is_error_not_panic() {
+        // The dial succeeds (a socket is produced) but the OR-port peer
+        // immediately closes — e.g. the bridge dropped the connection during
+        // the handshake. The obfs4 client's first handshake read then hits
+        // EOF, which must surface as an `Err` from `establish_pt_conn`,
+        // promptly and without panicking. (The client returns `UnexpectedEof`
+        // on a 0-byte read rather than blocking until its handshake timeout.)
+        // This complements the positive end-to-end test: that one proves the
+        // bridge-line args reach the handshake crypto (a wrong/empty cert
+        // would make it fail); this one proves the failure branch is handled.
+        let server_builder = obfs4::ServerBuilder::<DuplexStream>::default();
+        let arg_string = server_builder.client_params();
+        let client = obfs4_client_from_args(&arg_string);
+
+        let (client_side, server_side) = tokio::io::duplex(65_536);
+        // Close the peer half before the handshake reads anything.
+        drop(server_side);
+
+        let dial: Pin<ptrs::FutureResult<DuplexStream, std::io::Error>> =
+            Box::pin(async move { Ok(client_side) });
+        let client_addr: SocketAddr = "127.0.0.1:9050".parse().unwrap();
+
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            establish_pt_conn(client, dial, client_addr),
+        )
+        .await
+        .expect("establish_pt_conn should fail fast on EOF, not block until timeout");
+
+        assert!(
+            result.is_err(),
+            "a peer that closes mid-handshake must produce an error, not a tunnel"
+        );
     }
 }
