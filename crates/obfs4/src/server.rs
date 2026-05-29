@@ -34,11 +34,13 @@ use tor_llcrypto::pk::rsa::RsaIdentity;
 const STATE_FILENAME: &str = "obfs4_state.json";
 
 /// Builder for constructing an obfs4 [`Server`] with identity key material.
+///
+/// Fields are private; configure the builder through its setters.
 pub struct ServerBuilder<T> {
     /// IAT (inter-arrival time) obfuscation mode for the server.
-    pub iat_mode: IAT,
+    pub(crate) iat_mode: IAT,
     /// Optional path to the directory where server state is persisted.
-    pub statefile_path: Option<String>,
+    pub(crate) statefile_path: Option<String>,
     pub(crate) identity_keys: Obfs4NtorSecretKey,
     pub(crate) handshake_timeout: MaybeTimeout,
     // pub(crate) drbg: Drbg, // TODO: build in DRBG
@@ -255,6 +257,11 @@ impl TryFrom<&Args> for RequiredServerState {
 pub struct Server(Arc<ServerInner>);
 
 /// Shared inner state for an obfs4 server, held behind an `Arc`.
+///
+/// Public only because it is the `Deref` target of the public [`Server`]; all
+/// of its fields are crate-private, and it is hidden from the documented API.
+/// Not part of the stable public surface.
+#[doc(hidden)]
 pub struct ServerInner {
     pub(crate) handshake_timeout: Option<tokio::time::Duration>,
     pub(crate) iat_mode: IAT,

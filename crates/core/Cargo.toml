@@ -1,6 +1,6 @@
 [package]
 name = "ptrs-gesher-core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT OR Apache-2.0"
@@ -10,6 +10,9 @@ categories = ["network-programming", "cryptography"]
 repository = "https://github.com/PHPCraftdream/ptrs-gesher"
 readme = "README.md"
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = []
@@ -17,7 +20,7 @@ debug = []
 
 [lib]
 name = "ptrs"
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [dependencies]
 futures = "0.3.30"

@@ -1,6 +1,6 @@
 [package]
 name = "ptrs-gesher-lyrebird"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT OR Apache-2.0"
@@ -8,6 +8,10 @@ description = "Lyrebird PT-manager: in-process loop usable as a library or busyb
 keywords = ["tor", "censorship", "pluggable", "transports"]
 categories = ["network-programming", "cryptography"]
 repository = "https://github.com/PHPCraftdream/ptrs-gesher"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [features]
 default = []
@@ -29,9 +33,9 @@ bench = false
 
 [dependencies]
 ## internal crates
-ptrs = { package = "ptrs-gesher-core", path = "../core", version = "0.1.0" }
-obfs4 = { package = "ptrs-gesher-obfs4", path = "../obfs4", version = "0.1.0" }
-webtunnel = { package = "ptrs-gesher-webtunnel", path = "../webtunnel", version = "0.1.0" }
+ptrs = { package = "ptrs-gesher-core", path = "../core", version = "0.2.0" }
+obfs4 = { package = "ptrs-gesher-obfs4", path = "../obfs4", version = "0.2.0" }
+webtunnel = { package = "ptrs-gesher-webtunnel", path = "../webtunnel", version = "0.2.0" }
 
 # shared deps
 

@@ -35,7 +35,7 @@ convenience, and also exposes the underlying crate modules (`ptrs`,
 
 ## Status
 
-Version `0.1.0` — not yet published to crates.io. Interface subject to
+Version `0.2.0` — not yet published to crates.io. Interface subject to
 change. Not production ready; do not rely on this for security-critical
 applications.
 

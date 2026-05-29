@@ -45,7 +45,13 @@ use std::str::FromStr;
 /// let b2: BridgeLine = s.parse().unwrap();
 /// assert_eq!(bridge, b2);
 /// ```
+///
+/// `#[non_exhaustive]`: this is the crate's central data type and the torrc
+/// Bridge grammar may grow first-class fields in a future revision. Today the
+/// only construction path is [`FromStr`], so the attribute costs callers
+/// nothing while leaving room to add fields without a breaking change.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct BridgeLine {
     /// Pluggable-transport name. `None` for plain bridges.
     pub transport: Option<String>,
@@ -58,7 +64,12 @@ pub struct BridgeLine {
 }
 
 /// Errors produced when parsing a bridge line.
+///
+/// `#[non_exhaustive]`: the set of parse failures is expected to grow as the
+/// torrc Bridge grammar gains stricter validation, so downstream `match`es
+/// must keep a wildcard arm.
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ParseError {
     /// The input string was empty.
     #[error("empty bridge line")]

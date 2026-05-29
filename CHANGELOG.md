@@ -7,6 +7,82 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-05-28
+
+Public-API cleanup (breaking) layered on top of the 0.1.1 security hotfix.
+The 0.1.1 changes were never published to crates.io separately and ship as
+part of this release.
+
+### Changed (breaking)
+
+- **obfs4**: internal modules (`common`, `framing`, `proto`) are hidden from
+  the public API via `#[doc(hidden)]`, and the foreign-crate re-exports
+  (`x25519-dalek`, the `curve25519-elligator2` alpha) are removed from the
+  surface — alpha dependencies no longer leak into our semver. The public
+  stream/config types (`Obfs4Stream`, `IAT`) are re-exported from the crate
+  root.
+- **obfs4 / bridge-line / webtunnel**: public error types and open-ended
+  config types are now `#[non_exhaustive]` (`Error`, `FrameError`, `IAT`,
+  `ParseError`, `BridgeLine`, `WebTunnelConfig`).
+- **obfs4**: `ClientBuilder` / `ServerBuilder` fields are encapsulated; use
+  the existing setters.
+
+### Fixed
+
+- **obfs4**: `O4Stream::poll_read` no longer panics when a decoded frame is
+  larger than the caller's read buffer; the remainder is buffered and
+  delivered across subsequent reads.
+- **obfs4**: removed reachable panics in `WeightedDist` sampling,
+  `ReplayFilter` lock-poison handling, and the epoch-hour / handshake-pad
+  helpers.
+- **webtunnel**: `WebTunnelBuilder::build()` no longer panics on a missing
+  config; a typed error surfaces at connect time instead.
+
+### Removed
+
+- **obfs4**: 6 dead optional dependencies (`curve25519-dalek`, `anyhow`,
+  `async-trait`, `num-bigint`, `simple_asn1`, `filetime`).
+- **core, obfs4**: unused `cdylib` crate-type (no C ABI exists).
+- Three vacuous tests (asserted nothing).
+
+### Added
+
+- `docs.rs` metadata (`all-features`) for all six published crates.
+- CI: MSRV (1.75) check, `rustdoc -D warnings`, and an
+  `experimental-server` feature build.
+
+## [0.1.1] - 2026-05-28
+
+Security hotfix (commit `5834832`).
+
+### Security
+
+- **obfs4**: an invalid-length frame now triggers an immediate connection
+  reject instead of being tolerated. The upstream Bider-style "swallow and
+  resync" countermeasure is unsound for an AEAD stream — a length desync
+  cannot be recovered and was a remotely-triggerable corruption vector.
+- **obfs4**: `messages_v1::try_parse` now validates the declared length
+  against its bound before reading, removing a frame-length-based
+  fingerprinting / mis-parse surface.
+- **obfs4**: `REPLAY_TTL` raised from 60 s to 30 h so the replay window
+  fully covers the ±1 h epoch-MAC slack. Previously a replayed handshake
+  could fall outside the filter and be re-accepted.
+- **obfs4**: `x25519_elligator2` now returns a `Result` instead of
+  panicking, closing a reachable handshake-path DoS.
+- **lyrebird**: the server-side PT-manager path is now gated behind the
+  optional `experimental-server` feature, preventing an accidental
+  unauthenticated open relay in default builds.
+
+### Fixed
+
+- **lyrebird**: removed the broken `tunnel_mgr` module (non-functional
+  public API).
+
+### Changed
+
+- **docs/legal**: `SECURITY.md` expanded (embargo, scope, contact);
+  `LICENSE-MIT` carries the fork copyright line.
+
 ## [0.1.0] - 2026-05-26
 
 ### Added

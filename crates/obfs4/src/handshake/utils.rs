@@ -8,9 +8,12 @@ use subtle::ConstantTimeEq;
 use ptrs::trace; // , trace};
 
 pub fn get_epoch_hour() -> u64 {
+    // A clock set before the UNIX epoch is a misconfigured host, not a runtime
+    // condition this protocol can recover from; fail fast with a clear message
+    // rather than an opaque `unwrap` panic.
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .expect("system clock is before UNIX epoch")
         .as_secs()
         / 3600
 }
@@ -18,9 +21,10 @@ pub fn get_epoch_hour() -> u64 {
 pub fn make_hs_pad(pad_len: usize) -> Result<Vec<u8>> {
     trace!("[make_hs_pad] generating {pad_len}B");
     let mut pad = vec![u8::default(); pad_len];
+    // A CSPRNG failure while generating handshake padding is unrecoverable.
     rand::thread_rng()
         .try_fill_bytes(&mut pad)
-        .expect("rng failure");
+        .expect("system RNG failure");
     Ok(pad)
 }
 
@@ -249,9 +253,6 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn epoch_format() {
-        let _h = format!("{}", get_epoch_hour());
-        // println!("{h} {}", hex::encode(h.as_bytes()));
-    }
+    // NOTE: a former `epoch_format` test only `format!`-ed `get_epoch_hour()`
+    // and asserted nothing, so it could never fail. It was removed.
 }

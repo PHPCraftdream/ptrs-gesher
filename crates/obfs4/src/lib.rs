@@ -3,16 +3,24 @@
 
 /// obfs4 client types.
 pub mod client;
-/// Shared cryptographic primitives and utilities.
+// Internal cryptographic primitives. Kept `pub` only so the crate's own
+// benches and integration tests can reach them; not part of the stable API.
+#[doc(hidden)]
 pub mod common;
 /// obfs4 server types.
 pub mod server;
 
-/// Framing codec and message types.
+// Internal framing codec and message types. Kept `pub` only for the crate's
+// own benches and integration tests; not part of the stable API.
+#[doc(hidden)]
 pub mod framing;
-/// IAT mode and stream types.
+// Internal stream and timeout machinery. The public-facing types it defines
+// (`Obfs4Stream`, `IAT`) are re-exported from the crate root below; the module
+// itself stays `pub` only so benches/tests can address it by path.
+#[doc(hidden)]
 pub mod proto;
 pub use client::{Client, ClientBuilder};
+pub use proto::{Obfs4Stream, IAT};
 pub use server::{Server, ServerBuilder};
 
 pub(crate) mod constants;
@@ -34,9 +42,11 @@ pub const OBFS4_NAME: &str = "obfs4";
 #[cfg(test)]
 pub(crate) mod test_utils;
 
-#[cfg(any(test, debug_assertions))]
+// Pre-generated key material and argument strings for the crate's own tests.
+// Gated to `test` so these never enter the published API or release binaries.
+#[cfg(test)]
 #[allow(missing_docs)]
-pub mod dev {
+pub(crate) mod dev {
     /// Pre-generated / shared key for use while running in debug mode.
     pub const DEV_PRIV_KEY: &[u8; 32] = b"0123456789abcdeffedcba9876543210";
 

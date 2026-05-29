@@ -1,6 +1,6 @@
 [package]
 name = "ptrs-gesher"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT OR Apache-2.0"
@@ -10,6 +10,10 @@ categories = ["network-programming", "cryptography"]
 repository = "https://github.com/PHPCraftdream/ptrs-gesher"
 readme = "../../README.md"
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 default = ["obfs4", "webtunnel", "bridge-line"]
 obfs4 = ["dep:obfs4"]
@@ -18,11 +22,11 @@ bridge-line = ["dep:bridge_line"]
 lyrebird = ["dep:lyrebird"]
 
 [dependencies]
-ptrs = { package = "ptrs-gesher-core", path = "../core", version = "0.1.0" }
-obfs4 = { package = "ptrs-gesher-obfs4", path = "../obfs4", version = "0.1.0", optional = true }
-webtunnel = { package = "ptrs-gesher-webtunnel", path = "../webtunnel", version = "0.1.0", optional = true }
-bridge_line = { package = "ptrs-gesher-bridge-line", path = "../bridge-line", version = "0.1.0", optional = true }
-lyrebird = { package = "ptrs-gesher-lyrebird", path = "../lyrebird", version = "0.1.0", optional = true }
+ptrs = { package = "ptrs-gesher-core", path = "../core", version = "0.2.0" }
+obfs4 = { package = "ptrs-gesher-obfs4", path = "../obfs4", version = "0.2.0", optional = true }
+webtunnel = { package = "ptrs-gesher-webtunnel", path = "../webtunnel", version = "0.2.0", optional = true }
+bridge_line = { package = "ptrs-gesher-bridge-line", path = "../bridge-line", version = "0.2.0", optional = true }
+lyrebird = { package = "ptrs-gesher-lyrebird", path = "../lyrebird", version = "0.2.0", optional = true }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["net"] }

@@ -36,7 +36,14 @@ impl ReplayFilter {
 
     /// Test whether `buf` has been seen before, then record it; returns `true` if it was a replay.
     pub fn test_and_set(&self, now: Instant, buf: impl AsRef<[u8]>) -> bool {
-        let mut inner = self.0.lock().unwrap();
+        // The filter is shared across every connection handled by a bridge. If
+        // one task panics while holding this lock the mutex becomes poisoned;
+        // recovering the inner value (rather than `.unwrap()` propagating the
+        // panic) prevents a single unrelated panic from cascading into every
+        // subsequent handshake and taking down the whole server. The replay set
+        // is best-effort accounting, so continuing with the existing contents is
+        // the correct fail-open-but-keep-serving choice here.
+        let mut inner = self.0.lock().unwrap_or_else(|p| p.into_inner());
         inner.test_and_set(now, buf)
     }
 }
@@ -60,7 +67,8 @@ impl Drop for InnerReplayFilter {
 impl InnerReplayFilter {
     fn new(ttl_limit: Duration, max_cap: usize) -> Self {
         let mut key = [0_u8; 16];
-        getrandom::getrandom(&mut key).unwrap();
+        // SipHash key for the filter; a CSPRNG failure here is unrecoverable.
+        getrandom::getrandom(&mut key).expect("system RNG failure seeding replay filter key");
 
         Self {
             filter: HashMap::new(),

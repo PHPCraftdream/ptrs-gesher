@@ -3,6 +3,17 @@
 //! The probdist module implements a weighted probability distribution suitable for
 //! protocol parameterization.  To allow for easy reproduction of a given
 //! distribution, the drbg package is used as the random number source.
+//!
+//! # Known issue: sampling is non-reproducible
+//!
+//! The distribution *tables* are derived deterministically from a [`drbg::Seed`]
+//! (see [`WeightedDist::reseed`]), but [`WeightedDist::sample`] draws its die-roll
+//! and coin-flip from the OS CSPRNG (`getrandom`), **not** from a seeded DRBG.
+//! As a consequence the obfuscation produced at run time is not reproducible from
+//! the seed alone. Upstream obfs4 (go-fil) samples from the seeded DRBG, so this
+//! is a behavioural divergence. It is documented rather than fixed here because a
+//! reference vector / wire-compat decision is needed before changing the sampling
+//! source; do not "fix" it casually as it alters observable traffic shaping.
 
 use crate::common::drbg;
 
@@ -55,9 +66,23 @@ impl WeightedDist {
     pub fn sample(&self) -> i32 {
         let dist = self.0.lock().unwrap();
 
+        // Invariant: `values`/`prob`/`alias` are non-empty after construction.
+        // `WeightedDist::new` always calls `reseed`, which calls `gen_values`,
+        // and `gen_values` picks `rng.gen_range(1..=n)` (with `n >= MIN_VALUES`
+        // == 1) entries — so `values.len() >= 1`. The `% values.len()` below and
+        // the `prob[i]`/`alias[i]` indexing rely on this; assert it so a future
+        // refactor that breaks the invariant fails loudly instead of panicking
+        // with an opaque divide-by-zero / out-of-bounds.
+        assert!(
+            !dist.values.is_empty(),
+            "WeightedDist sampled before tables were populated (empty values)"
+        );
+
         let mut buf = [0_u8; 8];
         // Generate a fair die roll fro a $n$-sided die; call the side $i$.
-        getrandom::getrandom(&mut buf).unwrap();
+        // A failure of the OS CSPRNG is not recoverable here; fail fast with a
+        // clear message rather than a bare unwrap.
+        getrandom::getrandom(&mut buf).expect("system RNG failure during obfs4 length sampling");
 
         #[cfg(target_pointer_width = "64")]
         let i = usize::from_ne_bytes(buf) % dist.values.len();
@@ -66,7 +91,7 @@ impl WeightedDist {
         let i = usize::from_ne_bytes(buf[0..4].try_into().unwrap()) % dist.values.len();
 
         // flip a coin that comes up heads with probability $prob[i]$.
-        getrandom::getrandom(&mut buf).unwrap();
+        getrandom::getrandom(&mut buf).expect("system RNG failure during obfs4 length sampling");
         let bits = u64::from_le_bytes(buf);
         let f = (bits >> 11) as f64 / ((1u64 << 53) as f64);
         // f is now uniform in [0.0, 1.0)
@@ -91,6 +116,15 @@ impl WeightedDist {
             dist.gen_uniform_weights(&mut drbg);
         }
         dist.gen_tables();
+
+        // Establish the non-empty invariant relied upon by `sample`: at least
+        // one value/prob/alias entry must exist after (re)seeding. `gen_values`
+        // guarantees this (it selects `1..=n` entries), so this assert is a
+        // tripwire for future changes, not expected to fire in normal operation.
+        debug_assert!(
+            !dist.values.is_empty() && dist.prob.len() == dist.values.len(),
+            "WeightedDist::reseed produced inconsistent/empty tables"
+        );
     }
 }
 
@@ -220,55 +254,13 @@ impl fmt::Display for InnerWeightedDist {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::test_utils::init_subscriber;
     use crate::Result;
 
-    use ptrs::trace;
-    use tracing::{span_enabled, Level};
-
-    #[test]
-    fn weighted_dist_uniformity() -> Result<()> {
-        init_subscriber();
-        let seed = drbg::Seed::new()?;
-
-        let n_trials = 1_000_000;
-        let mut hist = [0_usize; 1000];
-
-        let w = WeightedDist::new(seed, 0, 999, true);
-
-        if span_enabled!(Level::TRACE) {
-            trace!("Table:");
-            trace!("{w}");
-            let wi = w.0.lock().unwrap();
-            let sum: f64 = wi.weights.iter().sum();
-            let min_value = wi.min_value;
-            let values = &wi.values;
-
-            for (i, weight) in wi.weights.iter().enumerate() {
-                let p = weight / sum;
-                if p > 0.000001 {
-                    // filter out tiny values
-                    trace!(" [{}]: {p}", min_value + values[i]);
-                }
-            }
-        }
-
-        for _ in 0..n_trials {
-            let idx: usize = w.sample().try_into().unwrap();
-            hist[idx] += 1;
-        }
-
-        if span_enabled!(Level::TRACE) {
-            trace!("Generated:");
-            for (val, count) in hist.iter().enumerate() {
-                if *count != 0 {
-                    trace!(" {val}: {:} ({count})", *count as f64 / n_trials as f64);
-                }
-            }
-        }
-
-        Ok(())
-    }
+    // NOTE: a former `weighted_dist_uniformity` test ran 1,000,000 samples
+    // through `sample()` but asserted nothing (it only emitted trace output),
+    // so it could never fail and provided no coverage. It was removed. The
+    // tests below assert real invariants: that reseeding changes the output
+    // distribution and that samples stay within the configured [min, max].
 
     #[test]
     fn reseed_changes_distribution() -> Result<()> {

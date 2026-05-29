@@ -26,7 +26,12 @@ pub const WEBTUNNEL_NAME: &str = "webtunnel";
 // ---------------------------------------------------------------------------
 
 /// Errors produced during WebTunnel configuration or handshake.
+///
+/// `#[non_exhaustive]`: handshake and TLS failure modes are expected to grow
+/// (e.g. utls fingerprinting, ALPN negotiation), so downstream `match`es must
+/// keep a wildcard arm.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// The required `url=` parameter was not provided.
     #[error("missing required parameter: url")]
@@ -66,7 +71,13 @@ pub enum Error {
 // ---------------------------------------------------------------------------
 
 /// Parameters extracted from a webtunnel bridge line's key=value args.
+///
+/// `#[non_exhaustive]`: the webtunnel bridge-line option set is open-ended
+/// (e.g. `utls=` is parsed but not yet stored, and new transport knobs land
+/// here), so construct instances via [`WebTunnelConfig::from_args`] rather
+/// than a struct literal.
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub struct WebTunnelConfig {
     /// Full URL from `url=` (e.g. `https://example.com/secretPath`).
     pub url: String,
@@ -170,11 +181,12 @@ where
     }
 
     fn build(&self) -> Self::ClientPT {
+        // The trait requires an infallible `build`, but the config is only
+        // populated by a successful `options(..)` call. Rather than panic on
+        // an un-configured builder, carry the `None` forward and surface a
+        // typed error at connect time (`establish`/`wrap`).
         WebTunnelClient {
-            config: self
-                .config
-                .clone()
-                .expect("WebTunnelBuilder config must be set before build"),
+            config: self.config.clone(),
         }
     }
 
@@ -205,8 +217,12 @@ where
 // ---------------------------------------------------------------------------
 
 /// A WebTunnel client that has been configured and is ready to connect.
+///
+/// `config` is `None` only when the builder was `build()`-ed before a
+/// successful `options(..)`; in that case `establish`/`wrap` fail with a
+/// typed [`Error`] instead of panicking.
 pub struct WebTunnelClient {
-    config: WebTunnelConfig,
+    config: Option<WebTunnelConfig>,
 }
 
 impl<InRW, InErr> ptrs::ClientTransport<InRW, InErr> for WebTunnelClient
@@ -225,7 +241,10 @@ where
         // and may even be unreachable. The real target lives in `url=`
         // and we dial it directly inside `handshake::connect`.
         drop(input);
-        Box::pin(async move { handshake::connect(&self.config).await })
+        Box::pin(async move {
+            let config = self.config.ok_or(Error::MissingUrl)?;
+            handshake::connect(&config).await
+        })
     }
 
     fn wrap(self, io: InRW) -> Pin<F<Self::OutRW, Self::OutErr>> {
@@ -233,7 +252,10 @@ where
         // points at the wrong address for webtunnel, so we close it
         // and open a fresh TLS connection to the URL host.
         drop(io);
-        Box::pin(async move { handshake::connect(&self.config).await })
+        Box::pin(async move {
+            let config = self.config.ok_or(Error::MissingUrl)?;
+            handshake::connect(&config).await
+        })
     }
 
     fn method_name() -> String {
@@ -589,6 +611,30 @@ mod tests {
         let result =
             <WebTunnelBuilder as ptrs::ClientBuilder<TcpStream>>::options(&mut builder, &args);
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn build_without_options_fails_gracefully_on_wrap() {
+        // The `ClientBuilder` trait requires an infallible `build`. Building an
+        // un-configured builder must NOT panic; the missing config has to
+        // surface as a typed error at connect time. (On the previous code
+        // path `build` called `.expect(..)` and this test would panic.)
+        let builder = WebTunnelBuilder::default();
+        let client = <WebTunnelBuilder as ptrs::ClientBuilder<
+            tokio::io::DuplexStream,
+        >>::build(&builder);
+
+        // `wrap` drops its socket argument before checking config, so the
+        // duplex stream is never driven and no network access occurs.
+        let (a, b) = tokio::io::duplex(64);
+        drop(a);
+        let result = <WebTunnelClient as ptrs::ClientTransport<
+            tokio::io::DuplexStream,
+            io::Error,
+        >>::wrap(client, b)
+        .await;
+
+        assert!(matches!(result, Err(Error::MissingUrl)));
     }
 
     #[test]

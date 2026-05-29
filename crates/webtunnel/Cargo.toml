@@ -1,6 +1,6 @@
 [package]
 name = "ptrs-gesher-webtunnel"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT OR Apache-2.0"
@@ -9,11 +9,15 @@ keywords = ["tor", "censorship", "webtunnel", "pluggable-transport"]
 categories = ["network-programming", "cryptography"]
 repository = "https://github.com/PHPCraftdream/ptrs-gesher"
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [lib]
 name = "webtunnel"
 
 [dependencies]
-ptrs = { package = "ptrs-gesher-core", path = "../core", version = "0.1.0" }
+ptrs = { package = "ptrs-gesher-core", path = "../core", version = "0.2.0" }
 tokio = { version = "1", features = ["net", "io-util"] }
 tokio-rustls = { version = "0.26", default-features = false, features = ["logging", "tls12"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "logging", "tls12"] }

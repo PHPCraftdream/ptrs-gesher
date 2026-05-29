@@ -4,10 +4,19 @@
 //! key-agreement trait, but for now we are just wrapping and re-using the APIs
 //! from [`x25519_dalek`].
 
-pub use curve25519_elligator2::{MapToPointVariant, Randomized};
+// `curve25519_elligator2` is a pre-1.0 (alpha) dependency; re-exporting any of
+// its items would pin our semver to it forever. These traits are an internal
+// implementation detail of the elligator2 mapping and stay private.
+use curve25519_elligator2::{MapToPointVariant, Randomized};
 use getrandom::getrandom;
-#[allow(unused)]
-pub use x25519_dalek::{PublicKey, SharedSecret, StaticSecret};
+// `StaticSecret`/`SharedSecret` are needed by other modules in this crate but
+// are not part of the stable public API, so they are crate-private re-exports.
+pub(crate) use x25519_dalek::{SharedSecret, StaticSecret};
+// `PublicKey` is reached by the crate's own benches via
+// `obfs4::common::x25519_elligator2::PublicKey`; exposed but hidden from docs
+// so the foreign `x25519_dalek` type never enters the documented public API.
+#[doc(hidden)]
+pub use x25519_dalek::PublicKey;
 
 use crate::{Error, Result};
 

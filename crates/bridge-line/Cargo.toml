@@ -1,6 +1,6 @@
 [package]
 name = "ptrs-gesher-bridge-line"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT OR Apache-2.0"
@@ -8,6 +8,10 @@ description = "Tor `Bridge` directive parser — torrc format, transport-agnosti
 keywords = ["tor", "bridge", "parser", "obfs4", "webtunnel"]
 categories = ["network-programming", "parsing"]
 repository = "https://github.com/PHPCraftdream/ptrs-gesher"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
 
 [lib]
 name = "bridge_line"

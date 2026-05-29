@@ -29,6 +29,7 @@ use super::framing::{FrameError, Messages};
 
 /// IAT (inter-arrival time) traffic shaping mode for obfs4 connections.
 #[allow(dead_code, unused)]
+#[non_exhaustive]
 #[derive(Default, Debug, Clone, Copy, PartialEq)]
 pub enum IAT {
     /// No inter-arrival time obfuscation is applied.
@@ -123,6 +124,13 @@ where
     pub iat_dist: probdist::WeightedDist,
 
     pub session: Session,
+
+    /// Bytes decoded from a single obfs4 frame that did not fit in the caller's
+    /// `ReadBuf` on a previous `poll_read`. A decoded frame can carry up to
+    /// `MAX_MESSAGE_PAYLOAD_LENGTH` (~1448B) of payload, which is larger than an
+    /// arbitrary caller buffer; the surplus is parked here and delivered on
+    /// subsequent reads so no payload is lost (and `put_slice` never overflows).
+    read_residual: BytesMut,
 }
 
 impl<T> O4Stream<T>
@@ -162,7 +170,31 @@ where
             session,
             length_dist,
             iat_dist,
+            read_residual: BytesMut::new(),
         }
+    }
+
+    /// Copy as much of `message` into `buf` as fits, parking any leftover bytes
+    /// in `residual` for a later `poll_read`. This is the overflow-safe
+    /// replacement for `buf.put_slice(&message)`, which panics when the decoded
+    /// frame payload is larger than `buf.remaining()`.
+    fn stash_payload(residual: &mut BytesMut, buf: &mut ReadBuf<'_>, message: &[u8]) {
+        let n = std::cmp::min(buf.remaining(), message.len());
+        buf.put_slice(&message[..n]);
+        if n < message.len() {
+            residual.extend_from_slice(&message[n..]);
+        }
+    }
+
+    /// Hand previously-buffered residual bytes to `buf` (up to its capacity),
+    /// advancing past what was consumed. Returns the number of bytes written.
+    fn drain_residual(residual: &mut BytesMut, buf: &mut ReadBuf<'_>) -> usize {
+        let n = std::cmp::min(buf.remaining(), residual.len());
+        if n > 0 {
+            buf.put_slice(&residual[..n]);
+            residual.advance(n);
+        }
+        n
     }
 
     pub(crate) fn try_handle_non_payload_message(&mut self, msg: framing::Messages) -> Result<()> {
@@ -298,6 +330,17 @@ where
         cx: &mut Context<'_>,
         buf: &mut ReadBuf<'_>,
     ) -> Poll<StdResult<(), IoError>> {
+        // First, hand back any payload bytes left over from a previous frame
+        // that did not fit in the caller's buffer. Doing this before touching
+        // the network preserves byte ordering and guarantees forward progress.
+        {
+            let this = self.as_mut().project();
+            if !this.read_residual.is_empty() {
+                Self::drain_residual(this.read_residual, buf);
+                return Poll::Ready(Ok(()));
+            }
+        }
+
         // If there is no payload from the previous Read() calls, consume data off
         // the network.  Not all data received is guaranteed to be usable payload,
         // so do this in a loop until we would block on a read or an error occurs.
@@ -324,7 +367,12 @@ where
             };
 
             if let framing::Messages::Payload(message) = msg {
-                buf.put_slice(&message);
+                // A decoded frame may carry more payload than `buf` can hold;
+                // copy what fits and park the remainder in `read_residual` for
+                // the next poll_read. `put_slice` on the whole message would
+                // otherwise panic when `message.len() > buf.remaining()`.
+                let this = self.as_mut().project();
+                Self::stash_payload(this.read_residual, buf, &message);
                 return Poll::Ready(Ok(()));
             }
             if let Messages::Padding(_) = msg {
@@ -429,5 +477,53 @@ mod tests {
         assert!(d.is_some());
         assert!(d.unwrap() <= Duration::from_secs(60));
         assert!(d.unwrap() > Duration::from_secs(55));
+    }
+
+    // Regression: a single decoded obfs4 frame can carry up to
+    // MAX_MESSAGE_PAYLOAD_LENGTH (~1448B) of payload. `poll_read` used to do
+    // `buf.put_slice(&message)`, which panics when the message is larger than
+    // the caller's `ReadBuf`. The fix copies what fits and parks the rest in a
+    // residual buffer for subsequent reads. This test drives the exact helpers
+    // `poll_read` delegates to (`stash_payload` + `drain_residual`) with a full
+    // ~1448B payload and a tiny 100-byte `ReadBuf`, asserting no panic and that
+    // every byte is delivered, in order, across multiple reads. Against the old
+    // `put_slice(&message)` path this scenario panicked.
+    #[test]
+    fn oversized_frame_payload_drains_without_loss() {
+        use tokio::io::ReadBuf;
+
+        let payload_len = crate::constants::MAX_MESSAGE_PAYLOAD_LENGTH;
+        assert!(
+            payload_len > 100,
+            "frame payload should exceed the small read buffer for this test"
+        );
+
+        // Distinct byte pattern so ordering / loss is detectable.
+        let message: Vec<u8> = (0..payload_len).map(|i| (i % 251) as u8).collect();
+
+        let mut residual = BytesMut::new();
+        let mut delivered: Vec<u8> = Vec::with_capacity(payload_len);
+
+        // First read: a 100-byte ReadBuf receives the head; the rest is stashed.
+        let mut storage = [0u8; 100];
+        let mut rb = ReadBuf::new(&mut storage);
+        // This call would panic on the old `buf.put_slice(&message)` code.
+        O4Stream::<tokio::io::DuplexStream>::stash_payload(&mut residual, &mut rb, &message);
+        assert_eq!(rb.filled().len(), 100);
+        delivered.extend_from_slice(rb.filled());
+        assert_eq!(residual.len(), payload_len - 100);
+
+        // Subsequent reads drain the residual 100 bytes at a time.
+        while !residual.is_empty() {
+            let mut storage = [0u8; 100];
+            let mut rb = ReadBuf::new(&mut storage);
+            let n = O4Stream::<tokio::io::DuplexStream>::drain_residual(&mut residual, &mut rb);
+            assert!(n > 0, "drain made no progress");
+            assert_eq!(rb.filled().len(), n);
+            delivered.extend_from_slice(rb.filled());
+        }
+
+        assert_eq!(delivered.len(), payload_len, "lost or duplicated bytes");
+        assert_eq!(delivered, message, "payload corrupted across reads");
     }
 }

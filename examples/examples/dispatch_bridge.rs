@@ -42,7 +42,7 @@ fn main() {
                     &args,
                 )
                 .expect("obfs4 options");
-                println!("  IAT mode : {:?}", builder.iat_mode);
+                println!("  IAT mode : {:?}", args.retrieve("iat-mode"));
                 println!("  -> obfs4 client configured OK");
             }
             Some("webtunnel") => {

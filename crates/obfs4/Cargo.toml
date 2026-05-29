@@ -1,6 +1,6 @@
 [package]
 name = "ptrs-gesher-obfs4"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 rust-version = "1.75"
 license = "MIT OR Apache-2.0"
@@ -9,17 +9,21 @@ keywords = ["tor", "networking", "censorship", "circumvention", "pluggable-trans
 categories = ["network-programming", "cryptography"]
 repository = "https://github.com/PHPCraftdream/ptrs-gesher"
 
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
 [features]
 default = []
 debug = ["ptrs/debug"]
 
 [lib]
 name = "obfs4"
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [dependencies]
 ## Local
-ptrs = { package = "ptrs-gesher-core", path = "../core", version = "0.1.0" }
+ptrs = { package = "ptrs-gesher-core", path = "../core", version = "0.2.0" }
 
 ## PRNG
 getrandom = "0.2.11"
@@ -60,16 +64,9 @@ cipher = "0.4.4"
 zeroize = "1.7.0"
 thiserror = "2.0.6"
 
-## transitive dependencies that break things when versions are too low
-## i.e. any lower than the exact versions here.
-curve25519-dalek = { version="4.1", optional=true}
+## Pinned to keep transitive resolution from selecting versions that are
+## too low (anything below the exact version here breaks the build).
 curve25519-elligator2 = { version="0.1.0-alpha.1", features=["elligator2"] }
-
-anyhow = { version="1.0.20", optional=true}
-async-trait = { version="0.1.9", optional=true}
-num-bigint = { version="0.4.2", optional=true}
-simple_asn1 = { version="0.6.1", optional=true}
-filetime = {version="0.2.25", optional=true}
 
 ## Maybe useful in future iterations
 # tor-socksproto = { version = "0.10.0" }

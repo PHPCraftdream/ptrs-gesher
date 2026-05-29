@@ -64,9 +64,9 @@ fn main() {
     .expect("builder should accept these args");
 
     println!("\n--- obfs4 ClientBuilder ---");
-    println!("  iat_mode       : {:?}", builder.iat_mode);
-    println!("  station_pubkey : {:02x?}", &builder.station_pubkey[..8]);
-    println!("  station_id     : {:02x?}", &builder.station_id[..8]);
+    println!("  configured from the bridge line above");
+    println!("  iat-mode : {:?}", args.retrieve("iat-mode"));
+    println!("  cert     : present={}", args.retrieve("cert").is_some());
 
     // The builder is now ready. In a real app you would call:
     //   let client = builder.build();

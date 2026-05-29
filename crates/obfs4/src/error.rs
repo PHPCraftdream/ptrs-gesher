@@ -11,7 +11,11 @@ use crate::common::ntor_arti::RelayHandshakeError;
 pub type Result<T> = std::result::Result<T, Error>;
 
 /// Errors that can occur when using the transports, including wrapped from dependencies.
+///
+/// Marked `#[non_exhaustive]`: new variants may be added in future releases
+/// without a breaking change, so downstream `match`es must include a wildcard arm.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Error {
     /// An internal logic error detected via `tor_error::Bug`.
     Bug(tor_error::Bug),

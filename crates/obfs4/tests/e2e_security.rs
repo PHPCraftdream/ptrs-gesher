@@ -7,15 +7,34 @@
 
 use std::time::Duration;
 
-use obfs4::Server;
+use obfs4::common::ntor_arti::RelayHandshakeError;
+use obfs4::{Error, Server};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Capture the raw client hello from a legitimate handshake, then replay
-/// those exact bytes to the same server instance. The server's replay
-/// filter must reject the second attempt.
+/// those exact bytes to the same server instance. The first delivery must be
+/// *accepted* (proving the bytes are a well-formed handshake), and the second,
+/// byte-identical delivery must be *rejected* by the replay filter.
 ///
 /// This exercises the full chain: client generates ephemeral key →
 /// marshalls handshake → server parses → checks replay filter → rejects.
+///
+/// The accept-then-reject framing is the load-bearing part of this test:
+/// because the *same* bytes are accepted on the first connection, a rejection
+/// on the second connection cannot be attributed to malformed input, a wrong
+/// key, a timeout, or an I/O error — the only component that turns a
+/// previously-valid handshake into a rejected one is the replay filter. That
+/// is what makes this a replay test rather than a generic "handshake errored"
+/// test.
+///
+/// On the error *variant*: the replay branch in `handshake_server` raises
+/// `RelayHandshakeError::ReplayedHandshake` internally, but
+/// `server_handshake_obfs4_no_keygen` currently collapses every non-`EAgain`
+/// parse error into `RelayHandshakeError::BadClientHandshake`, so that is the
+/// variant that actually escapes to the public API today. We accept either the
+/// precise `ReplayedHandshake` (should the flattening be removed later) or the
+/// current `BadClientHandshake`, but never `Ok` and never a non-handshake
+/// error.
 #[tokio::test]
 async fn replayed_client_hello_rejected() {
     let server = Server::getrandom();
@@ -50,10 +69,10 @@ async fn replayed_client_hello_rejected() {
         hello.len()
     );
 
-    // --- Step 2: Feed the captured hello to the real server ---
-    // First connection — the server sees these bytes for the first time.
-    // It should fail (wrong-key or auth failure) but register them in the
-    // replay filter.
+    // --- Step 2: Feed the captured hello to the real server (first time) ---
+    // The server sees these bytes for the first time. Because the capture is a
+    // complete, well-formed client handshake for this exact server, the server
+    // accepts it AND registers its MAC in the replay filter.
     let (mut replay1_write, server_side1) = tokio::io::duplex(64 * 1024);
     let server_clone = server.clone();
     let first_attempt = tokio::spawn(async move { server_clone.wrap(server_side1).await });
@@ -64,14 +83,21 @@ async fn replayed_client_hello_rejected() {
     tokio::time::sleep(Duration::from_millis(200)).await;
     drop(replay1_write);
 
-    let _first_result = tokio::time::timeout(Duration::from_secs(3), first_attempt)
+    let first_result = tokio::time::timeout(Duration::from_secs(3), first_attempt)
         .await
         .expect("first attempt hung")
         .expect("first attempt panicked");
-    // First attempt may succeed or fail depending on timing — either way,
-    // the bytes are now in the replay filter.
 
-    // --- Step 3: Replay the SAME hello bytes ---
+    // The first delivery of a valid hello must succeed. This is what lets us
+    // attribute the second-delivery failure specifically to replay detection:
+    // identical bytes, accepted once, so any later rejection is the filter.
+    assert!(
+        first_result.is_ok(),
+        "captured hello was not a valid handshake (first delivery failed): {:?}",
+        first_result.err()
+    );
+
+    // --- Step 3: Replay the SAME hello bytes to a fresh connection ---
     let (mut replay2_write, server_side2) = tokio::io::duplex(64 * 1024);
     let server_clone2 = server.clone();
     let second_attempt = tokio::spawn(async move { server_clone2.wrap(server_side2).await });
@@ -86,8 +112,24 @@ async fn replayed_client_hello_rejected() {
         .expect("replay attempt hung")
         .expect("replay attempt panicked");
 
-    assert!(
-        second_result.is_err(),
-        "server accepted replayed client hello — replay filter not working"
-    );
+    // The replayed (previously-accepted) hello must be rejected at the
+    // handshake layer. We pin to the replay-specific variant if it surfaces,
+    // and otherwise accept the flattened `BadClientHandshake` that the current
+    // server code produces for the replay path (see the doc comment above).
+    match second_result {
+        Err(Error::HandshakeErr(RelayHandshakeError::ReplayedHandshake)) => {
+            // Ideal: the precise replay variant escaped to the caller.
+        }
+        Err(Error::HandshakeErr(RelayHandshakeError::BadClientHandshake)) => {
+            // Current reality: the replay error is flattened to BadClientHandshake
+            // by server_handshake_obfs4_no_keygen. Since the identical bytes were
+            // accepted in step 2, this rejection is still attributable to the
+            // replay filter and to nothing else.
+        }
+        Err(other) => panic!(
+            "previously-accepted hello was rejected, but not at the handshake \
+             layer — expected ReplayedHandshake/BadClientHandshake, got: {other:?}"
+        ),
+        Ok(_) => panic!("server accepted replayed client hello — replay filter not working"),
+    }
 }

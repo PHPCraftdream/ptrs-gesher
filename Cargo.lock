@@ -2232,7 +2232,7 @@ dependencies = [
 
 [[package]]
 name = "ptrs-gesher"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "ptrs-gesher-bridge-line",
@@ -2245,7 +2245,7 @@ dependencies = [
 
 [[package]]
 name = "ptrs-gesher-bridge-line"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -2254,7 +2254,7 @@ dependencies = [
 
 [[package]]
 name = "ptrs-gesher-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "criterion",
  "futures",
@@ -2285,7 +2285,7 @@ dependencies = [
 
 [[package]]
 name = "ptrs-gesher-lyrebird"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2307,27 +2307,22 @@ dependencies = [
 
 [[package]]
 name = "ptrs-gesher-obfs4"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
- "anyhow",
- "async-trait",
  "base64",
  "bytes",
  "cipher",
  "colored",
  "criterion",
  "crypto_secretbox",
- "curve25519-dalek",
  "curve25519-elligator2",
  "digest 0.10.7",
- "filetime",
  "futures",
  "getrandom 0.2.17",
  "hex",
  "hex-literal",
  "hkdf",
  "hmac",
- "num-bigint",
  "pin-project",
  "proptest",
  "ptrs-gesher-core",
@@ -2336,7 +2331,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "simple_asn1",
  "siphasher",
  "subtle",
  "thiserror 2.0.18",
@@ -2355,7 +2349,7 @@ dependencies = [
 
 [[package]]
 name = "ptrs-gesher-webtunnel"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "base64",
  "criterion",
@@ -2980,18 +2974,6 @@ checksum = "77549399552de45a898a580c1b41d445bf730df867cc44e6c0233bbc4b8329de"
 dependencies = [
  "digest 0.10.7",
  "rand_core 0.6.4",
-]
-
-[[package]]
-name = "simple_asn1"
-version = "0.6.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d585997b0ac10be3c5ee635f1bab02d512760d14b7c468801ac8a01d9ae5f1d"
-dependencies = [
- "num-bigint",
- "num-traits",
- "thiserror 2.0.18",
- "time",
 ]
 
 [[package]]

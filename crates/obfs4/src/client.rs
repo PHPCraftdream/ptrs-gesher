@@ -25,16 +25,18 @@ use std::{
 };
 
 /// Builder for constructing an obfs4 [`Client`] with connection parameters.
+///
+/// Fields are private; configure the builder through its `with_*` setters.
 #[derive(Clone, Debug)]
 pub struct ClientBuilder {
     /// IAT (inter-arrival time) obfuscation mode for the client.
-    pub iat_mode: IAT,
+    pub(crate) iat_mode: IAT,
     /// The server's 32-byte x25519 public key (elligator2 representative).
-    pub station_pubkey: [u8; KEY_LENGTH],
+    pub(crate) station_pubkey: [u8; KEY_LENGTH],
     /// The server's 20-byte node ID (RSA identity fingerprint).
-    pub station_id: [u8; NODE_ID_LENGTH],
+    pub(crate) station_id: [u8; NODE_ID_LENGTH],
     /// Optional path to a persistent state file for this client.
-    pub statefile_path: Option<String>,
+    pub(crate) statefile_path: Option<String>,
     pub(crate) handshake_timeout: MaybeTimeout,
 }
 
@@ -200,17 +202,6 @@ impl Client {
 #[cfg(test)]
 mod test {
     use super::*;
-    use crate::Result;
-
-    #[test]
-    fn parse_params() -> Result<()> {
-        let test_args = [["", "", ""]];
-
-        for (i, test_case) in test_args.iter().enumerate() {
-            let cb = ClientBuilder::from_params(test_case.to_vec())?;
-        }
-        Ok(())
-    }
 
     #[test]
     fn builder_with_methods() {

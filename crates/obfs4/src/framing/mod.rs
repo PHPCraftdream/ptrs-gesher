@@ -113,7 +113,11 @@ pub trait TryParse {
 impl std::error::Error for FrameError {}
 
 /// Errors that can occur while encoding or decoding an obfs4 frame.
+///
+/// Marked `#[non_exhaustive]`: new variants may be added without a breaking
+/// change, so downstream `match`es must include a wildcard arm.
 #[derive(Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FrameError {
     /// is the error returned when encoding rejects the payload length.
     InvalidPayloadLength(usize),

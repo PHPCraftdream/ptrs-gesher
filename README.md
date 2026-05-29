@@ -50,8 +50,8 @@ needed when moving from `jmwample/ptrs` to `ptrs-gesher`. Adjust only the
 
 ```toml
 [dependencies]
-ptrs    = { package = "ptrs-gesher-core",   version = "0.1" }
-obfs4   = { package = "ptrs-gesher-obfs4",  version = "0.1" }
+ptrs    = { package = "ptrs-gesher-core",   version = "0.2" }
+obfs4   = { package = "ptrs-gesher-obfs4",  version = "0.2" }
 webtunnel = "ptrs-gesher-webtunnel"  # new, no upstream equivalent
 ```
 
@@ -69,7 +69,7 @@ webtunnel = "ptrs-gesher-webtunnel"  # new, no upstream equivalent
 
 - Workspace builds on stable Rust ≥ 1.75.
 - 279 tests passing (E2E, property-based, fuzz-like × 10k iterations).
-- Not yet published to crates.io; targeting 0.1.0.
+- Published to crates.io at 0.1.0; this revision (0.2.0, breaking API cleanup) is not yet released.
 - **Interoperability with reference `obfs4proxy` (Go) and the
   WebTunnel reference server has not been smoke-tested at this point.**
 

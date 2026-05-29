@@ -47,6 +47,31 @@ jobs:
       - run: cargo build --workspace
       - run: cargo test --workspace --all-targets --no-fail-fast
       - run: cargo test --workspace --doc
+      # Feature-gated server code must keep compiling so it doesn't rot.
+      - run: cargo test -p ptrs-gesher-lyrebird --features experimental-server --no-fail-fast
+
+  msrv:
+    name: MSRV (1.75)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rust-version in every manifest is 1.75; verify it actually builds.
+      # No --all-targets: dev-deps (criterion/proptest) carry higher MSRVs and
+      # would flag failures unrelated to our declared library/bin MSRV.
+      - uses: dtolnay/rust-toolchain@1.75
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --locked
+
+  docs:
+    runs-on: ubuntu-latest
+    env:
+      # Catch broken intra-doc links and malformed rustdoc.
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --workspace --no-deps --all-features
 
   build-examples:
     runs-on: ubuntu-latest
