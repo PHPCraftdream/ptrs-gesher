@@ -270,6 +270,12 @@ where
         // while we have bytes in the buffer write MAX_MESSAGE_PAYLOAD_LENGTH
         // chunks until we have less than that amount left.
         // TODO: asyncwrite - apply length_dist instead of just full payloads
+        //
+        // A single `out_buf` is reused for every chunk and for the trailing
+        // frame: the codec's `Encoder` drains it as a `Buf` on `start_send`, and
+        // `clear()` resets the length while keeping the allocation. The trailing
+        // frame previously allocated a fresh `BytesMut`; reusing this one drops
+        // that per-call allocation.
         let mut len_sent: usize = 0;
         let mut out_buf = BytesMut::with_capacity(framing::MAX_MESSAGE_PAYLOAD_LENGTH);
         while msg_len - len_sent > framing::MAX_MESSAGE_PAYLOAD_LENGTH {
@@ -292,10 +298,8 @@ where
         }
 
         let payload = framing::Messages::Payload(buf[len_sent..].to_vec());
-
-        let mut out_buf = BytesMut::new();
         payload.marshall(&mut out_buf)?;
-        this.stream.as_mut().start_send(out_buf)?;
+        this.stream.as_mut().start_send(&mut out_buf)?;
 
         Poll::Ready(Ok(msg_len))
     }

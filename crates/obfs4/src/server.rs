@@ -18,7 +18,7 @@ use crate::{
 };
 use ptrs::args::Args;
 
-use std::{borrow::BorrowMut, marker::PhantomData, ops::Deref, str::FromStr, sync::Arc};
+use std::{borrow::BorrowMut, marker::PhantomData, str::FromStr, sync::Arc};
 
 use bytes::{Buf, BufMut, Bytes};
 use hex::FromHex;
@@ -254,15 +254,14 @@ impl TryFrom<&Args> for RequiredServerState {
 
 /// An obfs4 server that accepts and unwraps client connections.
 #[derive(Clone)]
-pub struct Server(Arc<ServerInner>);
+pub struct Server(pub(crate) Arc<ServerInner>);
 
 /// Shared inner state for an obfs4 server, held behind an `Arc`.
 ///
-/// Public only because it is the `Deref` target of the public [`Server`]; all
-/// of its fields are crate-private, and it is hidden from the documented API.
-/// Not part of the stable public surface.
-#[doc(hidden)]
-pub struct ServerInner {
+/// Fully crate-private: it is reached only through the `Arc` inside [`Server`]
+/// (`self.0`), never through a public `Deref`, so none of these fields are
+/// observable outside the crate.
+pub(crate) struct ServerInner {
     pub(crate) handshake_timeout: Option<tokio::time::Duration>,
     pub(crate) iat_mode: IAT,
     pub(crate) biased: bool,
@@ -270,13 +269,6 @@ pub struct ServerInner {
 
     pub(crate) replay_filter: ReplayFilter,
     // pub(crate) metrics: Metrics,
-}
-
-impl Deref for Server {
-    type Target = ServerInner;
-    fn deref(&self) -> &Self::Target {
-        self.0.as_ref()
-    }
 }
 
 impl Server {
@@ -343,7 +335,7 @@ impl Server {
         T: AsyncRead + AsyncWrite + Unpin,
     {
         let session = self.new_server_session()?;
-        let deadline = self.handshake_timeout.map(|d| Instant::now() + d);
+        let deadline = self.0.handshake_timeout.map(|d| Instant::now() + d);
 
         session.handshake(&self, stream, deadline).await
     }
@@ -371,9 +363,9 @@ impl Server {
     /// Return a [`ClientBuilder`] pre-configured with this server's public parameters.
     pub fn client_params(&self) -> ClientBuilder {
         ClientBuilder {
-            station_pubkey: *self.identity_keys.pk.pk.as_bytes(),
-            station_id: self.identity_keys.pk.id.as_bytes().try_into().unwrap(),
-            iat_mode: self.iat_mode,
+            station_pubkey: *self.0.identity_keys.pk.pk.as_bytes(),
+            station_id: self.0.identity_keys.pk.id.as_bytes().try_into().unwrap(),
+            iat_mode: self.0.iat_mode,
             statefile_path: None,
             handshake_timeout: MaybeTimeout::Default_,
         }
@@ -386,8 +378,8 @@ impl Server {
         rand::thread_rng().fill_bytes(&mut session_id);
         Ok(sessions::ServerSession {
             // fixed by server
-            identity_keys: self.identity_keys.clone(),
-            biased: self.biased,
+            identity_keys: self.0.identity_keys.clone(),
+            biased: self.0.biased,
 
             // generated per session
             session_id,
@@ -459,12 +451,12 @@ mod tests {
         let sec = [0x42u8; KEY_LENGTH];
         let id = [0x99u8; NODE_ID_LENGTH];
         let server = Server::new(sec, id);
-        assert_eq!(server.identity_keys.pk.id.as_bytes(), &id);
+        assert_eq!(server.0.identity_keys.pk.id.as_bytes(), &id);
         // pk derived from sk must be deterministic
         let server2 = Server::new(sec, id);
         assert_eq!(
-            server.identity_keys.pk.pk.as_bytes(),
-            server2.identity_keys.pk.pk.as_bytes()
+            server.0.identity_keys.pk.pk.as_bytes(),
+            server2.0.identity_keys.pk.pk.as_bytes()
         );
     }
 

@@ -28,13 +28,13 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 /// test.
 ///
 /// On the error *variant*: the replay branch in `handshake_server` raises
-/// `RelayHandshakeError::ReplayedHandshake` internally, but
-/// `server_handshake_obfs4_no_keygen` currently collapses every non-`EAgain`
-/// parse error into `RelayHandshakeError::BadClientHandshake`, so that is the
-/// variant that actually escapes to the public API today. We accept either the
-/// precise `ReplayedHandshake` (should the flattening be removed later) or the
-/// current `BadClientHandshake`, but never `Ok` and never a non-handshake
-/// error.
+/// `RelayHandshakeError::ReplayedHandshake`, and `server_handshake_obfs4_no_keygen`
+/// now propagates that distinct variant instead of flattening it into the
+/// generic `BadClientHandshake`. So the replayed delivery must surface as
+/// exactly `Error::HandshakeErr(RelayHandshakeError::ReplayedHandshake)`. We pin
+/// that precise variant here: anything else (a flattened `BadClientHandshake`, a
+/// non-handshake error, or `Ok`) is a regression in the replay-cause plumbing,
+/// not just a generic "handshake errored" outcome.
 #[tokio::test]
 async fn replayed_client_hello_rejected() {
     let server = Server::getrandom();
@@ -112,23 +112,19 @@ async fn replayed_client_hello_rejected() {
         .expect("replay attempt hung")
         .expect("replay attempt panicked");
 
-    // The replayed (previously-accepted) hello must be rejected at the
-    // handshake layer. We pin to the replay-specific variant if it surfaces,
-    // and otherwise accept the flattened `BadClientHandshake` that the current
-    // server code produces for the replay path (see the doc comment above).
+    // The replayed (previously-accepted) hello must be rejected at the handshake
+    // layer with the replay-specific variant. Because the identical bytes were
+    // *accepted* in step 2, the only component that can turn them into an error
+    // now is the replay filter — so we pin the exact `ReplayedHandshake` variant.
+    // A flattened `BadClientHandshake` here would mean the replay cause was lost
+    // in the catch-all again, and must fail the test.
     match second_result {
         Err(Error::HandshakeErr(RelayHandshakeError::ReplayedHandshake)) => {
-            // Ideal: the precise replay variant escaped to the caller.
-        }
-        Err(Error::HandshakeErr(RelayHandshakeError::BadClientHandshake)) => {
-            // Current reality: the replay error is flattened to BadClientHandshake
-            // by server_handshake_obfs4_no_keygen. Since the identical bytes were
-            // accepted in step 2, this rejection is still attributable to the
-            // replay filter and to nothing else.
+            // Correct: the precise replay variant propagated to the caller.
         }
         Err(other) => panic!(
-            "previously-accepted hello was rejected, but not at the handshake \
-             layer — expected ReplayedHandshake/BadClientHandshake, got: {other:?}"
+            "previously-accepted hello was rejected, but not with the replay \
+             variant — expected HandshakeErr(ReplayedHandshake), got: {other:?}"
         ),
         Ok(_) => panic!("server accepted replayed client hello — replay filter not working"),
     }

@@ -78,6 +78,15 @@ impl Server {
             Err(Error::HandshakeErr(RelayHandshakeError::EAgain)) => {
                 return Err(RelayHandshakeError::EAgain);
             }
+            // A replayed handshake is still rejected, but its cause must stay
+            // observable to the caller: preserve the distinct variant instead of
+            // flattening it into the generic `BadClientHandshake` below, so the
+            // public API can tell "seen this MAC before" apart from a malformed
+            // or mis-keyed handshake.
+            Err(Error::HandshakeErr(RelayHandshakeError::ReplayedHandshake)) => {
+                debug!("{} rejected replayed client handshake", materials.session_id);
+                return Err(RelayHandshakeError::ReplayedHandshake);
+            }
             Err(_e) => {
                 debug!(
                     "{} failed to parse client handshake: {_e}",
@@ -245,6 +254,7 @@ impl Server {
                 trace!("correct mac");
                 // Ensure that this handshake has not been seen previously.
                 if self
+                    .0
                     .replay_filter
                     .test_and_set(Instant::now(), mac_received)
                 {

@@ -1,6 +1,8 @@
 use std::time::Duration;
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion};
+use criterion::{
+    black_box, criterion_group, criterion_main, BatchSize, BenchmarkId, Criterion, Throughput,
+};
 
 use obfs4::common::drbg::{Drbg, Seed};
 use obfs4::common::probdist::WeightedDist;
@@ -76,14 +78,29 @@ fn bench_replay_filter_scaling(c: &mut Criterion) {
 fn bench_framing_build_and_marshall(c: &mut Criterion) {
     use obfs4::framing::build_and_marshall;
     let mut group = c.benchmark_group("framing");
-    for &size in &[0usize, 64, 512, 1400] {
+    // 1426 is the largest body `build_and_marshall` accepts: its guard rejects
+    // `data.len() + pad_len >= MAX_MESSAGE_PAYLOAD_LENGTH` (1427), so 1426 is the
+    // maximum single-message payload (the on-wire 1448B segment also carries the
+    // type/length header and the AEAD tag, which this layer does not add).
+    for &size in &[0usize, 64, 512, 1426] {
         let payload = vec![0xABu8; size];
-        group.bench_function(format!("build_and_marshall_{size}B"), |b| {
-            b.iter(|| {
-                let mut buf = bytes::BytesMut::with_capacity(size + 16);
-                build_and_marshall(&mut buf, 0x01, black_box(&payload), 0).unwrap();
-                black_box(buf);
-            });
+        // Throughput reports MB/s over the marshalled payload bytes. The 0B case
+        // has zero throughput by definition, so only attach the counter when
+        // there is payload to measure.
+        if size > 0 {
+            group.throughput(Throughput::Bytes(size as u64));
+        }
+        group.bench_with_input(BenchmarkId::new("build_and_marshall", size), &size, |b, &size| {
+            // The output buffer is allocated in the (untimed) setup so the timed
+            // region measures only marshalling, not allocation.
+            b.iter_batched(
+                || bytes::BytesMut::with_capacity(size + 16),
+                |mut buf| {
+                    build_and_marshall(&mut buf, 0x01, black_box(&payload), 0).unwrap();
+                    black_box(buf);
+                },
+                BatchSize::SmallInput,
+            );
         });
     }
     group.finish();
@@ -120,42 +137,85 @@ fn bench_handshake_marshall(c: &mut Criterion) {
 }
 
 fn bench_codec_encrypt_decrypt(c: &mut Criterion) {
-    use obfs4::framing::KEY_MATERIAL_LENGTH;
+    use bytes::{BufMut, BytesMut};
+    use obfs4::framing::{KEY_MATERIAL_LENGTH, MessageTypes, Obfs4Codec};
     use tokio_util::codec::{Decoder, Encoder};
 
     let mut group = c.benchmark_group("codec");
     let enc_km = [0x42u8; KEY_MATERIAL_LENGTH];
     let dec_km = [0x42u8; KEY_MATERIAL_LENGTH];
 
-    for &size in &[64usize, 512, 1400] {
+    // 1430 == MAX_FRAME_PAYLOAD_LENGTH: the largest plaintext a single frame can
+    // carry (1448B segment minus the 2B length and 16B Poly1305 tag). This is the
+    // size of a fully-packed production data frame, so it is the most
+    // representative MAX case for the AEAD hot path.
+    for &size in &[64usize, 512, 1430] {
+        // Application payload bytes per frame — drives the reported MB/s.
+        group.throughput(Throughput::Bytes(size as u64));
         let payload = vec![0xABu8; size];
-        group.bench_function(format!("encode_{size}B"), |b| {
-            let mut codec = obfs4::framing::Obfs4Codec::new(enc_km, dec_km);
-            b.iter(|| {
-                let mut dst = bytes::BytesMut::with_capacity(size + 64);
-                codec
-                    .encode(
-                        bytes::BytesMut::from(black_box(payload.as_slice())),
-                        &mut dst,
+
+        // --- encode: time only the seal, not input/output allocation ---
+        group.bench_with_input(BenchmarkId::new("encode", size), &size, |b, &size| {
+            let mut codec = Obfs4Codec::new(enc_km, dec_km);
+            b.iter_batched(
+                || {
+                    (
+                        BytesMut::from(payload.as_slice()),
+                        BytesMut::with_capacity(size + 64),
                     )
-                    .unwrap();
-                black_box(dst);
-            });
+                },
+                |(pt, mut dst)| {
+                    codec.encode(pt, &mut dst).unwrap();
+                    black_box(dst);
+                },
+                BatchSize::SmallInput,
+            );
         });
 
-        group.bench_function(format!("roundtrip_{size}B"), |b| {
-            b.iter_custom(|iters| {
-                let mut enc = obfs4::framing::Obfs4Codec::new(enc_km, dec_km);
-                let mut dec = obfs4::framing::Obfs4Codec::new(dec_km, enc_km);
-                let start = std::time::Instant::now();
-                for _ in 0..iters {
-                    let mut dst = bytes::BytesMut::with_capacity(size + 64);
-                    enc.encode(bytes::BytesMut::from(payload.as_slice()), &mut dst)
-                        .unwrap();
-                    let _ = dec.decode(&mut dst).unwrap();
-                }
-                start.elapsed()
-            });
+        // --- standalone decode: feed a pre-sealed frame, time only the open ---
+        // A fresh encoder/decoder pair is built in the (untimed) setup so their
+        // nonce counters both start at 1 and the single frame authenticates; the
+        // timed routine consumes the frame via `decode`. The plaintext is a
+        // hand-built `Payload` message (`type=0x00 || u16 len || bytes`) so the
+        // measured path includes the real `try_parse` + payload copy, not just
+        // the early-out for an unknown message type.
+        group.bench_with_input(BenchmarkId::new("decode", size), &size, |b, &size| {
+            b.iter_batched(
+                || {
+                    let mut enc = Obfs4Codec::new(enc_km, dec_km);
+                    let dec = Obfs4Codec::new(dec_km, enc_km);
+                    let mut plaintext = BytesMut::with_capacity(size + 3);
+                    plaintext.put_u8(MessageTypes::Payload.into());
+                    plaintext.put_u16(size as u16);
+                    plaintext.put_slice(&payload);
+                    let mut frame = BytesMut::with_capacity(size + 64);
+                    enc.encode(plaintext, &mut frame).unwrap();
+                    (dec, frame)
+                },
+                |(mut dec, mut frame)| {
+                    black_box(dec.decode(&mut frame).unwrap());
+                },
+                BatchSize::SmallInput,
+            );
+        });
+
+        // --- roundtrip: encode + decode in lockstep (counters stay aligned) ---
+        group.bench_with_input(BenchmarkId::new("roundtrip", size), &size, |b, &size| {
+            let mut enc = Obfs4Codec::new(enc_km, dec_km);
+            let mut dec = Obfs4Codec::new(dec_km, enc_km);
+            b.iter_batched(
+                || {
+                    (
+                        BytesMut::from(payload.as_slice()),
+                        BytesMut::with_capacity(size + 64),
+                    )
+                },
+                |(pt, mut dst)| {
+                    enc.encode(pt, &mut dst).unwrap();
+                    black_box(dec.decode(&mut dst).unwrap());
+                },
+                BatchSize::SmallInput,
+            );
         });
     }
     group.finish();

@@ -6,7 +6,7 @@ use crate::{
 
 use bytes::{Buf, BufMut, BytesMut};
 use crypto_secretbox::{
-    aead::{generic_array::GenericArray, Aead, KeyInit},
+    aead::{generic_array::GenericArray, AeadInPlace, KeyInit},
     XSalsa20Poly1305,
 };
 use ptrs::{debug, error, trace};
@@ -74,19 +74,23 @@ impl EncryptingCodec {
 
 ///Decoder is a frame decoder instance.
 struct EncryptingDecoder {
-    key: [u8; KEY_LENGTH],
+    /// The session key is fixed for the lifetime of the codec, so the AEAD
+    /// cipher is constructed once here instead of on every frame. `SecretBox`
+    /// (the type behind `XSalsa20Poly1305`) zeroizes its key on drop, so this
+    /// also preserves the key-zeroization the old `key: [u8; 32]` + `Drop`
+    /// provided.
+    cipher: XSalsa20Poly1305,
     nonce: NonceBox,
     drbg: Drbg,
 
+    /// Reusable working buffer for in-place AEAD open. Each frame's ciphertext
+    /// is copied here once and decrypted in place, avoiding the per-frame
+    /// allocate-and-copy that the old `src.get(..n).to_vec()` + `decrypt -> Vec`
+    /// + `BytesMut::from(plaintext)` chain incurred.
+    scratch: BytesMut,
+
     next_nonce: [u8; NONCE_LENGTH],
     next_length: u16,
-}
-
-impl Drop for EncryptingDecoder {
-    fn drop(&mut self) {
-        use zeroize::Zeroize;
-        self.key.zeroize();
-    }
 }
 
 impl EncryptingDecoder {
@@ -94,16 +98,18 @@ impl EncryptingDecoder {
     // containing exactly KeyLength bytes of keying material.
     fn new(key_material: [u8; KEY_MATERIAL_LENGTH]) -> Self {
         trace!("new decoder key_material: {}", hex::encode(key_material));
-        let key: [u8; KEY_LENGTH] = key_material[..KEY_LENGTH].try_into().unwrap();
+        let key = GenericArray::from_slice(&key_material[..KEY_LENGTH]);
+        let cipher = XSalsa20Poly1305::new(key);
         let nonce = NonceBox::new(&key_material[KEY_LENGTH..(KEY_LENGTH + NONCE_PREFIX_LENGTH)]);
         let seed = Seed::try_from(&key_material[(KEY_LENGTH + NONCE_PREFIX_LENGTH)..]).unwrap();
         let d = Drbg::new(Some(seed)).unwrap();
 
         Self {
-            key,
+            cipher,
             drbg: d,
             nonce,
 
+            scratch: BytesMut::with_capacity(MAX_SEGMENT_LENGTH),
             next_nonce: [0_u8; NONCE_LENGTH],
             next_length: 0,
         }
@@ -178,33 +184,51 @@ impl Decoder for EncryptingCodec {
             return Ok(None);
         }
 
-        // Use advance to modify src such that it no longer contains this frame.
-        let data = src.get(..next_len).unwrap().to_vec();
+        // Copy exactly this frame's bytes into the reusable working buffer and
+        // unseal it in place. The NaCl secretbox layout is `[tag(16) ||
+        // ciphertext]`, so the Poly1305 tag is the 16-byte prefix and the
+        // sealed payload is everything after it. `next_len >= MIN_FRAME_LENGTH
+        // == TAG_SIZE` is guaranteed by the length-range check above, so the
+        // `[TAG_SIZE..]` slice below is always in bounds.
+        let dec = &mut self.decoder;
+        dec.scratch.clear();
+        dec.scratch.extend_from_slice(&src[..next_len]);
 
-        // Unseal the frame
-        let key = GenericArray::from_slice(&self.decoder.key);
-        let cipher = XSalsa20Poly1305::new(key);
-        let nonce = GenericArray::from_slice(&self.decoder.next_nonce); // unique per message
+        let nonce = GenericArray::from_slice(&dec.next_nonce); // unique per message
+        let tag = crypto_secretbox::Tag::clone_from_slice(&dec.scratch[..TAG_SIZE]);
 
-        let plaintext = match cipher.decrypt(nonce, data.as_ref()) {
-            Ok(p) => p,
-            Err(e) => {
-                trace!("failed to decrypt result: {e}");
-                return Err(e.into());
-            }
-        };
-        if plaintext.len() < MESSAGE_OVERHEAD {
+        // Authenticate + decrypt in place. A tamper anywhere in the frame
+        // (header length is already validated; here it is the ciphertext or
+        // tag) makes the constant-time Poly1305 comparison fail and we return
+        // the crypto error without consuming `src`, exactly as before. We MUST
+        // NOT advance the nonce/`next_length` further on failure — the session
+        // is fatal at that point.
+        if let Err(e) = dec
+            .cipher
+            .decrypt_in_place_detached(nonce, b"", &mut dec.scratch[TAG_SIZE..], &tag)
+        {
+            trace!("failed to decrypt result: {e}");
+            return Err(e.into());
+        }
+
+        // Drop the tag prefix so the buffer now begins at the recovered
+        // plaintext; `scratch[TAG_SIZE..next_len]` is the message.
+        dec.scratch.advance(TAG_SIZE);
+        if dec.scratch.remaining() < MESSAGE_OVERHEAD {
             return Err(FrameError::InvalidMessage);
         }
 
         // Clean up and prepare for the next frame
         //
         // we read a whole frame, we no longer know the size of the next pkt
-        self.decoder.next_length = 0;
+        dec.next_length = 0;
         src.advance(next_len);
 
         debug!("decoding {next_len}B src:{}B", src.remaining());
-        match Messages::try_parse(&mut BytesMut::from(plaintext.as_slice())) {
+        // `try_parse` consumes the plaintext out of the working buffer; the
+        // owned `Vec` it builds for a `Payload` is the message's own storage
+        // and is unavoidable here.
+        match Messages::try_parse(&mut self.decoder.scratch) {
             Ok(Messages::Padding(_)) => Ok(None),
             Ok(m) => Ok(Some(m)),
             Err(FrameError::UnknownMessageType(_)) => Ok(None),
@@ -215,16 +239,11 @@ impl Decoder for EncryptingCodec {
 
 /// Encoder is a frame encoder instance.
 struct EncryptingEncoder {
-    key: [u8; KEY_LENGTH],
+    /// Session-fixed AEAD cipher, constructed once (see `EncryptingDecoder` for
+    /// the same rationale, including key zeroization on drop).
+    cipher: XSalsa20Poly1305,
     nonce: NonceBox,
     drbg: Drbg,
-}
-
-impl Drop for EncryptingEncoder {
-    fn drop(&mut self) {
-        use zeroize::Zeroize;
-        self.key.zeroize();
-    }
 }
 
 impl EncryptingEncoder {
@@ -232,13 +251,14 @@ impl EncryptingEncoder {
     /// containing exactly KeyLength bytes of keying material
     fn new(key_material: [u8; KEY_MATERIAL_LENGTH]) -> Self {
         trace!("new encoder key_material: {}", hex::encode(key_material));
-        let key: [u8; KEY_LENGTH] = key_material[..KEY_LENGTH].try_into().unwrap();
+        let key = GenericArray::from_slice(&key_material[..KEY_LENGTH]);
+        let cipher = XSalsa20Poly1305::new(key);
         let nonce = NonceBox::new(&key_material[KEY_LENGTH..(KEY_LENGTH + NONCE_PREFIX_LENGTH)]);
         let seed = Seed::try_from(&key_material[(KEY_LENGTH + NONCE_PREFIX_LENGTH)..]).unwrap();
         let d = Drbg::new(Some(seed)).unwrap();
 
         Self {
-            key,
+            cipher,
             nonce,
             drbg: d,
         }
@@ -262,42 +282,51 @@ impl<T: Buf> Encoder<T> for EncryptingCodec {
         );
 
         // Don't send a frame if it is longer than the other end will accept.
-        if plaintext.remaining() > MAX_FRAME_PAYLOAD_LENGTH {
-            return Err(FrameError::InvalidPayloadLength(plaintext.remaining()));
+        let pt_len = plaintext.remaining();
+        if pt_len > MAX_FRAME_PAYLOAD_LENGTH {
+            return Err(FrameError::InvalidPayloadLength(pt_len));
         }
 
-        let mut plaintext_frame = BytesMut::new();
-
-        plaintext_frame.put(plaintext);
-
-        // Generate a new nonce
+        // Generate a new nonce (consumes one counter value, fatal on wrap).
         let nonce_bytes = self.encoder.nonce.next()?;
 
-        // Encrypt and MAC payload
-        let key = GenericArray::from_slice(&self.encoder.key);
-        let cipher = XSalsa20Poly1305::new(key);
-        let nonce = GenericArray::from_slice(&nonce_bytes); // unique per message
-
-        let ciphertext = cipher.encrypt(nonce, plaintext_frame.as_ref())?;
+        // The NaCl secretbox output is `[tag(16) || ciphertext(pt_len)]`, so the
+        // sealed frame length is fixed at `pt_len + TAG_SIZE`. We build the wire
+        // frame `[len(2) || tag(16) || ciphertext]` directly inside `dst` and
+        // seal the payload region in place, removing the previous two
+        // allocations (the staging `BytesMut` and the `encrypt -> Vec`). The
+        // resulting bytes are byte-for-byte identical to the old path.
+        let ct_len = pt_len + TAG_SIZE;
 
         // Obfuscate the length
-        let mut length = ciphertext.len() as u16;
+        let mut length = ct_len as u16;
         let length_mask: u16 = self.encoder.drbg.length_mask();
-        debug!(
-            "encoding➡️ {length}B, {length:04x}^{length_mask:04x} {:04x}",
-            length ^ length_mask
-        );
+        debug!("encoding➡️ {length}B, {length:04x}^{length_mask:04x} {:04x}", length ^ length_mask);
         length ^= length_mask;
+
+        dst.reserve(LENGTH_LENGTH + ct_len);
+        let frame_start = dst.len();
+        dst.extend_from_slice(&length.to_be_bytes()[..]);
+        // Tag slot (filled after the payload is sealed) followed by the
+        // plaintext copied straight from the caller's `Buf`.
+        let tag_start = frame_start + LENGTH_LENGTH;
+        dst.extend_from_slice(&[0u8; TAG_SIZE]);
+        dst.put(plaintext);
+
+        let nonce = GenericArray::from_slice(&nonce_bytes); // unique per message
+        let payload_start = tag_start + TAG_SIZE;
+        let tag = self.encoder.cipher.encrypt_in_place_detached(
+            nonce,
+            b"",
+            &mut dst[payload_start..payload_start + pt_len],
+        )?;
+        dst[tag_start..payload_start].copy_from_slice(tag.as_slice());
 
         trace!(
             "prng_ciphertext: {}{}",
             hex::encode(length.to_be_bytes()),
-            hex::encode(&ciphertext)
+            hex::encode(&dst[tag_start..payload_start + pt_len])
         );
-
-        // Write the length and payload to the buffer.
-        dst.extend_from_slice(&length.to_be_bytes()[..]);
-        dst.extend_from_slice(&ciphertext);
         Ok(())
     }
 }
@@ -338,14 +367,18 @@ impl NonceBox {
         if self.counter == u64::MAX {
             return Err(FrameError::NonceCounterWrapped);
         }
-        let mut nonce = self.prefix.clone().to_vec();
-        nonce.append(&mut self.counter.to_be_bytes().to_vec());
+        // Assemble the 24-byte nonce on the stack: 16-byte fixed prefix followed
+        // by the big-endian counter. The wire layout and counter semantics are
+        // identical to the previous heap-built version; only the two per-frame
+        // allocations are gone. The counter is consumed (incremented) exactly
+        // once per produced nonce so uniqueness per key is preserved.
+        let mut nonce = [0u8; NONCE_LENGTH];
+        nonce[..NONCE_PREFIX_LENGTH].copy_from_slice(&self.prefix);
+        nonce[NONCE_PREFIX_LENGTH..].copy_from_slice(&self.counter.to_be_bytes());
 
-        let nonce_l: [u8; NONCE_LENGTH] = nonce[..].try_into().unwrap();
-
-        trace!("fresh nonce: {}", hex::encode(nonce_l));
+        trace!("fresh nonce: {}", hex::encode(nonce));
         self.inc();
-        Ok(nonce_l)
+        Ok(nonce)
     }
 
     fn inc(&mut self) {

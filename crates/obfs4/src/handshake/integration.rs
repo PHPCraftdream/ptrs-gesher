@@ -46,7 +46,7 @@ fn test_obfs4_roundtrip() -> Result<()> {
     let server = Server::new_from_key(relay_private);
 
     let shs_materials = SHSMaterials {
-        identity_keys: server.identity_keys.clone(),
+        identity_keys: server.0.identity_keys.clone(),
         len_seed: [0u8; SEED_LENGTH],
         session_id: "s-yyy".into(),
     };
@@ -129,7 +129,7 @@ fn test_obfs4_testvec_compat() -> Result<()> {
     let chs_materials = CHSMaterials::new(pk, "c-xxx".into());
 
     let shs_materials =
-        SHSMaterials::new(&server.identity_keys, "s-yyy".into(), [0u8; SEED_LENGTH]);
+        SHSMaterials::new(&server.0.identity_keys, "s-yyy".into(), [0u8; SEED_LENGTH]);
 
     let (state, create_msg) = client_handshake_obfs4_no_keygen(x, chs_materials).unwrap();
 
