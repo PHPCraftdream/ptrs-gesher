@@ -620,9 +620,8 @@ mod tests {
         // surface as a typed error at connect time. (On the previous code
         // path `build` called `.expect(..)` and this test would panic.)
         let builder = WebTunnelBuilder::default();
-        let client = <WebTunnelBuilder as ptrs::ClientBuilder<
-            tokio::io::DuplexStream,
-        >>::build(&builder);
+        let client =
+            <WebTunnelBuilder as ptrs::ClientBuilder<tokio::io::DuplexStream>>::build(&builder);
 
         // `wrap` drops its socket argument before checking config, so the
         // duplex stream is never driven and no network access occurs.

@@ -90,18 +90,22 @@ fn bench_framing_build_and_marshall(c: &mut Criterion) {
         if size > 0 {
             group.throughput(Throughput::Bytes(size as u64));
         }
-        group.bench_with_input(BenchmarkId::new("build_and_marshall", size), &size, |b, &size| {
-            // The output buffer is allocated in the (untimed) setup so the timed
-            // region measures only marshalling, not allocation.
-            b.iter_batched(
-                || bytes::BytesMut::with_capacity(size + 16),
-                |mut buf| {
-                    build_and_marshall(&mut buf, 0x01, black_box(&payload), 0).unwrap();
-                    black_box(buf);
-                },
-                BatchSize::SmallInput,
-            );
-        });
+        group.bench_with_input(
+            BenchmarkId::new("build_and_marshall", size),
+            &size,
+            |b, &size| {
+                // The output buffer is allocated in the (untimed) setup so the timed
+                // region measures only marshalling, not allocation.
+                b.iter_batched(
+                    || bytes::BytesMut::with_capacity(size + 16),
+                    |mut buf| {
+                        build_and_marshall(&mut buf, 0x01, black_box(&payload), 0).unwrap();
+                        black_box(buf);
+                    },
+                    BatchSize::SmallInput,
+                );
+            },
+        );
     }
     group.finish();
 }
@@ -138,7 +142,7 @@ fn bench_handshake_marshall(c: &mut Criterion) {
 
 fn bench_codec_encrypt_decrypt(c: &mut Criterion) {
     use bytes::{BufMut, BytesMut};
-    use obfs4::framing::{KEY_MATERIAL_LENGTH, MessageTypes, Obfs4Codec};
+    use obfs4::framing::{MessageTypes, Obfs4Codec, KEY_MATERIAL_LENGTH};
     use tokio_util::codec::{Decoder, Encoder};
 
     let mut group = c.benchmark_group("codec");
@@ -184,10 +188,16 @@ fn bench_codec_encrypt_decrypt(c: &mut Criterion) {
                 || {
                     let mut enc = Obfs4Codec::new(enc_km, dec_km);
                     let dec = Obfs4Codec::new(dec_km, enc_km);
-                    let mut plaintext = BytesMut::with_capacity(size + 3);
+                    // `size` is the full single-frame plaintext (a Payload
+                    // message = 1B type + 2B length + body), so the body is
+                    // `size - 3`. This keeps the plaintext handed to `encode` at
+                    // exactly `size` bytes, which stays within
+                    // MAX_FRAME_PAYLOAD_LENGTH even for the largest bench size.
+                    let body_len = size - 3;
+                    let mut plaintext = BytesMut::with_capacity(size);
                     plaintext.put_u8(MessageTypes::Payload.into());
-                    plaintext.put_u16(size as u16);
-                    plaintext.put_slice(&payload);
+                    plaintext.put_u16(body_len as u16);
+                    plaintext.put_slice(&payload[..body_len]);
                     let mut frame = BytesMut::with_capacity(size + 64);
                     enc.encode(plaintext, &mut frame).unwrap();
                     (dec, frame)

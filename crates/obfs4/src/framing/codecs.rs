@@ -203,9 +203,9 @@ impl Decoder for EncryptingCodec {
         // the crypto error without consuming `src`, exactly as before. We MUST
         // NOT advance the nonce/`next_length` further on failure — the session
         // is fatal at that point.
-        if let Err(e) = dec
-            .cipher
-            .decrypt_in_place_detached(nonce, b"", &mut dec.scratch[TAG_SIZE..], &tag)
+        if let Err(e) =
+            dec.cipher
+                .decrypt_in_place_detached(nonce, b"", &mut dec.scratch[TAG_SIZE..], &tag)
         {
             trace!("failed to decrypt result: {e}");
             return Err(e.into());
@@ -301,7 +301,10 @@ impl<T: Buf> Encoder<T> for EncryptingCodec {
         // Obfuscate the length
         let mut length = ct_len as u16;
         let length_mask: u16 = self.encoder.drbg.length_mask();
-        debug!("encoding➡️ {length}B, {length:04x}^{length_mask:04x} {:04x}", length ^ length_mask);
+        debug!(
+            "encoding➡️ {length}B, {length:04x}^{length_mask:04x} {:04x}",
+            length ^ length_mask
+        );
         length ^= length_mask;
 
         dst.reserve(LENGTH_LENGTH + ct_len);

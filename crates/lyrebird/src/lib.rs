@@ -1099,10 +1099,13 @@ mod tests {
         tunnel.flush().await.expect("client flush");
 
         let mut got = vec![0u8; msg.len()];
-        tokio::time::timeout(std::time::Duration::from_secs(5), tunnel.read_exact(&mut got))
-            .await
-            .expect("client read timed out")
-            .expect("client read");
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            tunnel.read_exact(&mut got),
+        )
+        .await
+        .expect("client read timed out")
+        .expect("client read");
         assert_eq!(&got, msg, "data must round-trip through the obfs4 tunnel");
 
         tokio::time::timeout(std::time::Duration::from_secs(5), server_task)

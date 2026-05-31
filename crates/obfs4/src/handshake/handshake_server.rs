@@ -84,7 +84,10 @@ impl Server {
             // public API can tell "seen this MAC before" apart from a malformed
             // or mis-keyed handshake.
             Err(Error::HandshakeErr(RelayHandshakeError::ReplayedHandshake)) => {
-                debug!("{} rejected replayed client handshake", materials.session_id);
+                debug!(
+                    "{} rejected replayed client handshake",
+                    materials.session_id
+                );
                 return Err(RelayHandshakeError::ReplayedHandshake);
             }
             Err(_e) => {
@@ -350,7 +353,12 @@ mod epoch_window_tests {
     /// `framing::handshake::ClientHandshakeMessage::marshall`. `h` must be the
     /// server-identity-keyed HMAC (`materials.get_hmac()`), since the mark/MAC
     /// are keyed by `serverIdentity | NodeID`.
-    fn build_client_hello(repres: &PublicRepresentative, pad_len: usize, e: u64, mut h: HmacSha256) -> Vec<u8> {
+    fn build_client_hello(
+        repres: &PublicRepresentative,
+        pad_len: usize,
+        e: u64,
+        mut h: HmacSha256,
+    ) -> Vec<u8> {
         // M_C = HMAC(serverIdentity | NodeID, X)
         h.reset();
         h.update(repres.as_bytes().as_ref());
@@ -384,7 +392,8 @@ mod epoch_window_tests {
         let identity = Obfs4NtorSecretKey::generate_for_test(&mut rng);
         let server = Server::new_from_key(identity.clone());
 
-        let materials = HandshakeMaterials::new(&identity, "epoch-window-test".into(), [0u8; SEED_LENGTH]);
+        let materials =
+            HandshakeMaterials::new(&identity, "epoch-window-test".into(), [0u8; SEED_LENGTH]);
 
         // A real elligator2 ephemeral so the representative is on the wire form
         // the server expects; the DH result is irrelevant to MAC validation.
@@ -398,7 +407,12 @@ mod epoch_window_tests {
 
     /// Helper: does the server accept this hello when its base hour is `base`?
     /// Returns `Ok(())` on accept, `Err(variant)` on the rejection variant.
-    fn parse_at(server: &Server, hello: &[u8], mut materials: HandshakeMaterials, base: u64) -> Result<()> {
+    fn parse_at(
+        server: &Server,
+        hello: &[u8],
+        mut materials: HandshakeMaterials,
+        base: u64,
+    ) -> Result<()> {
         server
             .try_parse_client_handshake_at(hello, &mut materials, base)
             .map(|_| ())
@@ -421,8 +435,9 @@ mod epoch_window_tests {
         // the client's E lands at the server's +1 / -1 offset respectively.
         for base in [E - 1, E + 1] {
             let (server, hello, mat) = server_and_hello_for_epoch(E);
-            parse_at(&server, &hello, mat, base)
-                .unwrap_or_else(|e| panic!("hello for E must be accepted at base={base} (slack edge), got {e:?}"));
+            parse_at(&server, &hello, mat, base).unwrap_or_else(|e| {
+                panic!("hello for E must be accepted at base={base} (slack edge), got {e:?}")
+            });
         }
     }
 
