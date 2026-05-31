@@ -2,7 +2,7 @@
 name = "ptrs-gesher"
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 description = "Pluggable Transports framework for Rust: obfs4, webtunnel, lyrebird (umbrella crate)"
 keywords = ["tor", "censorship", "pluggable", "transports", "obfs4"]

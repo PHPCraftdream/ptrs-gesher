@@ -2,7 +2,7 @@
 name = "ptrs-gesher-webtunnel"
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 description = "WebTunnel pluggable transport: TLS + HTTP/1.1 Upgrade with raw-byte payload (ptrs-gesher framework)"
 keywords = ["tor", "censorship", "webtunnel", "pluggable-transport"]

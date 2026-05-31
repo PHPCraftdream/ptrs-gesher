@@ -26,6 +26,9 @@ part of this release.
   `ParseError`, `BridgeLine`, `WebTunnelConfig`).
 - **obfs4**: `ClientBuilder` / `ServerBuilder` fields are encapsulated; use
   the existing setters.
+- **all crates**: declared MSRV corrected to `1.88` — the resolved dependency
+  tree requires it (the earlier `1.75` was inaccurate and never resolved, as
+  transitive deps pull in `edition2024` and `serde_with` 3.20).
 
 ### Fixed
 
@@ -48,7 +51,7 @@ part of this release.
 ### Added
 
 - `docs.rs` metadata (`all-features`) for all six published crates.
-- CI: MSRV (1.75) check, `rustdoc -D warnings`, and an
+- CI: MSRV (1.88) check, `rustdoc -D warnings`, and an
   `experimental-server` feature build.
 
 ## [0.1.1] - 2026-05-28

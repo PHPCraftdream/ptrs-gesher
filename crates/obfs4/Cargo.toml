@@ -2,7 +2,7 @@
 name = "ptrs-gesher-obfs4"
 version = "0.2.0"
 edition = "2021"
-rust-version = "1.75"
+rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 description = "obfs4 pluggable transport implementation (ptrs-gesher framework)"
 keywords = ["tor", "networking", "censorship", "circumvention", "pluggable-transport"]

@@ -67,7 +67,7 @@ webtunnel = "ptrs-gesher-webtunnel"  # new, no upstream equivalent
 
 ## Status
 
-- Workspace builds on stable Rust ≥ 1.75.
+- Workspace builds on stable Rust ≥ 1.88.
 - 279 tests passing (E2E, property-based, fuzz-like × 10k iterations).
 - Published to crates.io at 0.1.0; this revision (0.2.0, breaking API cleanup) is not yet released.
 - **Interoperability with reference `obfs4proxy` (Go) and the
