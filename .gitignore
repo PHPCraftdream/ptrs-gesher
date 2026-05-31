@@ -4,3 +4,6 @@
 .vscode/
 *.log
 /.crush/
+
+# stray agent diagnostic dumps
+/audit_*.txt

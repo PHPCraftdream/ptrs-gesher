@@ -1,3 +1,0 @@
-PWD=/d/dev/rust/ptrs-gesher
-diag-marker-xyz
-630 crates/obfs4/src/sessions.rs
