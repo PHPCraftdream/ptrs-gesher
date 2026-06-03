@@ -318,7 +318,11 @@ impl Opts {
 
             i += offset;
             // End of string or no colon?
-            if i >= s.len() || s.chars().nth(i).unwrap() != ':' {
+            // `i` is a byte index (accumulated from `index_unescaped` which uses
+            // `char_indices`). Compare against the raw byte, not the i-th *character*,
+            // to avoid misindexing on multi-byte UTF-8 input. The terminators are
+            // ASCII, so a single-byte comparison is correct and avoids O(n) rescanning.
+            if i >= s.len() || s.as_bytes()[i] != b':' {
                 return Err(Error::ParseError(format!("no colon in {}", &s[begin..i])));
             }
             // Skip the colon.
@@ -329,7 +333,8 @@ impl Opts {
 
             i += offset;
             // End of string or no equals sign?
-            if i >= s.len() || s.chars().nth(i).unwrap() != '=' {
+            // Same byte-vs-char rationale as the colon check above.
+            if i >= s.len() || s.as_bytes()[i] != b'=' {
                 return Err(Error::ParseError(format!(
                     "no equals sign in {}",
                     &s[begin..i]
@@ -700,6 +705,59 @@ mod tests {
                 panic!("{} unexpectedly succeeded", input)
             }
         }
+    }
+
+    /// Regression: `parse_server_transport_options` used `s.chars().nth(i)` where
+    /// `i` is a *byte* index. With multi-byte method names the char-based lookup
+    /// either compared the wrong character or panicked on `None`. After the fix
+    /// we index the byte directly (`s.as_bytes()[i]`), which is correct because
+    /// the terminators (`:`, `=`, `;`) are single-byte ASCII.
+    #[test]
+    fn parse_server_transport_options_multibyte_method_name() {
+        // "éé" is 4 bytes in UTF-8 (each é = 0xC3 0xA9).
+        // Before the fix, byte index 4 was passed to `chars().nth(4)` which
+        // yielded `None` (only 2 chars) → unwrap panic.
+        let input = "éé:key=val";
+        let result = Opts::parse_server_transport_options(input);
+        assert!(
+            result.is_ok(),
+            "multi-byte method name should parse successfully, got: {result:?}"
+        );
+        let opts = result.unwrap();
+        let args = opts.get("éé").expect("expected method 'éé' in parsed opts");
+        assert_eq!(
+            args.retrieve("key").as_deref(),
+            Some("val"),
+            "key should map to 'val'"
+        );
+    }
+
+    /// Multi-byte characters in the *value* position should also round-trip.
+    #[test]
+    fn parse_server_transport_options_multibyte_value() {
+        let input = "t:k=Ω";
+        let result = Opts::parse_server_transport_options(input);
+        assert!(
+            result.is_ok(),
+            "multi-byte value should parse, got: {result:?}"
+        );
+        let opts = result.unwrap();
+        let args = opts.get("t").expect("expected method 't'");
+        assert_eq!(args.retrieve("k").as_deref(), Some("Ω"));
+    }
+
+    /// Multi-byte in method, key, AND value combined.
+    #[test]
+    fn parse_server_transport_options_multibyte_all_positions() {
+        let input = "café:naïve=über";
+        let result = Opts::parse_server_transport_options(input);
+        assert!(
+            result.is_ok(),
+            "fully multi-byte input should parse, got: {result:?}"
+        );
+        let opts = result.unwrap();
+        let args = opts.get("café").expect("expected method 'café'");
+        assert_eq!(args.retrieve("naïve").as_deref(), Some("über"));
     }
 
     #[test]

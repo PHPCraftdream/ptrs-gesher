@@ -714,9 +714,37 @@ mod tests {
         let args = make_args(&[("url", "https://example.com/path?token=abc&v=1")]);
         let cfg = WebTunnelConfig::from_args(&args).unwrap();
         let req = handshake::build_upgrade_request(&cfg);
-        // Path + query should be preserved (Url::path() strips query, but
-        // the GET line should ideally include the query string).
-        assert!(req.starts_with("GET /path"));
+        // The GET request-target MUST include path AND query — the Go
+        // reference sends path?query.  Auth tokens / routing hints live
+        // in the query; dropping it silently breaks the handshake.
+        assert!(
+            req.starts_with("GET /path?token=abc&v=1 HTTP/1.1\r\n"),
+            "query string must appear in request-target, got: {req}"
+        );
+    }
+
+    #[test]
+    fn query_string_absent_means_plain_path() {
+        // URL without a query must produce a bare path (no trailing '?').
+        let args = make_args(&[("url", "https://example.com/secret")]);
+        let cfg = WebTunnelConfig::from_args(&args).unwrap();
+        let req = handshake::build_upgrade_request(&cfg);
+        assert!(
+            req.starts_with("GET /secret HTTP/1.1\r\n"),
+            "path-only URL must not grow a query part, got: {req}"
+        );
+    }
+
+    #[test]
+    fn query_only_no_path() {
+        // Edge case: root path with a query string.
+        let args = make_args(&[("url", "https://example.com/?k=v")]);
+        let cfg = WebTunnelConfig::from_args(&args).unwrap();
+        let req = handshake::build_upgrade_request(&cfg);
+        assert!(
+            req.starts_with("GET /?k=v HTTP/1.1\r\n"),
+            "root path with query must be preserved, got: {req}"
+        );
     }
 
     #[test]

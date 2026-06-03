@@ -109,6 +109,10 @@ use tracing_subscriber::{filter::LevelFilter, prelude::*};
 
 use std::{env, net::SocketAddr, pin::Pin, str::FromStr, sync::Arc};
 
+/// Maximum number of concurrently handled client connections.
+/// Bounds memory/task growth under connection floods (DoS mitigation).
+const MAX_CONCURRENT_CONNS: usize = 1024;
+
 /// Client Socks address to listen on.
 const CLIENT_SOCKS_ADDR: &str = "127.0.0.1:0";
 
@@ -427,7 +431,9 @@ async fn client_setup(
         }
 
         // if all listeners exit then we can send the tx signal.
-        tx.send(true).unwrap()
+        // Best-effort: the receiver may already be dropped if the
+        // parent select! moved on (e.g. signal-driven shutdown).
+        let _ = tx.send(true);
     });
 
     Ok(rx)
@@ -444,9 +450,13 @@ where
     C: ptrs::ClientTransport<TcpStream, std::io::Error> + Send + 'static,
 {
     let pt_name = C::method_name();
+    let sem = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_CONNS));
     loop {
         tokio::select! {
-            _ = cancel_token.cancelled() => info!("{pt_name} received shutdown signal"),
+            _ = cancel_token.cancelled() => {
+                info!("{pt_name} received shutdown signal");
+                break; // exit the loop so graceful shutdown actually stops accepting
+            }
             res = listener.accept() => {
                 let (conn, client_addr) = match res {
                     Err(e) => {
@@ -455,8 +465,18 @@ where
                     }
                     Ok(c) => c,
                 };
-                tokio::spawn(client_handle_connection(conn, builder.clone(), proxy_uri.clone(), client_addr));
-                // tokio::spawn(client_handle_connection( conn, builder.build(), proxy_uri.clone(), client_addr));
+                // Acquire a concurrency permit before spawning, bounding
+                // the number of in-flight connection tasks (DoS mitigation).
+                let permit = match Arc::clone(&sem).acquire_owned().await {
+                    Ok(p) => p,
+                    Err(_) => break, // semaphore closed — shutting down
+                };
+                let builder_clone = builder.clone();
+                let proxy_clone = proxy_uri.clone();
+                tokio::spawn(async move {
+                    let _permit = permit; // held for the task's lifetime, freed on drop
+                    let _ = client_handle_connection(conn, builder_clone, proxy_clone, client_addr).await;
+                });
             }
         }
     }
@@ -739,7 +759,9 @@ async fn server_setup(
         }
 
         // if all listeners exit then we can send the tx signal.
-        tx.send(true).unwrap()
+        // Best-effort: the receiver may already be dropped if the
+        // parent select! moved on (e.g. signal-driven shutdown).
+        let _ = tx.send(true);
     });
 
     Ok(rx)
@@ -1172,6 +1194,45 @@ mod tests {
         assert!(
             result.is_err(),
             "a peer that closes mid-handshake must produce an error, not a tunnel"
+        );
+    }
+
+    // -- Bug 2 regression: cancel arm must break the accept loop --
+
+    /// Verify that `client_accept_loop` exits promptly when the
+    /// `CancellationToken` is already cancelled before the loop starts.
+    /// Without the `break` in the cancel arm, `cancelled()` is
+    /// immediately ready on every iteration and the loop spins forever,
+    /// causing this test to hit the timeout and fail.
+    #[tokio::test]
+    async fn client_accept_loop_exits_on_pre_cancelled_token() {
+        // Bind a real listener so the function signature is satisfied.
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind listener for test");
+
+        // Cancel BEFORE entering the loop — simulates shutdown race.
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+
+        let builder = Obfs4PT::client_builder();
+        let proxy_uri = url::Url::parse("data:,").expect("placeholder url");
+
+        // The loop must return within 2 s.  On the old code (no break)
+        // it would spin indefinitely and the timeout would fire.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            client_accept_loop(listener, builder, proxy_uri, cancel),
+        )
+        .await;
+
+        assert!(
+            result.is_ok(),
+            "client_accept_loop must exit promptly when the token is cancelled, not spin"
+        );
+        assert!(
+            result.unwrap().is_ok(),
+            "client_accept_loop should return Ok(()) on graceful cancel"
         );
     }
 }

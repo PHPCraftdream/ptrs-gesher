@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+#
+# Pre-push gate for ptrs-gesher — mirrors the CI suite so a red CI never
+# surprises us after a push. Runs from the repo root regardless of cwd.
+#
+# Activate (once per clone):   git config core.hooksPath .githooks
+# Skip for one push:           git push --no-verify
+#
+set -uo pipefail
+cd "$(git rev-parse --show-toplevel)" || exit 1
+
+fail=0
+step() {
+    local name="$1"
+    shift
+    echo ""
+    echo "▶ ${name}"
+    if "$@"; then
+        echo "  ✓ ${name}"
+    else
+        echo "  ✗ FAILED: ${name}"
+        fail=1
+    fi
+}
+
+echo "== pre-push verification (ptrs-gesher) =="
+
+step "fmt --check"          cargo fmt --all -- --check
+step "build --all-targets"  cargo build --workspace --all-targets --locked
+step "tests --tests"        cargo test --workspace --tests --no-fail-fast
+step "benches-in-test"      cargo test --workspace --benches --no-fail-fast
+step "doctests"             cargo test --workspace --doc
+step "clippy -D warnings"   cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+step "rustdoc -D warnings"  env "RUSTDOCFLAGS=-D warnings" cargo doc --workspace --no-deps --all-features --locked
+step "experimental-server"  cargo build -p ptrs-gesher-lyrebird --features experimental-server --locked
+
+echo ""
+if [ "${fail}" -ne 0 ]; then
+    echo "✗ pre-push checks FAILED — push aborted. (override: git push --no-verify)"
+    exit 1
+fi
+echo "✓ all pre-push checks passed"
+exit 0

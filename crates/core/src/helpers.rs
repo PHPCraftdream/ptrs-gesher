@@ -297,11 +297,12 @@ impl ServerInfo {
         let conn = match self.or_addr {
             Some(addr) => TcpStream::connect(addr).await?,
             None => {
-                if self.extended_or_addr.is_none() {
-                    return Err(to_io_other("no OR addr provided"));
-                }
-
-                TcpStream::connect(self.extended_or_addr.unwrap()).await?
+                // Unify the None-check and the use into a single expression so
+                // there is no code path where `unwrap()` could theoretically panic.
+                let addr = self
+                    .extended_or_addr
+                    .ok_or_else(|| to_io_other("no OR addr provided"))?;
+                TcpStream::connect(addr).await?
             }
         };
 

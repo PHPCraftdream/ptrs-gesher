@@ -145,8 +145,22 @@ impl Drop for Drbg {
     fn drop(&mut self) {
         use zeroize::Zeroize;
         self.ofb.zeroize();
-        // TODO: SipHasher24 does not implement Zeroize and its fields are private,
-        // so the hasher state cannot be explicitly zeroed here.
+        // Best-effort zeroing: overwrite the hasher with a default (all-zero-key)
+        // instance. This clears k0, k1 (the 16-byte seed-derived key), and all
+        // internal state (v0..v3, tail, length).
+        //
+        // LIMITATION (low severity): This is NOT a volatile/guaranteed write —
+        // the compiler may optimize it away since `self.hash` is not read after
+        // this point. `SipHasher24` does not implement `Zeroize` and its fields
+        // are private, so a volatile per-field wipe is impossible without unsafe.
+        // Switching to a different SipHash crate risks breaking wire compatibility
+        // with the Go obfs4 reference implementation.
+        //
+        // CONTEXT: This DRBG seeds traffic-shaping (packet-length obfuscation),
+        // not AEAD/authentication keys (those come from the ntor KDF and are
+        // zeroed separately). Residual key material here is an obfuscation
+        // parameter, not a confidentiality key — hence low severity.
+        self.hash = SipHasher24::default();
     }
 }
 

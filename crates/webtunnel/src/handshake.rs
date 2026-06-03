@@ -33,17 +33,22 @@ pub fn generate_websocket_key() -> String {
 /// Build the HTTP/1.1 Upgrade request bytes.
 pub fn build_upgrade_request(config: &WebTunnelConfig) -> String {
     let parsed = url::Url::parse(&config.url).expect("url already validated");
-    let path = if parsed.path().is_empty() {
-        "/"
-    } else {
-        parsed.path()
+    let path = parsed.path();
+    let path = if path.is_empty() { "/" } else { path };
+
+    // Include the query string in the request-target (RFC 7230 §5.3.1).
+    // The Go reference implementation sends path?query; omitting the query
+    // silently breaks bridges that embed auth tokens / routing in it.
+    let request_target = match parsed.query() {
+        Some(q) if !q.is_empty() => format!("{path}?{q}"),
+        _ => path.to_string(),
     };
 
     let host = config.tls_sni().expect("tls_sni already validated");
     let key = generate_websocket_key();
 
     format!(
-        "GET {path} HTTP/1.1\r\n\
+        "GET {request_target} HTTP/1.1\r\n\
 Host: {host}\r\n\
 Upgrade: websocket\r\n\
 Connection: Upgrade\r\n\
