@@ -22,6 +22,12 @@ default = []
 embed-lyrebird = ["lyrebird"]
 
 [[example]]
+name = "connect_real_bridge"
+
+[[example]]
+name = "connect_real_webtunnel"
+
+[[example]]
 name = "bridge_line_to_obfs4_client"
 
 [[example]]

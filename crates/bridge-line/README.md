@@ -33,7 +33,7 @@ standalone without pulling in the rest of the `ptrs-gesher` framework.
 
 ## Status
 
-Version `0.2.0` — not yet published to crates.io. Interface subject to
+Version `0.3.0` — not yet published to crates.io. Interface subject to
 change.
 
 ## Example

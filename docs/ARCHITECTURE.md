@@ -6,114 +6,55 @@ adding a new one.
 
 ## Crate DAG
 
-```
-                    ┌──────────────┐
-                    │ ptrs-gesher  │  (umbrella re-exports)
-                    └──────┬───────┘
-                           │
-          ┌────────┬───────┼───────┬────────┐
-          ▼        ▼       ▼       ▼        ▼
-      ┌───────┐ ┌─────┐ ┌─────┐ ┌─────┐ ┌────────┐
-      │ core  │ │obfs4│ │ WT  │ │ BL  │ │lyrebird│
-      │(ptrs) │ │     │ │     │ │     │ │        │
-      └───┬───┘ └──┬──┘ └──┬──┘ └─────┘ └───┬────┘
-          │        │       │              ┌──┼──┐
-          │        │       │              │  ▼  │
-          │        │       │          ┌───────┐ │
-          │        │       │          │ core  │ │
-          │        │       │          └───────┘ │
-          │        │       │          ┌─────┐   │
-          │        │       │          │obfs4│   │
-          │        │       │          └─────┘   │
-          │        │       │          ┌─────┐   │
-          │        │       │          │ WT  │   │
-          │        │       │          └─────┘   │
-          │        │       │          ┌─────┐   │
-          │        │       │          │ BL  │   │
-          │        │       │          └─────┘   │
-          │        │       │          └─────────┘
-          ▼        ▼       ▼
-       (standalone — no ptrs-gesher deps below this line)
+Workspace crates and their internal (Cargo `path`) dependencies:
 
-  core = ptrs-gesher-core       WT  = ptrs-gesher-webtunnel
-  obfs4 = ptrs-gesher-obfs4     BL  = ptrs-gesher-bridge-line
-  lyrebird = ptrs-gesher-lyrebird
-```
-
-**Dependency edges (Cargo `path` deps):**
-
-| Crate            | Depends on                            |
-|------------------|---------------------------------------|
+| Crate            | Depends on                                                  |
+|------------------|------------------------------------------------------------|
 | `ptrs-gesher`    | core, obfs4, webtunnel, bridge-line, lyrebird (all optional) |
-| `lyrebird`       | core, obfs4, webtunnel                |
-| `obfs4`          | core                                  |
-| `webtunnel`      | core                                  |
-| `bridge-line`    | *(standalone)*                        |
-| `core`           | *(standalone)*                        |
+| `lyrebird`       | core, obfs4, webtunnel                                     |
+| `obfs4`          | core                                                       |
+| `webtunnel`      | core                                                       |
+| `bridge-line`    | *(standalone)*                                             |
+| `core`           | *(standalone)*                                             |
+
+`ptrs-gesher` is the umbrella crate: it re-exports the others, each behind an
+optional feature. `core` is published as `ptrs-gesher-core` and consumed
+internally as `ptrs`. `bridge-line` and `core` have no in-workspace
+dependencies.
 
 ## Client data flow (obfs4)
 
-```
-  SOCKS5 client
-       │
-       ▼
-  lyrebird (SOCKS5 accept loop)
-       │  extracts PT args from SOCKS5 username/password
-       ▼
-  ClientBuilder::options(&args)
-       │  parses cert= / iat-mode= into station_pubkey + station_id
-       ▼
-  ClientTransport::establish(tcp_future)
-       │  awaits TCP connect, then performs ntor handshake
-       ▼
-  Obfs4Codec framed tunnel (AsyncRead + AsyncWrite)
-       │  XSalsa20Poly1305 encryption, optional IAT padding
-       ▼
-  Tor relay (via the bridge's ORPort)
-```
+| # | Stage | What happens |
+|---|-------|--------------|
+| 1 | SOCKS5 client | parent (arti/tor) opens a SOCKS5 connection |
+| 2 | lyrebird (SOCKS5 accept loop) | extracts PT args from the SOCKS5 username/password |
+| 3 | `ClientBuilder::options(&args)` | parses `cert=` / `iat-mode=` into `station_pubkey` + `station_id` |
+| 4 | `ClientTransport::establish(tcp_future)` | awaits the TCP connect, then performs the ntor handshake |
+| 5 | `Obfs4Codec` framed tunnel (`AsyncRead` + `AsyncWrite`) | XSalsa20-Poly1305 encryption, optional IAT padding |
+| 6 | Tor relay (via the bridge's ORPort) | — |
 
 ## Server data flow (obfs4)
 
 Mirror of the client flow, but entry is via `ServerBuilder`:
 
-```
-  TCP listener (bound to ServerTransportListenAddr)
-       │
-       ▼
-  lyrebird (server accept loop)
-       │  accepts TCP connection
-       ▼
-  ServerTransport::reveal(tcp_stream)
-       │  waits for client ntor handshake, derives shared key
-       ▼
-  Obfs4Codec framed tunnel (AsyncRead + AsyncWrite)
-       │  bidirectional copy to the ORPort
-       ▼
-  Tor ORPort / Extended ORPort
-```
+| # | Stage | What happens |
+|---|-------|--------------|
+| 1 | TCP listener (bound to `ServerTransportListenAddr`) | accepts inbound bridge connections |
+| 2 | lyrebird (server accept loop) | accepts the TCP connection |
+| 3 | `ServerTransport::reveal(tcp_stream)` | waits for the client ntor handshake, derives the shared key |
+| 4 | `Obfs4Codec` framed tunnel (`AsyncRead` + `AsyncWrite`) | bidirectional copy to the ORPort |
+| 5 | Tor ORPort / Extended ORPort | — |
 
 ## WebTunnel data flow
 
-```
-  TCP connect to url host:port (or addr= override)
-       │
-       ▼
-  TLS handshake (tokio-rustls, no ALPN)
-       │  SNI = servername= or URL hostname
-       ▼
-  HTTP/1.1 Upgrade request
-       │  GET <path> HTTP/1.1
-       │  Upgrade: websocket
-       │  Connection: Upgrade
-       ▼
-  Server responds 101 Switching Protocols
-       │
-       ▼
-  Raw bidirectional byte stream
-       │  (no WebSocket framing — just bytes)
-       ▼
-  Tor relay (via the bridge's ORPort)
-```
+| # | Stage | What happens |
+|---|-------|--------------|
+| 1 | TCP connect to URL `host:port` (or `addr=` override) | dial the bridge front |
+| 2 | TLS handshake (tokio-rustls, no ALPN) | SNI = `servername=` or the URL hostname |
+| 3 | HTTP/1.1 Upgrade request | `GET <path> HTTP/1.1`, `Upgrade: websocket`, `Connection: Upgrade` |
+| 4 | Server responds `101 Switching Protocols` | — |
+| 5 | Raw bidirectional byte stream | no WebSocket framing — just bytes |
+| 6 | Tor relay (via the bridge's ORPort) | — |
 
 ## Where to add a new transport
 

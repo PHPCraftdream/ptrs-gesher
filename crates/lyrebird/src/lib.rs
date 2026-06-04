@@ -507,6 +507,13 @@ where
         fast_socks5::server::Config::<fast_socks5::server::DenyAuthentication>::default()
             .with_authentication(PtArgsAuth);
     config.set_allow_no_auth(true);
+    // Critical: we are a pluggable transport, not a plain TCP proxy. With
+    // the default `execute_command = true`, `upgrade_to_socks5()` would
+    // itself open a *plain* TCP connection to the bridge, send the SOCKS
+    // reply, and proxy the parent against that — bypassing obfs4 entirely
+    // and consuming the parent socket. We must only *read* the request
+    // here and do the obfs4 dial + reply ourselves below.
+    config.set_execute_command(false);
     let socks5_conn = fast_socks5::server::Socks5Socket::new(conn, Arc::new(config));
 
     let mut socks5_conn = socks5_conn.upgrade_to_socks5().await?;
@@ -543,7 +550,22 @@ where
     let pt_client = builder.build();
     let mut pt_conn = establish_pt_conn(pt_client, remote, client_addr).await?;
 
-    if let Err(e) = copy_bidirectional(&mut socks5_conn.into_inner(), &mut pt_conn).await {
+    // The obfs4 tunnel to the bridge is up, so report CONNECT success to
+    // the PT parent (arti/tor). Because we disabled `execute_command`,
+    // fast-socks5 has NOT sent any reply — we must. This is the canonical
+    // SOCKS5 success frame: VER=5, REP=0 (succeeded), RSV=0, ATYP=1
+    // (IPv4), BND.ADDR=0.0.0.0, BND.PORT=0. The parent ignores BND.*.
+    let mut parent = socks5_conn.into_inner();
+    parent
+        .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
+        .await
+        .context("writing SOCKS5 success reply to PT parent")?;
+    parent
+        .flush()
+        .await
+        .context("flushing SOCKS5 success reply")?;
+
+    if let Err(e) = copy_bidirectional(&mut parent, &mut pt_conn).await {
         warn!(
             addres = sensitive(client_addr).to_string(),
             "tunnel closed with error: {e:#?}"
@@ -1234,5 +1256,198 @@ mod tests {
             result.unwrap().is_ok(),
             "client_accept_loop should return Ok(()) on graceful cancel"
         );
+    }
+
+    // -- Bridge-connection regression (fast_socks5 `execute_command`) --
+    //
+    // `client_handle_connection` must use fast-socks5 only to *parse* the
+    // request, never to execute it. With the default `execute_command = true`,
+    // `upgrade_to_socks5()` would itself open a *plain* TCP connection to the
+    // bridge and send the SOCKS reply — bypassing obfs4, so no bridge could
+    // ever be reached through the transport. The fix sets
+    // `execute_command(false)` and has lyrebird dial obfs4 itself, replying to
+    // the parent only once the tunnel is up. These tests drive the real SOCKS5
+    // client protocol against `client_handle_connection` pointed at a real
+    // loopback "bridge".
+
+    /// Play the SOCKS5 client (as arti/tor would) over `parent`: user/pass
+    /// auth carrying the PT arg string, then a CONNECT to `bridge`. Returns
+    /// after the CONNECT request is sent; the caller asserts on the reply.
+    async fn socks5_client_connect(
+        parent: &mut DuplexStream,
+        arg_string: &str,
+        bridge: SocketAddr,
+    ) {
+        // greeting: VER=5, 1 method, user/pass (0x02)
+        parent.write_all(&[0x05, 0x01, 0x02]).await.unwrap();
+        parent.flush().await.unwrap();
+        let mut sel = [0u8; 2];
+        parent.read_exact(&mut sel).await.unwrap();
+        assert_eq!(sel, [0x05, 0x02], "server must select user/pass auth");
+
+        // RFC 1929 user/pass: pack the arg string into UNAME, PASSWD = single
+        // NUL (the `arg_string_from_creds` "uname only" form).
+        let uname = arg_string.as_bytes();
+        assert!(
+            uname.len() <= 255,
+            "this test packs the arg string into one SOCKS field"
+        );
+        let mut auth = vec![0x01, uname.len() as u8];
+        auth.extend_from_slice(uname);
+        auth.extend_from_slice(&[0x01, 0x00]); // PLEN=1, PASSWD=0x00
+        parent.write_all(&auth).await.unwrap();
+        parent.flush().await.unwrap();
+        let mut authresp = [0u8; 2];
+        parent.read_exact(&mut authresp).await.unwrap();
+        assert_eq!(authresp, [0x01, 0x00], "user/pass auth must succeed");
+
+        // CONNECT: VER=5, CMD=1, RSV=0, ATYP=1 (IPv4), addr, port.
+        let (octets, port) = match bridge {
+            SocketAddr::V4(v4) => (v4.ip().octets(), v4.port()),
+            SocketAddr::V6(_) => unreachable!("test binds IPv4 loopback"),
+        };
+        let mut req = vec![0x05, 0x01, 0x00, 0x01];
+        req.extend_from_slice(&octets);
+        req.extend_from_slice(&port.to_be_bytes());
+        parent.write_all(&req).await.unwrap();
+        parent.flush().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn client_handle_connection_tunnels_through_obfs4_and_replies_itself() {
+        // A real loopback "bridge" running an obfs4 *server*. `server.wrap()`
+        // completes only if an obfs4 *client* handshake arrives — i.e. the
+        // connection that reached the bridge was obfs4, not a plain TCP proxy.
+        // On the buggy `execute_command = true` path the bridge would instead
+        // receive fast-socks5's plain relay and `wrap()` would never complete,
+        // failing this test.
+        let server_builder = obfs4::ServerBuilder::<TcpStream>::default();
+        let arg_string = server_builder.client_params();
+        let server = server_builder.build();
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bridge_addr = listener.local_addr().unwrap();
+
+        let bridge = tokio::spawn(async move {
+            let (sock, _peer) = listener.accept().await.expect("bridge accept");
+            let mut s = server.wrap(sock).await.expect("bridge obfs4 handshake");
+            let mut buf = [0u8; 64];
+            let n = s.read(&mut buf).await.expect("bridge read");
+            s.write_all(&buf[..n]).await.expect("bridge echo");
+            s.flush().await.expect("bridge flush");
+        });
+
+        // Parent (arti/tor) side over an in-memory duplex; `lyrebird_side` is
+        // the connection `client_handle_connection` serves SOCKS on.
+        let (mut parent, lyrebird_side) = tokio::io::duplex(65_536);
+        let builder = Obfs4PT::client_builder();
+        let client_addr: SocketAddr = "127.0.0.1:9050".parse().unwrap();
+        let handler = tokio::spawn(client_handle_connection(
+            lyrebird_side,
+            builder,
+            url::Url::parse("data:,").unwrap(),
+            client_addr,
+        ));
+
+        socks5_client_connect(&mut parent, &arg_string, bridge_addr).await;
+
+        // The reply is the canonical success frame lyrebird writes itself
+        // (fast-socks5 sends nothing — execute_command is disabled), and it
+        // arrives only because the obfs4 tunnel to the bridge came up.
+        let mut reply = [0u8; 10];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            parent.read_exact(&mut reply),
+        )
+        .await
+        .expect("SOCKS5 reply timed out")
+        .expect("read SOCKS5 reply");
+        assert_eq!(
+            reply,
+            [0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0],
+            "lyrebird must send the SOCKS5 success reply itself after the obfs4 handshake"
+        );
+
+        // End-to-end: a probe must round-trip through the obfs4 tunnel.
+        let probe = b"bridge-tunnel-probe";
+        parent.write_all(probe).await.unwrap();
+        parent.flush().await.unwrap();
+        let mut got = vec![0u8; probe.len()];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            parent.read_exact(&mut got),
+        )
+        .await
+        .expect("probe round-trip timed out")
+        .expect("read probe echo");
+        assert_eq!(
+            &got, probe,
+            "probe must round-trip through the obfs4 tunnel"
+        );
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), bridge)
+            .await
+            .expect("bridge task timed out")
+            .expect("bridge task panicked");
+        drop(parent); // let copy_bidirectional see EOF and the handler finish
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handler).await;
+    }
+
+    #[tokio::test]
+    async fn client_handle_connection_no_success_reply_when_bridge_not_obfs4() {
+        // The bridge accepts the TCP connection but is NOT an obfs4 server: it
+        // closes immediately, so the obfs4 client handshake fails. lyrebird
+        // must therefore NOT report CONNECT success to the parent. The old
+        // `execute_command = true` path replied success on the bare TCP
+        // connect regardless of whether obfs4 could be established, which is
+        // exactly the bug — so this test would fail on it.
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let bridge_addr = listener.local_addr().unwrap();
+        let bridge = tokio::spawn(async move {
+            let (sock, _peer) = listener.accept().await.expect("bridge accept");
+            drop(sock); // not obfs4 — close before any handshake byte
+        });
+
+        // A well-formed cert so `options()` succeeds and the failure is the
+        // handshake, not arg parsing; this throwaway identity is never honored.
+        let arg_string = obfs4::ServerBuilder::<TcpStream>::default().client_params();
+
+        let (mut parent, lyrebird_side) = tokio::io::duplex(65_536);
+        let builder = Obfs4PT::client_builder();
+        let client_addr: SocketAddr = "127.0.0.1:9050".parse().unwrap();
+        let handler = tokio::spawn(client_handle_connection(
+            lyrebird_side,
+            builder,
+            url::Url::parse("data:,").unwrap(),
+            client_addr,
+        ));
+
+        socks5_client_connect(&mut parent, &arg_string, bridge_addr).await;
+
+        // No success reply: the handler returns Err before writing one, so its
+        // side of the duplex drops and the parent's read hits EOF rather than a
+        // 10-byte success frame.
+        let mut reply = [0u8; 10];
+        let read = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            parent.read_exact(&mut reply),
+        )
+        .await
+        .expect("the read should resolve (EOF), not hang");
+        assert!(
+            read.is_err(),
+            "no SOCKS5 success reply must be sent when the obfs4 handshake fails"
+        );
+
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), handler)
+            .await
+            .expect("handler should finish")
+            .expect("handler task panicked");
+        assert!(
+            outcome.is_err(),
+            "client_handle_connection must surface the failed obfs4 dial as an error"
+        );
+
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), bridge).await;
     }
 }

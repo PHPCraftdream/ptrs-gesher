@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-06-04
+
+Synchronized release: every crate is bumped to 0.3.0 in lockstep, so a 0.3.x
+crate is guaranteed to interoperate with the other 0.3.x crates. The 0.1.x and
+0.2.0 versions are yanked — `ptrs-gesher-lyrebird` 0.2.0 could not connect to
+bridges (see below); the transports (`core`, `obfs4`, `webtunnel`,
+`bridge-line`) are functionally unchanged from 0.2.0 and are re-published at
+0.3.0 only to keep the published line consistent.
+
+### Fixed
+
+- **lyrebird**: the client SOCKS5 handler dialed bridges over plain TCP
+  instead of obfs4, so no bridge could be reached through the transport.
+  fast-socks5's default `execute_command = true` made `upgrade_to_socks5()`
+  execute the CONNECT itself — opening a plain TCP connection to the bridge
+  and replying to the parent — bypassing the obfs4 handshake entirely.
+  lyrebird now parses the request only (`execute_command(false)`), dials the
+  bridge over obfs4 itself, and sends the SOCKS5 success reply only once the
+  handshake completes. Covered by two regression tests.
+
+### Added
+
+- `connect_real_bridge` and `connect_real_webtunnel` examples — diagnostics
+  that drive the obfs4 / webtunnel clients directly against real bridges (no
+  arti, no PT manager), isolating each transport from the embedding glue.
+
 ## [0.2.0] - 2026-05-28
 
 Public-API cleanup (breaking) layered on top of the 0.1.1 security hotfix.

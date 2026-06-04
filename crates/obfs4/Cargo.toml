@@ -1,6 +1,6 @@
 [package]
 name = "ptrs-gesher-obfs4"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -23,7 +23,7 @@ crate-type = ["rlib"]
 
 [dependencies]
 ## Local
-ptrs = { package = "ptrs-gesher-core", path = "../core", version = "0.2.0" }
+ptrs = { package = "ptrs-gesher-core", path = "../core", version = "0.3.0" }
 
 ## PRNG
 getrandom = "0.2.11"
