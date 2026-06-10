@@ -110,8 +110,8 @@ impl<T> ServerBuilder<T> {
     /// Encode the server's public parameters as a bridge-line argument string for clients.
     pub fn client_params(&self) -> String {
         let mut params = Args::new();
-        params.insert(CERT_ARG.into(), vec![self.identity_keys.pk.to_string()]);
-        params.insert(IAT_ARG.into(), vec![self.iat_mode.to_string()]);
+        params.add(CERT_ARG, &self.identity_keys.pk.to_string());
+        params.add(IAT_ARG, &self.iat_mode.to_string());
         params.encode_smethod_args()
     }
 
@@ -157,14 +157,13 @@ impl<T> ServerBuilder<T> {
     }
 
     fn server_state_from_file(statedir: impl AsRef<str>, args: &mut Args) -> Result<()> {
-        let mut file_path = String::from(statedir.as_ref());
-        file_path.push_str(STATE_FILENAME);
+        let file_path = std::path::Path::new(statedir.as_ref()).join(STATE_FILENAME);
 
         // NOTE: This uses blocking I/O (std::fs::read) rather than tokio::fs::read
         // because this function is called from the sync `ServerBuilder::options()`
         // trait method. This is acceptable: it runs once at server init, not on
         // the hot path, and the file is small (< 1 KiB).
-        let state_str = std::fs::read(file_path)?;
+        let state_str = std::fs::read(&file_path)?;
 
         Self::server_state_from_json(&state_str[..], args)
     }
@@ -485,6 +484,27 @@ mod tests {
         args.add(IAT_ARG, "0");
         let result = ServerBuilder::<TcpStream>::validate_args(&args);
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn server_state_file_path_uses_separator() {
+        // Regression: the old code did `String::from(dir) + STATE_FILENAME` with
+        // no separator, producing e.g. "/var/lib/obfs4obfs4_state.json". Path::join
+        // always inserts the platform separator between the directory and filename.
+        let dir = "/var/lib/obfs4";
+        let path = std::path::Path::new(dir).join(STATE_FILENAME);
+        // Must end with the state filename
+        assert!(
+            path.file_name().unwrap().to_str().unwrap() == STATE_FILENAME,
+            "file name must be STATE_FILENAME, got {:?}",
+            path.file_name()
+        );
+        // The directory component must be present (separator inserted)
+        assert_eq!(
+            path.parent().unwrap(),
+            std::path::Path::new(dir),
+            "parent directory must equal the input statedir"
+        );
     }
 
     #[test]

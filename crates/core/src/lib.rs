@@ -4,7 +4,7 @@
 use std::{
     net::{SocketAddrV4, SocketAddrV6},
     pin::Pin,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 use futures::Future; // , Sink, TryStream};
@@ -192,62 +192,6 @@ where
     ///
     /// Leaving this out will mean the PT uses a sane default.
     fn v6_bind_addr(&mut self, addr: SocketAddrV6) -> Result<&mut Self, Self::Error>;
-}
-
-// ================================================================ //
-//                        Connections                               //
-// ================================================================ //
-
-/// Creator1 defines a stream creator that could be applied to either the input
-/// stream feature or the resulting stream future making them composable.
-pub trait Conn {
-    /// Output connection type.
-    type OutRW;
-    /// Error type for the connection future.
-    type OutErr;
-    /// Future that resolves to the connected stream.
-    type Future: Future<Output = Result<Self::OutRW, Self::OutErr>>;
-
-    /// Create a new connection future.
-    fn new() -> Self::Future;
-}
-
-/// In concept this trait provides extended functionality that can be appled to
-/// the client / server traits for creating connections / pluggable transports.
-/// this is still in a TODO state.
-pub trait ConnectExt: Conn {
-    /// Connect with an absolute deadline.
-    fn connect_with_deadline(
-        &mut self,
-        deadline: Instant,
-    ) -> Result<Self::Future, tokio::time::error::Elapsed>;
-    /// Connect with a relative timeout.
-    fn connect_with_timeout(
-        &mut self,
-        timeout: Duration,
-    ) -> Result<Self::Future, tokio::time::error::Elapsed>;
-}
-
-impl Conn for tokio::net::TcpStream {
-    type OutRW = Self;
-    type OutErr = std::io::Error;
-    type Future = Pin<F<Self::OutRW, Self::OutErr>>;
-
-    fn new() -> Self::Future {
-        let f = tokio::net::TcpStream::connect("127.0.0.1:9000");
-        Box::pin(f)
-    }
-}
-
-impl Conn for tokio::net::UdpSocket {
-    type OutErr = std::io::Error;
-    type OutRW = tokio::net::UdpSocket;
-    type Future = Pin<F<Self::OutRW, Self::OutErr>>;
-
-    fn new() -> Self::Future {
-        let f = tokio::net::UdpSocket::bind("127.0.0.1:9000");
-        Box::pin(f)
-    }
 }
 
 /// Future containing a generic result. We use this for functions that take

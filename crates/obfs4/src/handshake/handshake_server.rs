@@ -118,11 +118,7 @@ impl Server {
         let (key_seed, authcode) =
             ntor_derive(&xy, &xb, &materials.identity_keys.pk, &their_pk, &ephem_pub)
                 .map_err(into_internal!("Error deriving keys"))?;
-        trace!(
-            "seed: {} auth: {}",
-            hex::encode(key_seed.as_slice()),
-            hex::encode(authcode)
-        );
+        trace!("ntor server key derivation complete");
 
         let mut keygen = NtorHkdfKeyGenerator::new(key_seed, false);
 

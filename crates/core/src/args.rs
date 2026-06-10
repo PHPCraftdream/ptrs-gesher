@@ -1,10 +1,7 @@
 //! Key–value mappings for the representation of client and server options.
 
 use itertools::Itertools;
-use std::{
-    collections::HashMap,
-    ops::{Deref, DerefMut},
-};
+use std::collections::HashMap;
 
 use crate::Error;
 
@@ -46,7 +43,10 @@ macro_rules! count {
 /// assert_eq!(map.get("c"), None);
 /// # }
 /// ```
-#[macro_export]
+///
+/// This macro is crate-internal (used by tests and helpers); it is not part of
+/// the public API.
+#[allow(unused_macros)]
 macro_rules! args {
     ($($key:expr => $value:expr,)+) => { args!($($key => $value),+) };
     ($($key:expr => $value:expr),*) => {
@@ -91,15 +91,40 @@ impl Args {
     /// Add a key-value pair. Appends to existing values for the same key.
     pub fn add(&mut self, key: &str, value: &str) {
         // value either exists or is allocated here.
-        self.entry(key.to_string()).or_default();
+        self.0.entry(key.to_string()).or_default();
 
         // therefor value should never be None and it is safe to unwrap.
-        self.get_mut(key).unwrap().push(value.to_string());
+        self.0.get_mut(key).unwrap().push(value.to_string());
+    }
+
+    /// Get the list of values for a key, or `None` if the key is absent.
+    pub fn get(&self, key: &str) -> Option<&Vec<String>> {
+        self.0.get(key)
+    }
+
+    /// Whether a key is present.
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.0.contains_key(key)
+    }
+
+    /// Whether this bag contains no keys.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Number of keys in this bag.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Iterate over the key / value-list pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Vec<String>)> {
+        self.0.iter()
     }
 
     /// Retrieve the first value for a key, or `None` if absent / empty.
     pub fn retrieve(&self, key: impl AsRef<str>) -> Option<String> {
-        let v = self.get(key.as_ref())?;
+        let v = self.0.get(key.as_ref())?;
         if v.is_empty() {
             return None;
         }
@@ -190,19 +215,6 @@ impl Args {
             })
             .collect::<Vec<String>>()
             .join(",")
-    }
-}
-
-impl Deref for Args {
-    type Target = HashMap<String, Vec<String>>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl DerefMut for Args {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
     }
 }
 
@@ -357,7 +369,8 @@ impl Opts {
                 return Err(Error::ParseError(format!("empty key in {}", &s[begin..i])));
             }
 
-            opts.entry(method_name)
+            opts.0
+                .entry(method_name)
                 .and_modify(|e| e.add(&key, &value))
                 .or_insert(Args(hashmap! {key => vec![value]}));
 
@@ -371,17 +384,35 @@ impl Opts {
     }
 }
 
-impl Deref for Opts {
-    type Target = HashMap<String, Args>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.0
+impl Opts {
+    /// Get the `Args` for a transport name, or `None` if absent.
+    pub fn get(&self, key: &str) -> Option<&Args> {
+        self.0.get(key)
     }
-}
 
-impl DerefMut for Opts {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.0
+    /// Whether a transport name is present.
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.0.contains_key(key)
+    }
+
+    /// Whether this bag contains no transports.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// Number of transports in this bag.
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Iterate over the (transport-name, `Args`) pairs.
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &Args)> {
+        self.0.iter()
+    }
+
+    /// Remove and return the `Args` for a transport name, if present.
+    pub fn remove(&mut self, key: &str) -> Option<Args> {
+        self.0.remove(key)
     }
 }
 

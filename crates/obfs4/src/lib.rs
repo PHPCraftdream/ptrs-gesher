@@ -76,8 +76,8 @@ pub(crate) mod dev {
             let sk =
                 Obfs4NtorSecretKey::new(static_secret, RsaIdentity::from([0u8; NODE_ID_LENGTH]));
             let mut client_args = Args::new();
-            client_args.insert(CERT_ARG.into(), vec![sk.pk.to_string()]);
-            client_args.insert(IAT_ARG.into(), vec!["0".into()]);
+            client_args.add(CERT_ARG, &sk.pk.to_string());
+            client_args.add(IAT_ARG, "0");
             trace!("{}", client_args.encode_smethod_args());
         }
 

@@ -263,8 +263,10 @@ where
         let mut this = self.as_mut().project();
 
         // determine if the stream is ready to send an event?
-        if futures::Sink::<&[u8]>::poll_ready(this.stream.as_mut(), cx) == Poll::Pending {
-            return Poll::Pending;
+        match futures::Sink::<&[u8]>::poll_ready(this.stream.as_mut(), cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
+            Poll::Ready(Ok(())) => {}
         }
 
         // while we have bytes in the buffer write MAX_MESSAGE_PAYLOAD_LENGTH
@@ -292,8 +294,10 @@ where
             out_buf.clear();
 
             // determine if the stream is ready to send more data. if not back off
-            if futures::Sink::<&[u8]>::poll_ready(this.stream.as_mut(), cx) == Poll::Pending {
-                return Poll::Ready(Ok(len_sent));
+            match futures::Sink::<&[u8]>::poll_ready(this.stream.as_mut(), cx) {
+                Poll::Pending => return Poll::Ready(Ok(len_sent)),
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
+                Poll::Ready(Ok(())) => {}
             }
         }
 

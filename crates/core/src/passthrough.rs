@@ -167,6 +167,7 @@ impl Passthrough {
 mod design_tests {
 
     use crate::info;
+    use std::net::SocketAddr;
     use tokio::{
         io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
         net::TcpStream,
@@ -235,15 +236,13 @@ mod design_tests {
     async fn client_interface_establish_pt() -> Result<(), std::io::Error> {
         init_subscriber();
 
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let (tx, rx) = tokio::sync::oneshot::channel::<SocketAddr>();
 
         tokio::spawn(async move {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:8000")
-                .await
-                .unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
             info!("tcp listening");
-            // ensure / force listener to be ready before connect.
-            tx.send(()).unwrap();
+            tx.send(addr).unwrap();
 
             let (mut sock, _) = listener.accept().await.unwrap();
             info!("tcp accepted");
@@ -252,10 +251,8 @@ mod design_tests {
             _ = tokio::io::copy(&mut r, &mut w).await;
         });
 
-        // ensure / force listener to be ready before connect.
-        rx.await.unwrap();
-
-        let tcp_fut = TcpStream::connect("127.0.0.1:8000");
+        let addr = rx.await.unwrap();
+        let tcp_fut = TcpStream::connect(addr);
 
         // let builder = <Passthrough as PluggableTransport<TcpStream>>::ClientBuilder::default();
         // let builder = <<Passthrough as PluggableTransport<TcpStream, std::io::Error>>::Client as ClientTransport<TcpStream,std::io::Error>>::Builder::default();
@@ -269,10 +266,11 @@ mod design_tests {
         let mut conn = conn_fut.await?;
 
         let msg = b"a man a plan a canal panama";
-        _ = conn.write(&msg[..]).await?;
+        conn.write_all(&msg[..]).await?;
 
         let mut buf = [0u8; 27];
-        _ = conn.read(&mut buf).await?;
+        conn.read_exact(&mut buf).await?;
+        assert_eq!(&buf[..], &msg[..]);
         info!(
             "server echoed: \"{}\"",
             String::from_utf8(buf.to_vec()).unwrap()
@@ -310,15 +308,13 @@ mod design_tests {
     async fn client_interface_establish() -> Result<(), std::io::Error> {
         init_subscriber();
 
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let (tx, rx) = tokio::sync::oneshot::channel::<SocketAddr>();
 
         tokio::spawn(async move {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:8001")
-                .await
-                .unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
             info!("tcp listening");
-            // ensure / force listener to be ready before connect.
-            tx.send(()).unwrap();
+            tx.send(addr).unwrap();
 
             let (mut sock, _) = listener.accept().await.unwrap();
             info!("tcp accepted");
@@ -327,10 +323,8 @@ mod design_tests {
             _ = tokio::io::copy(&mut r, &mut w).await;
         });
 
-        // ensure / force listener to be ready before connect.
-        rx.await.unwrap();
-
-        let tcp_fut = TcpStream::connect("127.0.0.1:8001");
+        let addr = rx.await.unwrap();
+        let tcp_fut = TcpStream::connect(addr);
 
         // let builder = <Passthrough as PluggableTransport<TcpStream>>::ClientBuilder::default();
         // let builder = <<Passthrough as PluggableTransport<TcpStream, std::io::Error>>::Client as ClientTransport<TcpStream,std::io::Error>>::Builder::default();
@@ -344,10 +338,11 @@ mod design_tests {
         let mut conn = conn_fut.await?;
 
         let msg = b"a man a plan a canal panama";
-        _ = conn.write(&msg[..]).await?;
+        conn.write_all(&msg[..]).await?;
 
         let mut buf = [0u8; 27];
-        _ = conn.read(&mut buf).await?;
+        conn.read_exact(&mut buf).await?;
+        assert_eq!(&buf[..], &msg[..]);
         info!(
             "server echoed: \"{}\"",
             String::from_utf8(buf.to_vec()).unwrap()
@@ -386,15 +381,13 @@ mod design_tests {
     async fn client_interface_wrap_pt() -> Result<(), std::io::Error> {
         init_subscriber();
 
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let (tx, rx) = tokio::sync::oneshot::channel::<SocketAddr>();
 
         tokio::spawn(async move {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:8002")
-                .await
-                .unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
             info!("tcp listening");
-            // ensure / force listener to be ready before connect.
-            tx.send(()).unwrap();
+            tx.send(addr).unwrap();
 
             let (mut sock, _) = listener.accept().await.unwrap();
             info!("tcp accepted");
@@ -403,11 +396,9 @@ mod design_tests {
             _ = tokio::io::copy(&mut r, &mut w).await;
         });
 
-        // ensure / force listener to be ready before connect.
-        rx.await.unwrap();
-
+        let addr = rx.await.unwrap();
         info!("connecting to tcp");
-        let tcp_conn = TcpStream::connect("127.0.0.1:8002").await?;
+        let tcp_conn = TcpStream::connect(addr).await?;
 
         info!("connecting to pt over tcp");
         let conn_fut = wrap_using_pt::<TcpStream, std::io::Error, Passthrough>(tcp_conn)
@@ -417,10 +408,11 @@ mod design_tests {
         let mut conn = conn_fut.await?;
 
         let msg = b"a man a plan a canal panama";
-        _ = conn.write(&msg[..]).await?;
+        conn.write_all(&msg[..]).await?;
 
         let mut buf = [0u8; 27];
-        _ = conn.read(&mut buf).await?;
+        conn.read_exact(&mut buf).await?;
+        assert_eq!(&buf[..], &msg[..]);
         info!(
             "server echoed: \"{}\"",
             String::from_utf8(buf.to_vec()).unwrap()
@@ -458,15 +450,13 @@ mod design_tests {
     async fn client_interface_wrap() -> Result<(), std::io::Error> {
         init_subscriber();
 
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let (tx, rx) = tokio::sync::oneshot::channel::<SocketAddr>();
 
         tokio::spawn(async move {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:8004")
-                .await
-                .unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
             info!("tcp listening");
-            // ensure / force listener to be ready before connect.
-            tx.send(()).unwrap();
+            tx.send(addr).unwrap();
 
             let (mut sock, _) = listener.accept().await.unwrap();
             info!("tcp accepted");
@@ -475,11 +465,9 @@ mod design_tests {
             _ = tokio::io::copy(&mut r, &mut w).await;
         });
 
-        // ensure / force listener to be ready before connect.
-        rx.await.unwrap();
-
+        let addr = rx.await.unwrap();
         info!("connecting to tcp");
-        let tcp_conn = TcpStream::connect("127.0.0.1:8004").await?;
+        let tcp_conn = TcpStream::connect(addr).await?;
 
         let builder = <Passthrough as PluggableTransport<TcpStream>>::client_builder();
 
@@ -489,10 +477,11 @@ mod design_tests {
             .await?;
 
         let msg = b"a man a plan a canal panama";
-        _ = conn.write(&msg[..]).await?;
+        conn.write_all(&msg[..]).await?;
 
         let mut buf = [0u8; 27];
-        _ = conn.read(&mut buf).await?;
+        conn.read_exact(&mut buf).await?;
+        assert_eq!(&buf[..], &msg[..]);
         info!(
             "server echoed: \"{}\"",
             String::from_utf8(buf.to_vec()).unwrap()
@@ -531,15 +520,13 @@ mod design_tests {
     async fn server_interface_wrap_pt() -> Result<(), std::io::Error> {
         init_subscriber();
 
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let (tx, rx) = tokio::sync::oneshot::channel::<SocketAddr>();
 
         tokio::spawn(async move {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:8005")
-                .await
-                .unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
             info!("tcp listening");
-            // ensure / force listener to be ready before connect.
-            tx.send(()).unwrap();
+            tx.send(addr).unwrap();
 
             let (tcp_conn, _) = listener.accept().await.unwrap();
             info!("tcp accepted");
@@ -554,11 +541,9 @@ mod design_tests {
             _ = tokio::io::copy(&mut r, &mut w).await;
         });
 
-        // ensure / force listener to be ready before connect.
-        rx.await.unwrap();
-
+        let addr = rx.await.unwrap();
         info!("connecting to tcp");
-        let tcp_conn = TcpStream::connect("127.0.0.1:8005").await?;
+        let tcp_conn = TcpStream::connect(addr).await?;
 
         info!("connecting to pt over tcp");
         let conn_fut = wrap_using_pt::<TcpStream, std::io::Error, Passthrough>(tcp_conn)
@@ -568,10 +553,11 @@ mod design_tests {
         let mut conn = conn_fut.await?;
 
         let msg = b"a man a plan a canal panama";
-        _ = conn.write(&msg[..]).await?;
+        conn.write_all(&msg[..]).await?;
 
         let mut buf = [0u8; 27];
-        _ = conn.read(&mut buf).await?;
+        conn.read_exact(&mut buf).await?;
+        assert_eq!(&buf[..], &msg[..]);
         info!(
             "server echoed: \"{}\"",
             String::from_utf8(buf.to_vec()).unwrap()
@@ -610,15 +596,13 @@ mod design_tests {
     async fn server_interface_wrap() -> Result<(), std::io::Error> {
         init_subscriber();
 
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let (tx, rx) = tokio::sync::oneshot::channel::<SocketAddr>();
 
         tokio::spawn(async move {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:8006")
-                .await
-                .unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
             info!("tcp listening");
-            // ensure / force listener to be ready before connect.
-            tx.send(()).unwrap();
+            tx.send(addr).unwrap();
 
             let (tcp_conn, _) = listener.accept().await.unwrap();
             info!("tcp accepted");
@@ -635,17 +619,16 @@ mod design_tests {
             _ = tokio::io::copy(&mut r, &mut w).await;
         });
 
-        // ensure / force listener to be ready before connect.
-        rx.await.unwrap();
-
+        let addr = rx.await.unwrap();
         info!("connecting to tcp");
-        let mut conn = TcpStream::connect("127.0.0.1:8006").await?;
+        let mut conn = TcpStream::connect(addr).await?;
 
         let msg = b"a man a plan a canal panama";
-        _ = conn.write(&msg[..]).await?;
+        conn.write_all(&msg[..]).await?;
 
         let mut buf = [0u8; 27];
-        _ = conn.read(&mut buf).await?;
+        conn.read_exact(&mut buf).await?;
+        assert_eq!(&buf[..], &msg[..]);
         info!(
             "server echoed: \"{}\"",
             String::from_utf8(buf.to_vec()).unwrap()
@@ -660,14 +643,13 @@ mod design_tests {
 
         let p = Passthrough {};
 
-        // note that this is not await-ed here so it is not executed until later
-        let tcp_dial_fut = TcpStream::connect("127.0.0.1:8007");
+        let (tx, rx) = tokio::sync::oneshot::channel::<SocketAddr>();
 
         tokio::spawn(async move {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:8007")
-                .await
-                .unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
             info!("tcp listening");
+            tx.send(addr).unwrap();
 
             let (mut sock, _) = listener.accept().await.unwrap();
             info!("tcp accepted");
@@ -676,7 +658,10 @@ mod design_tests {
             _ = tokio::io::copy(&mut r, &mut w).await;
         });
 
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        let addr = rx.await.unwrap();
+        // note that this is not await-ed here so it is not executed until later
+        let tcp_dial_fut = TcpStream::connect(addr);
+
         info!("wrapping client fut");
 
         // this takes the dial future and creates a new future
@@ -688,10 +673,11 @@ mod design_tests {
         info!("client connected");
 
         let msg = b"a man a plan a canal panama";
-        _ = conn.write(&msg[..]).await?;
+        conn.write_all(&msg[..]).await?;
 
         let mut buf = [0u8; 27];
-        _ = conn.read(&mut buf).await?;
+        conn.read_exact(&mut buf).await?;
+        assert_eq!(&buf[..], &msg[..]);
         info!(
             "server echoed: \"{}\"",
             String::from_utf8(buf.to_vec()).unwrap()
@@ -706,15 +692,14 @@ mod design_tests {
 
         let p = Passthrough {};
 
-        // note that this is not await-ed here so it is not executed until later
-        let tcp_dial_fut = Box::pin(TcpStream::connect("127.0.0.1:8008"));
+        let (tx, rx) = tokio::sync::oneshot::channel::<SocketAddr>();
 
         tokio::spawn(async move {
             let sp = Passthrough {};
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:8008")
-                .await
-                .unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
             info!("tcp listening");
+            tx.send(addr).unwrap();
 
             // let (mut sock, _) = sp.wrap_acc(Box::pin(listener.accept())).await.unwrap();
             let (conn, _) = listener.accept().await.unwrap();
@@ -725,7 +710,10 @@ mod design_tests {
             _ = tokio::io::copy(&mut r, &mut w).await;
         });
 
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        let addr = rx.await.unwrap();
+        // note that this is not await-ed here so it is not executed until later
+        let tcp_dial_fut = Box::pin(TcpStream::connect(addr));
+
         info!("wrapping client fut");
 
         // this takes the dial future and creates a new future
@@ -737,10 +725,11 @@ mod design_tests {
         info!("client connected");
 
         let msg = b"a man a plan a canal panama";
-        _ = conn.write(&msg[..]).await?;
+        conn.write_all(&msg[..]).await?;
 
         let mut buf = [0u8; 27];
-        _ = conn.read(&mut buf).await?;
+        conn.read_exact(&mut buf).await?;
+        assert_eq!(&buf[..], &msg[..]);
         info!(
             "server echoed: \"{}\"",
             String::from_utf8(buf.to_vec()).unwrap()
@@ -753,13 +742,12 @@ mod design_tests {
     async fn server_composition() -> Result<(), std::io::Error> {
         init_subscriber();
 
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let (tx, rx) = tokio::sync::oneshot::channel::<SocketAddr>();
 
         tokio::spawn(async move {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:8009")
-                .await
-                .unwrap();
-            tx.send(()).unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tx.send(addr).unwrap();
 
             let (tcp_sock, _) = listener.accept().await.unwrap();
 
@@ -778,14 +766,15 @@ mod design_tests {
             _ = tokio::io::copy(&mut r, &mut w).await;
         });
 
-        rx.await.unwrap();
-        let mut conn = Box::pin(TcpStream::connect("127.0.0.1:8009")).await?;
+        let addr = rx.await.unwrap();
+        let mut conn = Box::pin(TcpStream::connect(addr)).await?;
 
         let msg = b"a man a plan a canal panama";
-        _ = conn.write(&msg[..]).await?;
+        conn.write_all(&msg[..]).await?;
 
         let mut buf = [0u8; 27];
-        _ = conn.read(&mut buf).await?;
+        conn.read_exact(&mut buf).await?;
+        assert_eq!(&buf[..], &msg[..]);
 
         Ok(())
     }
@@ -794,22 +783,22 @@ mod design_tests {
     async fn client_composition() -> Result<(), std::io::Error> {
         init_subscriber();
 
-        let tcp_dial_fut = Box::pin(TcpStream::connect("127.0.0.1:8010"));
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let (tx, rx) = tokio::sync::oneshot::channel::<SocketAddr>();
 
         tokio::spawn(async move {
-            let listener = tokio::net::TcpListener::bind("127.0.0.1:8010")
-                .await
-                .unwrap();
-            tx.send(()).unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            tx.send(addr).unwrap();
             let (mut sock, _) = listener.accept().await.unwrap();
             let (mut r, mut w) = tokio::io::split(&mut sock);
             _ = tokio::io::copy(&mut r, &mut w).await;
         });
 
+        let addr = rx.await.unwrap();
+        let tcp_dial_fut = Box::pin(TcpStream::connect(addr));
+
         let pb: &BuilderC = &<Passthrough as PluggableTransport<TcpStream>>::client_builder();
 
-        rx.await.unwrap();
         let client = <BuilderC as ClientBuilder<TcpStream>>::build(pb);
         let conn_fut1 = client.establish(Box::pin(tcp_dial_fut));
         let client = <BuilderC as ClientBuilder<TcpStream>>::build(pb);
@@ -819,10 +808,11 @@ mod design_tests {
         let mut conn = conn_fut3.await?;
 
         let msg = b"a man a plan a canal panama";
-        _ = conn.write(&msg[..]).await?;
+        conn.write_all(&msg[..]).await?;
 
         let mut buf = [0u8; 27];
-        _ = conn.read(&mut buf).await?;
+        conn.read_exact(&mut buf).await?;
+        assert_eq!(&buf[..], &msg[..]);
 
         Ok(())
     }

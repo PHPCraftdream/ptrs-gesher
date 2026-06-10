@@ -121,7 +121,11 @@ fn bench_bidirectional_copy(c: &mut Criterion) {
                 b.write_all(&d2).await.unwrap();
                 drop(b);
             });
-            lyrebird::bidirectional_copy(a_in, b_in).await.unwrap();
+            let (mut a_in, mut b_in) = (a_in, b_in);
+            // Each writer closes its end after a single write, so the copy ends
+            // with a BrokenPipe once one direction hits EOF — that's normal
+            // teardown for this throughput measurement, not an error.
+            let _ = tokio::io::copy_bidirectional(&mut a_in, &mut b_in).await;
             wa.await.unwrap();
             wb.await.unwrap();
         });

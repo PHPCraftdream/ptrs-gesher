@@ -17,8 +17,32 @@ pub(crate) const SIZE: usize = 8;
 pub(crate) const SEED_LENGTH: usize = 16 + SIZE;
 
 /// Hash-DRBG seed
-#[derive(Debug, PartialEq, Clone)]
+#[derive(Clone)]
 pub struct Seed([u8; SEED_LENGTH]);
+
+impl fmt::Debug for Seed {
+    /// The seed is the SipHash key used for length obfuscation — secret key
+    /// material that must never be rendered into a log or `{:?}` dump.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("drbg::Seed(..)")
+    }
+}
+
+impl PartialEq for Seed {
+    /// Constant-time comparison: the seed is secret key material, so its
+    /// equality check must not leak byte positions through timing.
+    fn eq(&self, other: &Self) -> bool {
+        use subtle::ConstantTimeEq;
+        self.0.ct_eq(&other.0).into()
+    }
+}
+
+impl Drop for Seed {
+    fn drop(&mut self) {
+        use zeroize::Zeroize;
+        self.0.zeroize();
+    }
+}
 
 impl Seed {
     /// Generate a fresh Hash-DRBG seed from the system random source.

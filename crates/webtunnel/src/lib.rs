@@ -149,7 +149,9 @@ impl WebTunnelConfig {
 
     /// Whether TLS should be used (true for `https://`, false for `http://`).
     fn use_tls(&self) -> bool {
-        self.url.starts_with("https")
+        url::Url::parse(&self.url)
+            .map(|u| u.scheme().eq_ignore_ascii_case("https"))
+            .unwrap_or(false)
     }
 }
 
@@ -758,6 +760,57 @@ mod tests {
     fn config_use_tls_ftp_scheme_is_false() {
         let cfg = WebTunnelConfig {
             url: "ftp://example.com/x".into(),
+            version: None,
+            servername: None,
+            tcp_addr: None,
+        };
+        assert!(!cfg.use_tls());
+    }
+
+    // -- use_tls scheme-parsing correctness tests --------------------------------
+
+    #[test]
+    fn use_tls_https_lowercase_is_true() {
+        let cfg = WebTunnelConfig {
+            url: "https://example.com/path".into(),
+            version: None,
+            servername: None,
+            tcp_addr: None,
+        };
+        assert!(cfg.use_tls());
+    }
+
+    #[test]
+    fn use_tls_http_lowercase_is_false() {
+        let cfg = WebTunnelConfig {
+            url: "http://example.com/path".into(),
+            version: None,
+            servername: None,
+            tcp_addr: None,
+        };
+        assert!(!cfg.use_tls());
+    }
+
+    #[test]
+    fn use_tls_https_uppercase_is_true() {
+        // The url crate normalises the scheme to lowercase during parsing,
+        // so Url::parse("HTTPS://...").scheme() == "https".  The raw
+        // starts_with("https") check would have returned false here.
+        let cfg = WebTunnelConfig {
+            url: "HTTPS://example.com/path".into(),
+            version: None,
+            servername: None,
+            tcp_addr: None,
+        };
+        assert!(cfg.use_tls());
+    }
+
+    #[test]
+    fn use_tls_httpsx_garbage_scheme_is_false() {
+        // "httpsx://" starts with "https" but is not the https scheme.
+        // Parsed scheme would be "httpsx", not "https".
+        let cfg = WebTunnelConfig {
+            url: "httpsx://example.com".into(),
             version: None,
             servername: None,
             tcp_addr: None,

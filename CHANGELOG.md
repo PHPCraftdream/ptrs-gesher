@@ -7,6 +7,71 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-06-10
+
+Synchronized release: every crate is bumped to 0.4.0 in lockstep. This release
+collects the fixes from a full `rust-cc-audit` pass. The robustness and
+log-hygiene fixes are behaviour-only, but the audit also surfaced public-API
+residue whose removal is a breaking change — hence the minor bump rather than a
+patch. The 0.3.0 line is superseded.
+
+### Fixed
+
+- **obfs4**: the handshake read loop reused its buffer from index 0 on every
+  read, so a server (or client) hello delivered in multiple TCP segments was
+  never accumulated — each `EAgain` discarded the previously-read bytes and a
+  fragmented handshake could hang until timeout. Both the client
+  (`ClientSession::complete_handshake`) and server (`Server::complete_handshake`)
+  loops now accumulate into the buffer and reject only once it is full. Covered
+  by a regression test that drives the handshake through a 32-byte-per-read
+  transport (verified red before the fix).
+- **obfs4**: `O4Stream::poll_write` compared `poll_ready(...) == Poll::Pending`,
+  silently dropping a `Poll::Ready(Err(_))` from the sink; the framing error is
+  now propagated instead of calling `start_send` on a failed sink.
+- **obfs4**: `server_state_from_file` built the state-file path by string
+  concatenation without a separator (`/dir` + `state.json` → `/dirstate.json`);
+  it now uses `Path::join`.
+- **webtunnel**: `use_tls()` matched the raw URL with `starts_with("https")`,
+  which is case-sensitive (`HTTPS://` was treated as plaintext) and accepted
+  bogus schemes (`httpsx://`); it now parses the URL and compares the scheme.
+
+### Security / hygiene
+
+- **obfs4**: removed `trace!`/`debug!` statements that hex-dumped session key
+  material (XSalsa20-Poly1305 key material, the ntor `key_seed`, and the
+  length-obfuscation seed). These were behind the crate-internal,
+  `feature = "debug"`-gated logging macros (never emitted in a default release
+  build), but dumping key material into any log is removed regardless.
+- **obfs4**: `drbg::Seed` no longer derives `Debug`/`PartialEq`; it now has a
+  redacting `Debug` (`drbg::Seed(..)`), a constant-time `PartialEq` via
+  `subtle`, and a `Drop` that zeroizes the seed bytes.
+
+### Changed (breaking)
+
+- **core**: `Args` and `Opts` no longer implement `Deref`/`DerefMut` to
+  `HashMap` — the full `HashMap` surface (including `insert`/`remove`/`clear`)
+  is no longer exposed and callers can no longer bypass `add()`/`parse()`.
+  Explicit accessors are provided instead (`get`, `contains_key`, `is_empty`,
+  `len`, `iter`, plus `Opts::remove`).
+- **core**: the `args!` macro is no longer `#[macro_export]`ed — it was
+  unusable outside the crate (it expanded to crate-private paths) and is now
+  crate-internal.
+
+### Removed
+
+- **core**: the unused `Conn` / `ConnectExt` traits and their
+  `impl Conn for TcpStream`/`UdpSocket` (which hard-coded `127.0.0.1:9000`).
+- **lyrebird**: the `bidirectional_copy` helper — production paths already use
+  `tokio::io::copy_bidirectional` (which correctly propagates shutdown); the
+  helper was only reachable from its own test.
+
+### Tests
+
+- **core**: the `passthrough` tests no longer bind fixed ports (8000–8010) or
+  synchronize with `sleep` — they bind `127.0.0.1:0` and pass the address via a
+  `oneshot`, and assert the echoed bytes via `write_all`/`read_exact` instead of
+  a single unchecked `read`.
+
 ## [0.3.0] - 2026-06-04
 
 Synchronized release: every crate is bumped to 0.3.0 in lockstep, so a 0.3.x

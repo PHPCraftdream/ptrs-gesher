@@ -97,7 +97,7 @@ impl EncryptingDecoder {
     // Creates a new Decoder instance.  It must be supplied a slice
     // containing exactly KeyLength bytes of keying material.
     fn new(key_material: [u8; KEY_MATERIAL_LENGTH]) -> Self {
-        trace!("new decoder key_material: {}", hex::encode(key_material));
+        trace!("new decoder initialized");
         let key = GenericArray::from_slice(&key_material[..KEY_LENGTH]);
         let cipher = XSalsa20Poly1305::new(key);
         let nonce = NonceBox::new(&key_material[KEY_LENGTH..(KEY_LENGTH + NONCE_PREFIX_LENGTH)]);
@@ -250,7 +250,7 @@ impl EncryptingEncoder {
     /// Creates a new Encoder instance. It must be supplied a slice
     /// containing exactly KeyLength bytes of keying material
     fn new(key_material: [u8; KEY_MATERIAL_LENGTH]) -> Self {
-        trace!("new encoder key_material: {}", hex::encode(key_material));
+        trace!("new encoder initialized");
         let key = GenericArray::from_slice(&key_material[..KEY_LENGTH]);
         let cipher = XSalsa20Poly1305::new(key);
         let nonce = NonceBox::new(&key_material[KEY_LENGTH..(KEY_LENGTH + NONCE_PREFIX_LENGTH)]);
