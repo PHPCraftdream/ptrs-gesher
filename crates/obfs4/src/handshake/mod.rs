@@ -41,11 +41,10 @@ mod utils;
 // TODO: this is a special tool that will help us later.
 pub(crate) use utils::*;
 
-pub(crate) use handshake_client::HandshakeMaterials as CHSMaterials;
 #[cfg(test)]
-pub(crate) use handshake_client::{
-    client_handshake2_no_auth_check_obfs4, client_handshake_obfs4_no_keygen,
-};
+pub(crate) use handshake_client::client_handshake2_no_auth_check_obfs4;
+pub(crate) use handshake_client::client_handshake_obfs4_no_keygen;
+pub(crate) use handshake_client::HandshakeMaterials as CHSMaterials;
 use handshake_client::{client_handshake2_obfs4, client_handshake_obfs4, NtorHandshakeState};
 pub(crate) use handshake_server::HandshakeMaterials as SHSMaterials;
 

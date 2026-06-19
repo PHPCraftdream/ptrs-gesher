@@ -6,12 +6,13 @@ use crate::{
     common::{
         colorize, discard, drbg,
         ntor_arti::{ClientHandshake, RelayHandshakeError, ServerHandshake},
+        x25519_elligator2::EphemeralSecret,
     },
     constants::*,
     framing,
     handshake::{
-        CHSMaterials, Obfs4Keygen, Obfs4NtorHandshake, Obfs4NtorPublicKey, Obfs4NtorSecretKey,
-        SHSMaterials,
+        client_handshake_obfs4_no_keygen, CHSMaterials, Obfs4Keygen, Obfs4NtorHandshake,
+        Obfs4NtorPublicKey, Obfs4NtorSecretKey, SHSMaterials,
     },
     proto::{O4Stream, Obfs4Stream, IAT},
     server::Server,
@@ -189,6 +190,7 @@ impl ClientSession<Initialized> {
         self,
         mut stream: T,
         deadline: Option<Instant>,
+        pre_ephem: Option<EphemeralSecret>,
     ) -> Result<Obfs4Stream<T>>
     where
         T: AsyncRead + AsyncWrite + Unpin,
@@ -200,7 +202,7 @@ impl ClientSession<Initialized> {
 
         // default deadline
         let d_def = Instant::now() + CLIENT_HANDSHAKE_TIMEOUT;
-        let handshake_fut = Self::complete_handshake(&mut stream, materials, deadline);
+        let handshake_fut = Self::complete_handshake(&mut stream, materials, deadline, pre_ephem);
         let (mut remainder, mut keygen) =
             match tokio::time::timeout_at(deadline.unwrap_or(d_def), handshake_fut).await {
                 Ok(result) => match result {
@@ -251,11 +253,20 @@ impl ClientSession<Initialized> {
         mut stream: T,
         materials: CHSMaterials,
         deadline: Option<Instant>,
+        pre_ephem: Option<EphemeralSecret>,
     ) -> Result<(BytesMut, impl Obfs4Keygen)>
     where
         T: AsyncRead + AsyncWrite + Unpin,
     {
-        let (state, chs_message) = Obfs4NtorHandshake::client1(&materials, &())?;
+        // When the caller pre-generated the ephemeral key (see Client::establish
+        // and upstream issue jmwample/ptrs#15), use it directly to skip the
+        // elligator2 re-roll inside client1() — otherwise the keygen retry
+        // loop runs AFTER the stream is dialed, producing an observable gap
+        // between TCP handshake and first byte that censors can fingerprint.
+        let (state, chs_message) = match pre_ephem {
+            Some(ephem) => client_handshake_obfs4_no_keygen(ephem, materials.clone())?,
+            None => Obfs4NtorHandshake::client1(&materials, &())?,
+        };
         // let mut file = tokio::fs::File::create("message.hex").await?;
         // file.write_all(&chs_message).await?;
         stream.write_all(&chs_message).await?;
@@ -751,7 +762,7 @@ mod tests {
             // Use a generous deadline so the test doesn't race the timeout.
             let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
             client_session
-                .handshake(client_stream, Some(deadline))
+                .handshake(client_stream, Some(deadline), None)
                 .await
         };
         let server_fut = async move { server_ref.wrap(server_stream).await };

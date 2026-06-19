@@ -110,6 +110,16 @@ where
             s: o4,
         }
     }
+
+    /// Read the inner stream's IAT delay-pending flag. Test-only — exposed
+    /// so the `iat_*_adds_delay` tests can directly observe whether the
+    /// IAT sleep timer was armed by the last write, instead of guessing
+    /// from wall-clock elapsed time (which is flaky because `WeightedDist`
+    /// is heavily skewed toward small samples).
+    #[cfg(test)]
+    pub(crate) fn iat_delay_is_pending_for_test(&self) -> bool {
+        self.s.iat_delay_pending
+    }
 }
 
 #[pin_project]
@@ -714,7 +724,9 @@ mod tests {
         let server_ref = server.clone();
         let client_fut = async move {
             let deadline = Instant::now() + Duration::from_secs(30);
-            client_session.handshake(client_half, Some(deadline)).await
+            client_session
+                .handshake(client_half, Some(deadline), None)
+                .await
         };
         let server_fut = async move { server_ref.wrap(server_half).await };
 
@@ -756,29 +768,35 @@ mod tests {
         let server_ref = server.clone();
         let client_fut = async move {
             let deadline = Instant::now() + Duration::from_secs(30);
-            client_session.handshake(client_half, Some(deadline)).await
+            client_session
+                .handshake(client_half, Some(deadline), None)
+                .await
         };
         let server_fut = async move { server_ref.wrap(server_half).await };
 
         let (c_stream, _s_stream) = tokio::join!(client_fut, server_fut);
         let mut c_stream = c_stream.expect("client handshake failed");
 
-        // First write is not delayed (no pending timer), but subsequent
-        // writes must wait for the sampled IAT delay.
-        let start = Instant::now();
-        for _ in 0..3 {
+        // The IAT distribution is heavily skewed toward 0 (its `WeightedDist`
+        // weights small values much higher than large ones), so any single
+        // 2-write sample may legitimately observe zero delay. We instead
+        // poll the stream's pending-delay state directly after a few writes:
+        // if IAT is wired in, at least one of those writes must arm the
+        // sleep timer (`iat_delay_pending == true`). A regression that drops
+        // the delay leaves the timer always cleared, and the assertion fires.
+        let mut saw_pending = false;
+        for _ in 0..5 {
             c_stream.write_all(b"test payload data").await.unwrap();
             c_stream.flush().await.unwrap();
+            if c_stream.iat_delay_is_pending_for_test() {
+                saw_pending = true;
+                break;
+            }
         }
-        let elapsed = Instant::now() - start;
 
-        // The IAT distribution samples delays in microseconds (range
-        // [0, MAX_IAT_DELAY=100]), so 3 writes produce at least 2
-        // inter-arrival gaps. Even tiny delays should register under
-        // paused time since tokio auto-advances.
         assert!(
-            elapsed > Duration::ZERO,
-            "IAT::Enabled should introduce inter-arrival delays, but elapsed was zero"
+            saw_pending,
+            "IAT::Enabled should arm the inter-arrival sleep timer at least once"
         );
     }
 
@@ -799,23 +817,32 @@ mod tests {
         let server_ref = server.clone();
         let client_fut = async move {
             let deadline = Instant::now() + Duration::from_secs(30);
-            client_session.handshake(client_half, Some(deadline)).await
+            client_session
+                .handshake(client_half, Some(deadline), None)
+                .await
         };
         let server_fut = async move { server_ref.wrap(server_half).await };
 
         let (c_stream, _s_stream) = tokio::join!(client_fut, server_fut);
         let mut c_stream = c_stream.expect("client handshake failed");
 
-        let start = Instant::now();
-        for _ in 0..3 {
+        // Same approach as `iat_enabled_adds_delay` — directly observe the
+        // pending IAT timer instead of relying on wall-clock elapsed (the
+        // distribution can sample zero often enough to make elapsed-based
+        // assertions flaky).
+        let mut saw_pending = false;
+        for _ in 0..5 {
             c_stream.write_all(b"test payload data here").await.unwrap();
             c_stream.flush().await.unwrap();
+            if c_stream.iat_delay_is_pending_for_test() {
+                saw_pending = true;
+                break;
+            }
         }
-        let elapsed = Instant::now() - start;
 
         assert!(
-            elapsed > Duration::ZERO,
-            "IAT::Paranoid should introduce inter-arrival delays, but elapsed was zero"
+            saw_pending,
+            "IAT::Paranoid should arm the inter-arrival sleep timer at least once"
         );
     }
 
@@ -834,7 +861,9 @@ mod tests {
         let server_ref = server.clone();
         let client_fut = async move {
             let deadline = Instant::now() + Duration::from_secs(30);
-            client_session.handshake(client_half, Some(deadline)).await
+            client_session
+                .handshake(client_half, Some(deadline), None)
+                .await
         };
         let server_fut = async move { server_ref.wrap(server_half).await };
 

@@ -1,7 +1,11 @@
 #![allow(unused)]
 
 use crate::{
-    common::{colorize, HmacSha256},
+    common::{
+        colorize,
+        x25519_elligator2::{EphemeralSecret, Keys},
+        HmacSha256,
+    },
     constants::*,
     framing::{FrameError, Marshall, Obfs4Codec, TryParse, KEY_LENGTH, KEY_MATERIAL_LENGTH},
     handshake::Obfs4NtorPublicKey,
@@ -170,7 +174,10 @@ impl Client {
 
         let deadline = self.handshake_timeout.map(|d| Instant::now() + d);
 
-        session.handshake(stream, deadline).await
+        // The stream is already connected here, so there is no dial→keygen gap
+        // to worry about: let `Session::handshake` generate the ephemeral key
+        // through the normal `client1()` path (see issue #15 / `establish`).
+        session.handshake(stream, deadline, None).await
     }
 
     /// On a failed handshake the client will read for the remainder of the
@@ -183,19 +190,48 @@ impl Client {
     /// state. Wrap in `tokio::spawn` if cancellation is possible.
     pub async fn establish<'a, T, E>(
         self,
-        mut stream_fut: Pin<ptrs::FutureResult<T, E>>,
+        stream_fut: Pin<ptrs::FutureResult<T, E>>,
     ) -> Result<Obfs4Stream<T>>
     where
         T: AsyncRead + AsyncWrite + Unpin + 'a,
         E: std::error::Error + Send + Sync + 'static,
     {
+        self.establish_with_keygen(Keys::ephemeral_from_rng, stream_fut)
+            .await
+    }
+
+    /// Variant of [`Client::establish`] parameterised by the keygen closure.
+    /// Production callers go through `establish`, which fixes the closure to
+    /// `Keys::ephemeral_from_rng(rand::thread_rng())`. The seam exists so the
+    /// order invariant (keygen MUST run before `stream_fut.await`) is testable
+    /// without instrumenting `rand::thread_rng` itself — a test can pass a
+    /// counting closure and a `stream_fut` that records its first poll, then
+    /// assert keygen completed before the dial began.
+    pub(crate) async fn establish_with_keygen<'a, T, E, F>(
+        self,
+        keygen: F,
+        mut stream_fut: Pin<ptrs::FutureResult<T, E>>,
+    ) -> Result<Obfs4Stream<T>>
+    where
+        T: AsyncRead + AsyncWrite + Unpin + 'a,
+        E: std::error::Error + Send + Sync + 'static,
+        F: FnOnce(rand::rngs::ThreadRng) -> Result<EphemeralSecret>,
+    {
+        // Issue #15: generate the elligator2-representable ephemeral key
+        // BEFORE awaiting the TCP dial. The elligator2 retry loop has ~50%
+        // success per iteration, so doing it after the dial inserts a
+        // variable, network-observable gap between TCP handshake and the
+        // first byte that a censor can fingerprint. Pre-generating moves
+        // that variance entirely before the wire is touched.
+        let ephem = keygen(rand::thread_rng())?;
+
         let stream = stream_fut.await.map_err(|e| Error::Other(Box::new(e)))?;
 
         let session = sessions::new_client_session(self.station_pubkey, self.iat_mode);
 
         let deadline = self.handshake_timeout.map(|d| Instant::now() + d);
 
-        session.handshake(stream, deadline).await
+        session.handshake(stream, deadline, Some(ephem)).await
     }
 }
 
@@ -233,5 +269,88 @@ mod test {
         let deadline = Instant::now() + Duration::from_secs(60);
         b.with_handshake_deadline(deadline);
         assert!(matches!(b.handshake_timeout, MaybeTimeout::Fixed(_)));
+    }
+
+    // Issue #15 regression: `Client::establish` MUST generate the ephemeral
+    // key before awaiting the stream future, so the elligator2 retry loop
+    // (~50% miss rate per iteration) cannot insert a network-observable gap
+    // between TCP dial and the first byte on the wire.
+    //
+    // We exercise `establish_with_keygen` with:
+    //   * an instrumented `keygen` closure that bumps `keygen_calls`, and
+    //   * a `stream_fut` whose first poll bumps `dial_first_poll`.
+    //
+    // The order assertion is: at the moment the dial begins, keygen has
+    // already happened (`keygen_calls == 1` strictly before
+    // `dial_first_poll == 1`).
+    //
+    // Negative control: if the implementation regresses to awaiting the
+    // stream BEFORE keygen, then at the moment `dial_first_poll` flips to
+    // 1, `keygen_calls` is still 0 and the inner assertion below fires.
+    #[tokio::test(start_paused = true)]
+    async fn establish_runs_keygen_before_stream_fut() {
+        use std::future::poll_fn;
+        use std::pin::Pin;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+        use std::task::Poll;
+
+        let keygen_calls = Arc::new(AtomicUsize::new(0));
+        let dial_first_poll = Arc::new(AtomicUsize::new(0));
+        let keygen_at_dial = Arc::new(AtomicUsize::new(usize::MAX));
+
+        let keygen_calls_c = Arc::clone(&keygen_calls);
+        let keygen = move |rng: rand::rngs::ThreadRng| -> Result<EphemeralSecret> {
+            keygen_calls_c.fetch_add(1, Ordering::SeqCst);
+            Keys::ephemeral_from_rng(rng)
+        };
+
+        let dial_first_poll_c = Arc::clone(&dial_first_poll);
+        let keygen_at_dial_c = Arc::clone(&keygen_at_dial);
+        let keygen_calls_for_dial = Arc::clone(&keygen_calls);
+        let stream_fut: Pin<
+            Box<dyn std::future::Future<Output = std::io::Result<tokio::io::DuplexStream>> + Send>,
+        > = Box::pin(poll_fn(move |_cx| {
+            // Record on the FIRST poll how many keygen calls had already
+            // completed; that is the exact "dial moment" we care about.
+            if dial_first_poll_c.fetch_add(1, Ordering::SeqCst) == 0 {
+                keygen_at_dial_c.store(
+                    keygen_calls_for_dial.load(Ordering::SeqCst),
+                    Ordering::SeqCst,
+                );
+            }
+            // Resolve immediately to a throwaway duplex half — the handshake
+            // that follows is expected to time out (the other half is dropped),
+            // which is fine: we only assert the keygen↔dial order, not a
+            // successful handshake.
+            let (a, _b) = tokio::io::duplex(64);
+            Poll::Ready(Ok(a))
+        }));
+
+        let client = ClientBuilder::default()
+            .with_node_pubkey([0xAA; KEY_LENGTH])
+            .with_node_id([0xBB; NODE_ID_LENGTH])
+            .with_handshake_timeout(Duration::from_millis(5))
+            .build();
+
+        // The handshake will fail (duplex half is dropped). We only care
+        // about the keygen↔dial ordering recorded above.
+        let _ = client.establish_with_keygen(keygen, stream_fut).await;
+
+        assert_eq!(
+            keygen_calls.load(Ordering::SeqCst),
+            1,
+            "keygen closure must run exactly once"
+        );
+        assert_eq!(
+            dial_first_poll.load(Ordering::SeqCst),
+            1,
+            "stream_fut must be polled exactly once"
+        );
+        assert_eq!(
+            keygen_at_dial.load(Ordering::SeqCst),
+            1,
+            "keygen MUST complete before stream_fut is first polled (issue #15)"
+        );
     }
 }

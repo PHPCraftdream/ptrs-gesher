@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **obfs4**: `Client::establish` now generates the elligator2-representable
+  ephemeral key BEFORE awaiting the stream future (TCP dial), closing
+  upstream issue jmwample/ptrs#15. The elligator2 retry loop succeeds with
+  ~50% probability per iteration, so doing keygen after the dial inserted a
+  variable, network-observable gap between the TCP handshake and the first
+  obfs4 byte that a censor could fingerprint.  The dial-keygen order
+  invariant is locked in by an order-asserting test (§D1a):
+  `establish_runs_keygen_before_stream_fut` instruments a keygen closure
+  and a `stream_fut` that records its first poll, then asserts keygen
+  completed strictly before the dial began — negative control confirmed by
+  inverting the order locally (the test fires
+  `keygen MUST complete before stream_fut is first polled`).
+  `Client::wrap` is unaffected (the stream is already connected by the
+  time it is called).  Internally: `ClientSession::handshake` and
+  `ClientSession::complete_handshake` now accept
+  `Option<EphemeralSecret>`; when `Some`, the pre-generated key is fed
+  through `client_handshake_obfs4_no_keygen` instead of the trait
+  `client1()` path.
+
 ### Added
 
 - **obfs4**: real IAT (Inter-Arrival Time) delay policy and `pad_burst` in
