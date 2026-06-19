@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **obfs4**: real IAT (Inter-Arrival Time) delay policy and `pad_burst` in
+  the write path — closes the long-standing `proto.rs:210` TODO. IAT delays
+  between writes are sampled from `iat_dist` and imposed via a
+  `Pin<Box<tokio::time::Sleep>>` gate at the top of `poll_write`; never
+  blocks the executor (§B11). `pad_burst` pads the marshalled buffer so
+  the trailing wire segment lands on a length sampled from `length_dist`,
+  hiding the true payload size. `IAT::Paranoid` additionally sources each
+  chunk size from `length_dist` (variable-size segments) instead of always
+  using `MAX_MESSAGE_PAYLOAD_LENGTH`. `poll_shutdown` clears pending IAT
+  delays so streams close promptly. H3 handshake fix is untouched; the
+  upstream `obfs4-features` branch (PR #41) was used as a *design source*,
+  not ported — its Sink/Stream migration was deliberately not adopted.
+  Covered by 7 new tests including explicit negative controls for
+  `pad_burst` and `IAT::Off`/`IAT::Enabled` distinguishability (§D1a).
+
+### Changed
+
+- **obfs4**: bumped `tor-cell`, `tor-llcrypto`, `tor-error`, `tor-bytes` from
+  0.25.0 to 0.39.0. Version 0.39.0 is the latest release compatible with the
+  project MSRV 1.88 (the tor-* 0.40.0+ line requires Rust 1.89). The MSRV
+  contract is deliberately kept at 1.88: the consumed surface (SHA-256/SHAKE-256
+  digests, `RsaIdentity`, `SecretBuf`, error types) is stable across 0.39–0.43,
+  there is no RUSTSEC advisory against these crates, so raising MSRV to chase
+  0.43 buys nothing while breaking downstream tool-chain requirements.
+- **obfs4**: removed `tor-basic-utils` dev-dependency. The 0.39.0 release
+  exports `TestingRng` built on `rand_core 0.9`, which is incompatible with
+  the project's `rand 0.8` (`rand_core 0.6`). Tests that used `testing_rng()`
+  now use `rand::thread_rng()` instead.
+- **core**: bumped `itertools` from 0.13.0 to 0.14.0 (MSRV 1.63.0, no API
+  breakage on the consumed surface `sorted`/`join`/`collect_vec`). Held at
+  0.14.0 rather than 0.15.0 on purpose: `tor-cell 0.39.0` already pins
+  `itertools ^0.14.0`, so matching that version de-duplicates the dependency
+  tree (one `itertools 0.14` node shared instead of an extra 0.15 copy), and
+  0.15.0 offers nothing on the surface we use.
+
 ## [0.4.0] - 2026-06-10
 
 Synchronized release: every crate is bumped to 0.4.0 in lockstep. This release

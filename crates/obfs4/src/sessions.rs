@@ -63,6 +63,13 @@ impl Session {
             Session::Server(ss) => ss.len_seed.clone(),
         }
     }
+
+    pub fn iat_mode(&self) -> IAT {
+        match self {
+            Session::Client(cs) => cs.iat_mode,
+            Session::Server(ss) => ss.iat_mode,
+        }
+    }
 }
 
 // ================================================================ //
@@ -329,6 +336,7 @@ pub(crate) struct ServerSession<S: ServerSessionState> {
     // fixed by server
     pub(crate) identity_keys: Obfs4NtorSecretKey,
     pub(crate) biased: bool,
+    pub(crate) iat_mode: IAT,
     // pub(crate) server: &'a Server,
 
     // generated per session
@@ -374,6 +382,7 @@ impl<S: ServerSessionState> ServerSession<S> {
             // fixed by server
             identity_keys: self.identity_keys,
             biased: self.biased,
+            iat_mode: self.iat_mode,
 
             // generated per session
             session_id: self.session_id,
@@ -390,6 +399,7 @@ impl<S: ServerSessionState> ServerSession<S> {
             // fixed by server
             identity_keys: self.identity_keys,
             biased: self.biased,
+            iat_mode: self.iat_mode,
 
             // generated per session
             session_id: self.session_id,

@@ -22,7 +22,6 @@ use crate::{
 };
 
 use hex_literal::hex;
-use tor_basic_utils::test_rng::testing_rng;
 
 fn make_fake_ephem_key(bytes: &[u8]) -> EphemeralSecret {
     assert_eq!(bytes.len(), 32);
@@ -70,8 +69,8 @@ fn test_obfs4_roundtrip() -> Result<()> {
 // Same as previous test, but use the higher-level APIs instead.
 #[test]
 fn test_obfs4_roundtrip_highlevel() -> Result<()> {
-    let rng = testing_rng();
-    let relay_secret = StaticSecret::random_from_rng(rng);
+    let mut rng = rand::thread_rng();
+    let relay_secret = StaticSecret::random_from_rng(&mut rng);
     let relay_public = PublicKey::from(&relay_secret);
     let relay_identity = RsaIdentity::from_bytes(&[12; 20]).unwrap();
     let relay_ntpk = Obfs4NtorPublicKey {
@@ -202,7 +201,7 @@ fn test_ntor_v1_testvec() -> Result<()> {
 
 #[test]
 fn failing_handshakes() {
-    let mut rng = testing_rng();
+    let mut rng = rand::thread_rng();
 
     // Set up keys.
     let relay_secret = StaticSecret::random_from_rng(&mut rng);

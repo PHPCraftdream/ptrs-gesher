@@ -379,6 +379,7 @@ impl Server {
             // fixed by server
             identity_keys: self.0.identity_keys.clone(),
             biased: self.0.biased,
+            iat_mode: self.0.iat_mode,
 
             // generated per session
             session_id,
