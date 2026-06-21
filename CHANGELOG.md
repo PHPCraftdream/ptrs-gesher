@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **obfs4**: `pad_burst` no longer emits over-sized padding frames that the
+  codec rejects. The previous implementation followed a flawed sketch from
+  upstream's commented-out draft: a single padding frame whose zero-fill
+  was `pad_len - MESSAGE_OVERHEAD`. When `pad_len` was close to
+  `MAX_SEGMENT_LENGTH` (≈1430–1447 bytes) the resulting `pad_bytes`
+  exceeded `MAX_MESSAGE_PAYLOAD_LENGTH - 1`, and `build_and_marshall`
+  returned `Invalid payload length`. The new implementation is a loop
+  that splits the requested padding into one or more frames of at most
+  `MAX_MESSAGE_PAYLOAD_LENGTH - 1` padding bytes, with a guard that
+  refuses to leave a 1- or 2-byte tail the next frame could not express
+  (the minimum frame contribution is `MESSAGE_OVERHEAD = 3` bytes); when
+  the requested `pad_len` itself falls below `MESSAGE_OVERHEAD` it is
+  rolled into the next segment so the final tail still matches the
+  caller's target. The doc comment is rewritten to reflect this. The
+  bug only surfaced with `iat-mode ∈ {1, 2}` (default is `0/Off`) and
+  was missed by the original Etap-2 tests, which sampled only three
+  target lengths. New tests close that gap: `pad_burst_hits_target_for_all_lengths`
+  enumerates every `target ∈ 0..MAX_SEGMENT_LENGTH` × a representative
+  cross-section of starting tails (§F: enumerate, don't sample);
+  `pad_burst_padding_frames_round_trip_through_decoder` parses the
+  emitted padding frames back through `Messages::try_parse` (§F4: inverse
+  round-trip). Negative control verified locally — reverting to the old
+  single-frame path makes the exhaustive test fail at `target=1`.
+
 - **obfs4**: `Client::establish` now generates the elligator2-representable
   ephemeral key BEFORE awaiting the stream future (TCP dial), closing
   upstream issue jmwample/ptrs#15. The elligator2 retry loop succeeds with
