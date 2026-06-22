@@ -170,8 +170,21 @@ where
         inner: T,
         codec: framing::Obfs4Codec,
         session: Session,
+        // Bytes already read off the wire during the handshake that belong to
+        // the data stream (e.g. the client over-read past the server hello when
+        // the peer coalesced its handshake reply with the first data frames
+        // into one TCP segment). These MUST seed the `Framed` read buffer or
+        // they are lost and the codec desynchronises on the next frame length.
+        handshake_residual: BytesMut,
     ) -> O4Stream<T> {
-        let stream = Framed::new(inner, codec);
+        let mut stream = Framed::new(inner, codec);
+        if !handshake_residual.is_empty() {
+            // Prepend the handshake over-read into the decode buffer so the
+            // first `poll_next` sees the data frames that arrived alongside the
+            // server hello, instead of starting from an empty buffer and
+            // desynchronising the frame decoder.
+            stream.read_buffer_mut().extend_from_slice(&handshake_residual);
+        }
         let len_seed = session.len_seed();
         let iat_mode = session.iat_mode();
 

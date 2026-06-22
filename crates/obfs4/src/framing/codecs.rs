@@ -637,6 +637,50 @@ mod testing {
         }
     }
 
+    /// Bisect for the real-TCP cold-consensus desync: encode many frames into
+    /// one contiguous buffer (as the encoder would emit them back-to-back),
+    /// then decode them while feeding the decoder ONE byte at a time — exactly
+    /// the pathological fragmentation a real TCP socket produces and that the
+    /// in-memory `duplex` tests never exercise. Every frame must decode in
+    /// order with no length desync.
+    #[test]
+    fn codec_decode_byte_at_a_time_no_desync() -> Result<()> {
+        let km = [0x5Au8; KEY_MATERIAL_LENGTH];
+        let mut enc = EncryptingCodec::new(km, km);
+        let mut dec = EncryptingCodec::new(km, km);
+
+        // Encode 200 distinct payload frames back-to-back into one buffer.
+        const N: usize = 200;
+        let mut wire = BytesMut::new();
+        let mut expected = Vec::new();
+        for i in 0..N {
+            let payload = vec![(i % 251) as u8; 137];
+            let msg = Messages::Payload(payload.clone());
+            let mut marshalled = BytesMut::new();
+            msg.marshall(&mut marshalled).unwrap();
+            enc.encode(marshalled, &mut wire)?;
+            expected.push(payload);
+        }
+
+        // Feed the decoder one byte at a time.
+        let mut feed = BytesMut::new();
+        let mut got: Vec<Vec<u8>> = Vec::new();
+        for b in wire.iter().copied() {
+            feed.put_u8(b);
+            loop {
+                match dec.decode(&mut feed)? {
+                    Some(Messages::Payload(data)) => got.push(data),
+                    Some(_) => {}
+                    None => break,
+                }
+            }
+        }
+
+        assert_eq!(got.len(), N, "decoded {} frames, expected {N}", got.len());
+        assert_eq!(got, expected, "payload mismatch under 1-byte fragmentation");
+        Ok(())
+    }
+
     mod proptest_codec {
         use super::*;
         use proptest::prelude::*;

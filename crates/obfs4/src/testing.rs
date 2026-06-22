@@ -286,6 +286,131 @@ async fn transfer_512k_x1() -> Result<()> {
     Ok(())
 }
 
+// Repro for the tor-socks5 cold-consensus stall: a ~3 MiB one-directional
+// transfer over a REAL TCP loopback socket (not an in-memory `duplex`, which
+// has no real backpressure / partial-frame boundaries). The server sends, the
+// client drains with a small buffer and a 5 s idle-stall detector — mirroring
+// arti pulling the directory consensus down through the obfs4 PT.
+#[allow(non_snake_case)]
+#[tokio::test]
+async fn transfer_3M_real_tcp() -> Result<()> {
+    init_subscriber();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let mut rng = rand::thread_rng();
+
+    let o4_server = Server::new_from_random(&mut rng);
+    let client_config = o4_server.client_params();
+
+    const TOTAL: usize = 3 * 1024 * 1024;
+
+    // Server: accept, obfs4-wrap, send TOTAL bytes in 4 KiB writes.
+    tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let mut o4s = o4_server.wrap(&mut s).await.unwrap();
+        let chunk = [7_u8; 4096];
+        let mut sent = 0usize;
+        while sent < TOTAL {
+            let n = std::cmp::min(chunk.len(), TOTAL - sent);
+            o4s.write_all(&chunk[..n])
+                .await
+                .unwrap_or_else(|e| panic!("server write failed at {sent}: {e}"));
+            sent += n;
+        }
+        o4s.flush().await.unwrap();
+        debug!("server: sent all {sent} bytes");
+        // Hold the connection open until the client has drained everything.
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+
+    let c = tokio::net::TcpStream::connect(addr).await?;
+    let o4_client = client_config.build();
+    let mut o4c = o4_client.wrap(c).await?;
+
+    let mut buf = vec![0_u8; 16 * 1024];
+    let mut received = 0usize;
+    loop {
+        let res = tokio::time::timeout(Duration::from_secs(5), o4c.read(&mut buf)).await;
+        match res {
+            Err(_) => panic!("STALL: client idle 5s after {received}/{TOTAL} bytes"),
+            Ok(r) => {
+                let n = r?;
+                if n == 0 {
+                    break;
+                }
+                received += n;
+                if received >= TOTAL {
+                    break;
+                }
+            }
+        }
+    }
+    assert_eq!(received, TOTAL, "received {received} != {TOTAL}");
+    Ok(())
+}
+
+// Same as `transfer_3M_real_tcp` but the server writes in 1024-byte pieces,
+// each SMALLER than the per-frame `chunk_size` (~1427B). That keeps poll_write
+// out of its multi-chunk `while` loop (and its backpressure early-return),
+// exercising only the single trailing-frame path. If this PASSES while the
+// 4096-byte variant FAILS, the desync lives in the while-loop backpressure path.
+#[allow(non_snake_case)]
+#[tokio::test]
+async fn transfer_3M_real_tcp_small_writes() -> Result<()> {
+    init_subscriber();
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+    let addr = listener.local_addr()?;
+    let mut rng = rand::thread_rng();
+
+    let o4_server = Server::new_from_random(&mut rng);
+    let client_config = o4_server.client_params();
+
+    const TOTAL: usize = 3 * 1024 * 1024;
+
+    tokio::spawn(async move {
+        let (mut s, _) = listener.accept().await.unwrap();
+        let mut o4s = o4_server.wrap(&mut s).await.unwrap();
+        let chunk = [7_u8; 1024];
+        let mut sent = 0usize;
+        while sent < TOTAL {
+            let n = std::cmp::min(chunk.len(), TOTAL - sent);
+            o4s.write_all(&chunk[..n])
+                .await
+                .unwrap_or_else(|e| panic!("server write failed at {sent}: {e}"));
+            sent += n;
+        }
+        o4s.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_secs(30)).await;
+    });
+
+    let c = tokio::net::TcpStream::connect(addr).await?;
+    let o4_client = client_config.build();
+    let mut o4c = o4_client.wrap(c).await?;
+
+    let mut buf = vec![0_u8; 16 * 1024];
+    let mut received = 0usize;
+    loop {
+        let res = tokio::time::timeout(Duration::from_secs(5), o4c.read(&mut buf)).await;
+        match res {
+            Err(_) => panic!("STALL: client idle 5s after {received}/{TOTAL} bytes"),
+            Ok(r) => {
+                let n = r?;
+                if n == 0 {
+                    break;
+                }
+                received += n;
+                if received >= TOTAL {
+                    break;
+                }
+            }
+        }
+    }
+    assert_eq!(received, TOTAL, "received {received} != {TOTAL}");
+    Ok(())
+}
+
 #[tokio::test]
 async fn transfer_2_x() -> Result<()> {
     init_subscriber();

@@ -244,7 +244,14 @@ impl ClientSession<Initialized> {
         info!("{} handshake complete", session_state.session_id());
 
         codec.handshake_complete();
-        let o4 = O4Stream::new(stream, codec, Session::Client(session_state));
+        // `remainder` still holds any bytes that were coalesced after the
+        // server hello / PrngSeed into the same TCP segment — i.e. the first
+        // data frame(s). Seed them into the codec's read buffer; dropping them
+        // (as `Framed::new` with an empty buffer did) desynchronises the frame
+        // decoder and corrupts the stream on the very first data read over a
+        // real TCP socket (in-memory `duplex` hid this by preserving write
+        // boundaries).
+        let o4 = O4Stream::new(stream, codec, Session::Client(session_state), remainder);
 
         Ok(Obfs4Stream::from_o4(o4))
     }
@@ -482,7 +489,10 @@ impl ServerSession<Initialized> {
         let session_state: ServerSession<Established> = session.transition(Established {});
 
         codec.handshake_complete();
-        let o4 = O4Stream::new(stream, codec, Session::Server(session_state));
+        // The obfs4 client cannot send data frames until it has received the
+        // server hello (it needs the derived keys to encrypt), so the server
+        // never over-reads client data during its handshake: no residual.
+        let o4 = O4Stream::new(stream, codec, Session::Server(session_state), BytesMut::new());
 
         Ok(Obfs4Stream::from_o4(o4))
     }
