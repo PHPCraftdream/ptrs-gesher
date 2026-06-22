@@ -235,6 +235,27 @@ impl Decoder for EncryptingCodec {
             Err(e) => Err(e),
         }
     }
+
+    /// Handle end-of-stream. `tokio_util`'s default `decode_eof` returns a hard
+    /// `"bytes remaining on stream"` IO error whenever the peer closes the
+    /// connection while any bytes that do not form a complete frame are still
+    /// buffered. For obfs4 that is the normal way a connection ends: the peer
+    /// (or an intermediary, e.g. a relay tearing the TLS-over-obfs4 channel
+    /// down) closes the TCP socket and a partial trailing frame — or leftover
+    /// inter-frame padding — is left behind. A truncated final frame carries no
+    /// recoverable message, so the correct action is to drain any *complete*
+    /// frames still buffered and then signal a clean end of stream, instead of
+    /// surfacing an error that arti reports as an unexpected-EOF and uses to
+    /// tear the whole channel (and its circuits) down mid-bootstrap.
+    fn decode_eof(
+        &mut self,
+        src: &mut BytesMut,
+    ) -> std::result::Result<Option<Self::Item>, Self::Error> {
+        // Deliver any remaining whole frame; once `decode` can no longer parse
+        // a complete frame, treat the leftover (if any) as a truncated tail and
+        // report clean EOF rather than erroring on it.
+        self.decode(src)
+    }
 }
 
 /// Encoder is a frame encoder instance.
@@ -678,6 +699,145 @@ mod testing {
 
         assert_eq!(got.len(), N, "decoded {} frames, expected {N}", got.len());
         assert_eq!(got, expected, "payload mismatch under 1-byte fragmentation");
+        Ok(())
+    }
+
+    /// decode_eof must NOT raise the default "bytes remaining on stream" error
+    /// when the connection closes with a partial trailing frame: it should
+    /// deliver any complete frame still buffered and then report clean EOF
+    /// (Ok(None)). Erroring here is what tore arti's channel down at the end of
+    /// a directory download.
+    #[test]
+    fn codec_decode_eof_graceful_on_partial_tail() -> Result<()> {
+        let km = [0x6Eu8; KEY_MATERIAL_LENGTH];
+        let mut enc = EncryptingCodec::new(km, km);
+        let mut dec = EncryptingCodec::new(km, km);
+
+        let msg = Messages::Payload(b"a complete final frame".to_vec());
+        let mut marshalled = BytesMut::new();
+        msg.marshall(&mut marshalled).unwrap();
+        let mut buf = BytesMut::new();
+        enc.encode(marshalled, &mut buf)?;
+
+        // Append a truncated next frame (just a partial length header) as if the
+        // peer closed mid-frame.
+        buf.extend_from_slice(&[0xAB]);
+
+        // First decode_eof call delivers the complete frame.
+        match dec.decode_eof(&mut buf)? {
+            Some(Messages::Payload(data)) => assert_eq!(&data[..], b"a complete final frame"),
+            other => panic!("expected the complete final frame, got {other:?}"),
+        }
+        // Second call sees only the 1-byte partial tail: must report clean EOF,
+        // NOT a "bytes remaining on stream" error.
+        match dec.decode_eof(&mut buf)? {
+            None => {}
+            Some(m) => panic!("partial tail must not decode to a message: {m:?}"),
+        }
+        Ok(())
+    }
+
+    /// `decode_eof` on an empty buffer (peer closed at a clean frame
+    /// boundary) is the trivial happy case: nothing buffered, nothing
+    /// truncated, must report clean EOF.
+    #[test]
+    fn codec_decode_eof_graceful_on_empty_buf() -> Result<()> {
+        let km = [0x11u8; KEY_MATERIAL_LENGTH];
+        let mut dec = EncryptingCodec::new(km, km);
+
+        let mut buf = BytesMut::new();
+        match dec.decode_eof(&mut buf)? {
+            None => Ok(()),
+            Some(m) => panic!("empty buffer must not decode to a message: {m:?}"),
+        }
+    }
+
+    /// `decode_eof` on a buffer that holds *only* a truncated obfs4
+    /// frame (length field present but body short) must report clean
+    /// EOF — `decode` reaches the "next_len > src.len" branch
+    /// (codecs.rs:174) and returns `Ok(None)`, which `decode_eof`
+    /// passes through. This models a peer closing the TCP socket
+    /// mid-frame: a real obfs4 stream has no inter-frame gaps (padding
+    /// itself is a frame), so the only realistic tail is a partial
+    /// last frame.
+    #[test]
+    fn codec_decode_eof_graceful_on_partial_only() -> Result<()> {
+        let km = [0x22u8; KEY_MATERIAL_LENGTH];
+        let mut enc = EncryptingCodec::new(km, km);
+        let mut dec = EncryptingCodec::new(km, km);
+
+        // Encode one real frame, then truncate the tail of its body —
+        // length field on the wire still claims the full size, but
+        // some payload bytes are missing.
+        let msg = Messages::Payload(b"would-have-been-the-last-frame".to_vec());
+        let mut marshalled = BytesMut::new();
+        msg.marshall(&mut marshalled).unwrap();
+        let mut buf = BytesMut::new();
+        enc.encode(marshalled, &mut buf)?;
+        // Drop the trailing 4 bytes of the encoded frame — peer closed
+        // mid-write.
+        buf.truncate(buf.len() - 4);
+
+        match dec.decode_eof(&mut buf)? {
+            None => Ok(()),
+            Some(m) => panic!("truncated-only buffer must not decode: {m:?}"),
+        }
+    }
+
+    /// `decode_eof` on a buffer with several complete frames followed
+    /// by a truncated last frame must drain every complete frame in
+    /// order, then report clean EOF once the only thing left is the
+    /// partial tail. Same shape as `_on_partial_tail`, but with N>1 —
+    /// guards against a regression where the codec stops at the first
+    /// frame or decodes them out of order under EOF semantics.
+    ///
+    /// The tail is a *real* truncated obfs4 frame (length field
+    /// present, body short), not random bytes — that is the only kind
+    /// of tail a real obfs4 stream can produce.
+    #[test]
+    fn codec_decode_eof_drains_all_complete_frames_then_clean_eof() -> Result<()> {
+        let km = [0x33u8; KEY_MATERIAL_LENGTH];
+        let mut enc = EncryptingCodec::new(km, km);
+        let mut dec = EncryptingCodec::new(km, km);
+
+        const N: usize = 5;
+        let mut buf = BytesMut::new();
+        let mut expected: Vec<Vec<u8>> = Vec::with_capacity(N);
+        for i in 0..N {
+            let payload = format!("frame-{i}").into_bytes();
+            let msg = Messages::Payload(payload.clone());
+            let mut marshalled = BytesMut::new();
+            msg.marshall(&mut marshalled).unwrap();
+            enc.encode(marshalled, &mut buf)?;
+            expected.push(payload);
+        }
+        // Append a (would-be) sixth frame and chop its body short.
+        let trailing = Messages::Payload(b"truncated-tail".to_vec());
+        let mut marshalled = BytesMut::new();
+        trailing.marshall(&mut marshalled).unwrap();
+        let before_tail = buf.len();
+        enc.encode(marshalled, &mut buf)?;
+        // Trim the last few body bytes of the trailing frame — the
+        // length field on the wire still claims the full size.
+        let trimmed = buf.len() - 3;
+        assert!(
+            trimmed > before_tail,
+            "trim must keep at least the length field of the trailing frame",
+        );
+        buf.truncate(trimmed);
+
+        let mut got: Vec<Vec<u8>> = Vec::with_capacity(N);
+        loop {
+            match dec.decode_eof(&mut buf)? {
+                Some(Messages::Payload(data)) => got.push(data),
+                Some(other) => panic!("unexpected variant: {other:?}"),
+                None => break,
+            }
+        }
+        assert_eq!(
+            got, expected,
+            "all complete frames must be delivered in order"
+        );
         Ok(())
     }
 
