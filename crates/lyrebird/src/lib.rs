@@ -206,6 +206,29 @@ pub fn resolve_target_addr(addr: &TargetAddr) -> Result<SocketAddr> {
     }
 }
 
+/// Dial a bridge's OR-port and apply socket options that keep the obfs4
+/// carrier connection healthy:
+///   * `TCP_NODELAY` — obfs4 frames are small and latency-sensitive; Nagle
+///     coalescing only hurts.
+///   * TCP keepalive — an obfs4 carrier can sit briefly idle (e.g. while a
+///     one-hop directory circuit for a bridge descriptor is being built).
+///     Without keepalive such an idle carrier is liable to be silently reaped
+///     by the OS, a NAT, or a local LSP/proxy shim, surfacing as os error
+///     10053 ("connection aborted by the software in your host machine") and
+///     tearing the bridge channel down mid-bootstrap. C-tor keeps its single
+///     bridge connection alive at the Tor layer; we make the carrier itself
+///     resilient instead.
+async fn dial_bridge(remote_addr: SocketAddr) -> std::io::Result<TcpStream> {
+    let stream = TcpStream::connect(remote_addr).await?;
+    // Best-effort: failure to set an option must not abort the dial.
+    let _ = stream.set_nodelay(true);
+    let keepalive = socket2::TcpKeepalive::new()
+        .with_time(std::time::Duration::from_secs(15))
+        .with_interval(std::time::Duration::from_secs(15));
+    let _ = socket2::SockRef::from(&stream).set_tcp_keepalive(&keepalive);
+    Ok(stream)
+}
+
 /// Run the lyrebird pluggable transport. Expects the standard
 /// `TOR_PT_*` environment variables set by the parent process (arti /
 /// tor) and speaks the PT-managed-transport protocol on stdin/stdout.
@@ -520,7 +543,7 @@ where
     // future yielding the underlying socket, so an in-memory
     // `tokio::io::duplex()` half can stand in for the real `TcpStream`.
     let remote: Pin<ptrs::FutureResult<TcpStream, std::io::Error>> =
-        Box::pin(tokio::net::TcpStream::connect(remote_addr));
+        Box::pin(dial_bridge(remote_addr));
 
     // build the pluggable transport client and then dial, completing the
     // connection and handshake when the future is await-ed.
@@ -670,7 +693,7 @@ where
 
     let remote_addr = resolve_target_addr(target_addr).context("no remote address")?;
 
-    let remote = tokio::net::TcpStream::connect(remote_addr);
+    let remote = dial_bridge(remote_addr);
 
     // build the pluggable transport client and then dial, completing the
     // connection and handshake when the `wrap(..)` is await-ed.
@@ -963,6 +986,47 @@ mod tests {
         let auth = PtArgsAuth;
         let got = auth.authenticate(None).await;
         assert_eq!(got, Some((String::new(), String::new())));
+    }
+
+    // -- dial_bridge socket options ----------------------------------------
+    //
+    // The carrier-resilience options (TCP_NODELAY + TCP keepalive) are silent
+    // safeguards: if the `set_*` lines disappear, nothing breaks at build or
+    // unit-test time, but the bridge channel becomes susceptible to the same
+    // mid-bootstrap 10053/10054 tear-downs that motivated `dial_bridge` in
+    // the first place. These compliance tests catch a regression that drops
+    // either option.
+
+    #[tokio::test]
+    async fn dial_bridge_sets_tcp_nodelay() {
+        // Loopback listener so the dial completes synchronously.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _accept = tokio::spawn(async move { listener.accept().await });
+
+        let stream = dial_bridge(addr).await.expect("dial_bridge");
+        assert!(
+            stream.nodelay().expect("nodelay() readback"),
+            "dial_bridge must enable TCP_NODELAY on the carrier socket"
+        );
+    }
+
+    #[tokio::test]
+    async fn dial_bridge_arms_tcp_keepalive() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let _accept = tokio::spawn(async move { listener.accept().await });
+
+        let stream = dial_bridge(addr).await.expect("dial_bridge");
+        // `keepalive()` returns whether SO_KEEPALIVE is on. Setting the
+        // per-keepalive intervals via `socket2::TcpKeepalive` also flips
+        // the SO_KEEPALIVE flag, so its presence is the read-back signal
+        // that `set_tcp_keepalive(&keepalive)` was actually called.
+        let sock = socket2::SockRef::from(&stream);
+        assert!(
+            sock.keepalive().expect("SO_KEEPALIVE readback"),
+            "dial_bridge must arm TCP keepalive on the carrier socket"
+        );
     }
 
     // -- resolve_target_addr --

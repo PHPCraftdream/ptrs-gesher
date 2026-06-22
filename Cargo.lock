@@ -2464,6 +2464,7 @@ dependencies = [
  "ptrs-gesher-obfs4",
  "ptrs-gesher-webtunnel",
  "safelog 0.4.8",
+ "socket2",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
