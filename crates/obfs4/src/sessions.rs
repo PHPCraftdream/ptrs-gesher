@@ -492,7 +492,12 @@ impl ServerSession<Initialized> {
         // The obfs4 client cannot send data frames until it has received the
         // server hello (it needs the derived keys to encrypt), so the server
         // never over-reads client data during its handshake: no residual.
-        let o4 = O4Stream::new(stream, codec, Session::Server(session_state), BytesMut::new());
+        let o4 = O4Stream::new(
+            stream,
+            codec,
+            Session::Server(session_state),
+            BytesMut::new(),
+        );
 
         Ok(Obfs4Stream::from_o4(o4))
     }

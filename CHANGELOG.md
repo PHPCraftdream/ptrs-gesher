@@ -7,87 +7,134 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
+## [0.5.0] - 2026-06-23
 
-- **obfs4**: `pad_burst` no longer emits over-sized padding frames that the
-  codec rejects. The previous implementation followed a flawed sketch from
-  upstream's commented-out draft: a single padding frame whose zero-fill
-  was `pad_len - MESSAGE_OVERHEAD`. When `pad_len` was close to
-  `MAX_SEGMENT_LENGTH` (≈1430–1447 bytes) the resulting `pad_bytes`
-  exceeded `MAX_MESSAGE_PAYLOAD_LENGTH - 1`, and `build_and_marshall`
-  returned `Invalid payload length`. The new implementation is a loop
-  that splits the requested padding into one or more frames of at most
-  `MAX_MESSAGE_PAYLOAD_LENGTH - 1` padding bytes, with a guard that
-  refuses to leave a 1- or 2-byte tail the next frame could not express
-  (the minimum frame contribution is `MESSAGE_OVERHEAD = 3` bytes); when
-  the requested `pad_len` itself falls below `MESSAGE_OVERHEAD` it is
-  rolled into the next segment so the final tail still matches the
-  caller's target. The doc comment is rewritten to reflect this. The
-  bug only surfaced with `iat-mode ∈ {1, 2}` (default is `0/Off`) and
-  was missed by the original Etap-2 tests, which sampled only three
-  target lengths. New tests close that gap: `pad_burst_hits_target_for_all_lengths`
-  enumerates every `target ∈ 0..MAX_SEGMENT_LENGTH` × a representative
-  cross-section of starting tails (§F: enumerate, don't sample);
-  `pad_burst_padding_frames_round_trip_through_decoder` parses the
-  emitted padding frames back through `Messages::try_parse` (§F4: inverse
-  round-trip). Negative control verified locally — reverting to the old
-  single-frame path makes the exhaustive test fail at `target=1`.
-
-- **obfs4**: `Client::establish` now generates the elligator2-representable
-  ephemeral key BEFORE awaiting the stream future (TCP dial), closing
-  upstream issue jmwample/ptrs#15. The elligator2 retry loop succeeds with
-  ~50% probability per iteration, so doing keygen after the dial inserted a
-  variable, network-observable gap between the TCP handshake and the first
-  obfs4 byte that a censor could fingerprint.  The dial-keygen order
-  invariant is locked in by an order-asserting test (§D1a):
-  `establish_runs_keygen_before_stream_fut` instruments a keygen closure
-  and a `stream_fut` that records its first poll, then asserts keygen
-  completed strictly before the dial began — negative control confirmed by
-  inverting the order locally (the test fires
-  `keygen MUST complete before stream_fut is first polled`).
-  `Client::wrap` is unaffected (the stream is already connected by the
-  time it is called).  Internally: `ClientSession::handshake` and
-  `ClientSession::complete_handshake` now accept
-  `Option<EphemeralSecret>`; when `Some`, the pre-generated key is fed
-  through `client_handshake_obfs4_no_keygen` instead of the trait
-  `client1()` path.
+Synchronized release: every crate is bumped to 0.5.0 in lockstep. The
+public API of every crate is unchanged from 0.4.0 except for the
+additive `doh_mode` field on `WebTunnelConfig` and the new
+`webtunnel::DohMode` re-export, so this remains an additive minor under
+the project's 0.x semver discipline. Themes: obfs4 traffic-signature
+hardening + carrier stability fixes uncovered on real TCP, webtunnel
+gaining a DNS-over-HTTPS resolver for its bridge-URL hostname, and a
+refresh of the arti dependency cluster to the current head.
 
 ### Added
 
-- **obfs4**: real IAT (Inter-Arrival Time) delay policy and `pad_burst` in
-  the write path — closes the long-standing `proto.rs:210` TODO. IAT delays
-  between writes are sampled from `iat_dist` and imposed via a
-  `Pin<Box<tokio::time::Sleep>>` gate at the top of `poll_write`; never
-  blocks the executor (§B11). `pad_burst` pads the marshalled buffer so
-  the trailing wire segment lands on a length sampled from `length_dist`,
-  hiding the true payload size. `IAT::Paranoid` additionally sources each
-  chunk size from `length_dist` (variable-size segments) instead of always
-  using `MAX_MESSAGE_PAYLOAD_LENGTH`. `poll_shutdown` clears pending IAT
-  delays so streams close promptly. H3 handshake fix is untouched; the
-  upstream `obfs4-features` branch (PR #41) was used as a *design source*,
-  not ported — its Sink/Stream migration was deliberately not adopted.
-  Covered by 7 new tests including explicit negative controls for
-  `pad_burst` and `IAT::Off`/`IAT::Enabled` distinguishability (§D1a).
+- **webtunnel**: DNS-over-HTTPS resolver for the bridge URL hostname.
+  Webtunnel is the only ptrs-gesher transport that resolves a domain at
+  dial time, so it is the only one with a real DNS-censorship surface.
+  Curated pool of ten public providers (Cloudflare, Quad9, Google,
+  AdGuard, Mullvad, NextDNS, DNS.SB, ControlD, CleanBrowsing, OpenDNS)
+  with pinned v4 + v6 bootstrap IPs — the resolver never depends on
+  system DNS to find the DoH server itself. Three modes via the new
+  `doh-mode=` bridge-line argument: `off` / `strict` / `fallback`
+  (default Fallback). When `addr=` is set, DoH is bypassed. SNI and TLS
+  certificate validation continue to run against the URL hostname, not
+  the resolved IP. Backed by hickory-resolver 0.26.1 with `https-ring`
+  (matches the existing rustls 0.23 + ring stack; no aws-lc-rs is
+  pulled in). `use_hosts_file = Never` so Strict cannot be bypassed
+  via `/etc/hosts`. Tested with explicit negative controls (§D1a) at
+  the resolver layer and the connect layer.
+
+- **obfs4**: real IAT (Inter-Arrival Time) delay policy and `pad_burst`
+  in the write path — closes the long-standing `proto.rs:210` TODO.
+  IAT delays sampled from `iat_dist` are imposed via a
+  `Pin<Box<tokio::time::Sleep>>` gate at the top of `poll_write`;
+  never blocks the executor (§B11). `pad_burst` pads the marshalled
+  buffer so the trailing wire segment lands on a length sampled from
+  `length_dist`. `IAT::Paranoid` additionally sources each chunk size
+  from `length_dist`. `poll_shutdown` clears pending IAT delays so
+  streams close promptly. H3 handshake fix is untouched.
+
+### Fixed
+
+- **obfs4**: handshake over-read into the data decode buffer. Over a
+  real TCP socket the server's hello and the first data frame(s)
+  coalesce into one segment, so the handshake read returned extra
+  bytes belonging to the data stream. Those bytes had `PrngSeed`
+  decoded out of them and the rest was dropped, leaving the data
+  decoder one frame short of where the stream actually was — the
+  decoder then read a garbage length field and aborted with
+  `"invalid frame length out of range"`, tearing the tunnel down
+  mid-transfer (seen downstream as os error 10054/10053). In-memory
+  `duplex` tests hid this because they preserve write boundaries.
+  `O4Stream::new` now takes the post-handshake residual and seeds it
+  into the `Framed` read buffer via `read_buffer_mut()`; the client
+  passes `remainder`, the server passes empty. Tested with a 3 MiB
+  real-TCP loopback transfer plus a 1-byte-at-a-time codec bisect.
+
+- **obfs4**: graceful `decode_eof` instead of `"bytes remaining on
+  stream"`. tokio_util's default `decode_eof` raises a hard IO error
+  whenever the peer closes the connection with bytes still buffered
+  that do not form a complete frame. For obfs4 that is a normal
+  end-of-stream — the peer closes the TCP socket leaving a truncated
+  trailing frame or inter-frame padding behind. The codec now drains
+  any complete frame still buffered and reports a clean EOF
+  (`Ok(None)`) rather than an error arti surfaces as unexpected-EOF
+  and uses to tear the channel (and its circuits) down mid-bootstrap.
+  Four tests cover the common shapes: clean boundary, partial-only,
+  complete + partial tail, and N>1 complete + partial tail.
+
+- **lyrebird**: TCP keepalive + `TCP_NODELAY` on the bridge dial. The
+  outgoing obfs4 carrier was a bare `TcpStream::connect` with no
+  socket options. An idle carrier (e.g. while a one-hop directory
+  circuit for a bridge descriptor is being built) was reaped — seen
+  as os error 10053 ("connection aborted by the software in your
+  host machine") and tore the bridge channel down mid-bootstrap.
+  Adds TCP keepalive (15s) and `TCP_NODELAY` via socket2 (already
+  in-tree through tokio). Effect in testing: connection resets during
+  bootstrap dropped sharply (10054 7→1, 10053 5→1 over a comparable
+  window). Two compliance tests guard the silent regression where a
+  `set_*` line disappears.
+
+- **obfs4**: `Client::establish` now generates the elligator2-
+  representable ephemeral key BEFORE awaiting the stream future (TCP
+  dial), closing upstream issue jmwample/ptrs#15. The elligator2
+  retry loop succeeds with ~50% probability per iteration, so doing
+  keygen after the dial inserted a variable, network-observable gap
+  between TCP handshake and the first obfs4 byte that a censor could
+  fingerprint. The dial-keygen order invariant is locked in by an
+  order-asserting test (§D1a).
+
+- **obfs4**: `pad_burst` no longer emits over-sized padding frames
+  that the codec rejects. The previous implementation followed a
+  flawed upstream sketch: a single padding frame whose zero-fill was
+  `pad_len - MESSAGE_OVERHEAD`. When `pad_len` was close to
+  `MAX_SEGMENT_LENGTH` (≈1430–1447 bytes) the resulting `pad_bytes`
+  exceeded `MAX_MESSAGE_PAYLOAD_LENGTH - 1` and `build_and_marshall`
+  returned `Invalid payload length`. The new implementation is a loop
+  that splits the requested padding into one or more frames of at
+  most `MAX_MESSAGE_PAYLOAD_LENGTH - 1` padding bytes, with guards
+  for the two unexpressible-remainder cases. The doc comment is
+  rewritten to reflect this. Bug only surfaced with
+  `iat-mode ∈ {1, 2}` (default is `0/Off`). Covered exhaustively
+  (§F: enumerate, don't sample) for every `target ∈ 0..MAX_SEGMENT_LENGTH`
+  across a representative cross-section of starting tails, plus an
+  inverse round-trip through `Messages::try_parse` (§F4).
 
 ### Changed
 
-- **obfs4**: bumped `tor-cell`, `tor-llcrypto`, `tor-error`, `tor-bytes` from
-  0.25.0 to 0.39.0. Version 0.39.0 is the latest release compatible with the
-  project MSRV 1.88 (the tor-* 0.40.0+ line requires Rust 1.89). The MSRV
-  contract is deliberately kept at 1.88: the consumed surface (SHA-256/SHAKE-256
-  digests, `RsaIdentity`, `SecretBuf`, error types) is stable across 0.39–0.43,
-  there is no RUSTSEC advisory against these crates, so raising MSRV to chase
-  0.43 buys nothing while breaking downstream tool-chain requirements.
-- **obfs4**: removed `tor-basic-utils` dev-dependency. The 0.39.0 release
-  exports `TestingRng` built on `rand_core 0.9`, which is incompatible with
-  the project's `rand 0.8` (`rand_core 0.6`). Tests that used `testing_rng()`
-  now use `rand::thread_rng()` instead.
-- **core**: bumped `itertools` from 0.13.0 to 0.14.0 (MSRV 1.63.0, no API
-  breakage on the consumed surface `sorted`/`join`/`collect_vec`). Held at
-  0.14.0 rather than 0.15.0 on purpose: `tor-cell 0.39.0` already pins
-  `itertools ^0.14.0`, so matching that version de-duplicates the dependency
-  tree (one `itertools 0.14` node shared instead of an extra 0.15 copy), and
-  0.15.0 offers nothing on the surface we use.
+- **obfs4**: bumped `tor-cell` / `tor-llcrypto` / `tor-error` /
+  `tor-bytes` from 0.25.0 to 0.43.0 — the current arti dependency
+  cluster head. The consumed surface (Sha256/Shake256, RsaIdentity,
+  SecretBuf, error types, into_internal, Writer/EncodeResult,
+  RSA_ID_LEN) is API-stable across that range, so no obfs4 source
+  changes were needed beyond the version pins themselves.
+- **all crates**: declared MSRV raised from **1.88 to 1.89**. Required
+  by `tor-*` 0.40+. The per-manifest `rust-version` and the CI `MSRV`
+  job (now `MSRV (1.89)`) move together.
+- **obfs4**: removed `tor-basic-utils` dev-dependency. Its 0.43 release
+  exports `TestingRng` built on `rand_core 0.9`, incompatible with the
+  workspace's `rand 0.8` (`rand_core 0.6`, pinned by `x25519-dalek
+  2.0.1`). Tests that used `testing_rng()` now use `rand::thread_rng()`
+  — the RNG is only used for key generation, the assertions don't
+  depend on determinism. A migration to `rand 0.9` is blocked on a
+  stable `x25519-dalek 3.0` (currently 3.0.0-rc.1) and tracked
+  separately.
+- **core**: bumped `itertools` from 0.13.0 to 0.14.0 (MSRV 1.63.0, no
+  API breakage on the consumed surface). Held at 0.14.0 rather than
+  0.15.0 on purpose: `tor-cell 0.43.0` still pins `itertools ^0.14.0`,
+  so matching that version de-duplicates the dependency tree.
 
 ## [0.4.0] - 2026-06-10
 

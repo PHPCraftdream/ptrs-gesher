@@ -50,8 +50,8 @@ needed when moving from `jmwample/ptrs` to `ptrs-gesher`. Adjust only the
 
 ```toml
 [dependencies]
-ptrs    = { package = "ptrs-gesher-core",   version = "0.4" }
-obfs4   = { package = "ptrs-gesher-obfs4",  version = "0.4" }
+ptrs    = { package = "ptrs-gesher-core",   version = "0.5" }
+obfs4   = { package = "ptrs-gesher-obfs4",  version = "0.5" }
 webtunnel = "ptrs-gesher-webtunnel"  # new, no upstream equivalent
 ```
 
@@ -59,7 +59,7 @@ webtunnel = "ptrs-gesher-webtunnel"  # new, no upstream equivalent
 
 | Change | Why |
 |---|---|
-| New crate `ptrs-gesher-webtunnel` | Adds WebTunnel transport — TLS + HTTP/1.1 Upgrade, no WebSocket framing. |
+| New crate `ptrs-gesher-webtunnel` | Adds WebTunnel transport — TLS + HTTP/1.1 Upgrade, no WebSocket framing. Bridge URL hostname resolves via DNS-over-HTTPS (`doh-mode=fallback` default; `strict` / `off` available; `addr=` override bypasses both). |
 | `lyrebird` refactored: `lib.rs` with `pub async fn run()` + thin `main.rs` | Lets parent applications embed the PT loop in-process (busybox-style PT dispatch). |
 | `lyrebird::client_setup` dispatches by transport name (`obfs4` / `webtunnel`) | Single PT-manager process serves multiple transports. |
 | Dropped: `o5`, `o7`, lyrebird `fwd/` forward-proxy binary | Upstream-WIP / scope unrelated to bridge transport. |
@@ -69,7 +69,7 @@ webtunnel = "ptrs-gesher-webtunnel"  # new, no upstream equivalent
 
 - Workspace builds on stable Rust ≥ 1.89.
 - 279 tests passing (E2E, property-based, fuzz-like × 10k iterations).
-- All crates are versioned in lockstep; 0.4.0 is the current release line. The earlier 0.1.x and 0.2.0 versions are yanked (`ptrs-gesher-lyrebird` 0.2.0 could not connect to bridges).
+- All crates are versioned in lockstep; 0.5.0 is the current release line (0.4.0 is the prior line, kept available). The earlier 0.1.x and 0.2.0 versions are yanked (`ptrs-gesher-lyrebird` 0.2.0 could not connect to bridges).
 - **Interoperability with reference `obfs4proxy` (Go) and the
   WebTunnel reference server has not been smoke-tested at this point.**
 

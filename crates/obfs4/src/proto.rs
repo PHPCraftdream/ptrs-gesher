@@ -183,7 +183,9 @@ where
             // first `poll_next` sees the data frames that arrived alongside the
             // server hello, instead of starting from an empty buffer and
             // desynchronising the frame decoder.
-            stream.read_buffer_mut().extend_from_slice(&handshake_residual);
+            stream
+                .read_buffer_mut()
+                .extend_from_slice(&handshake_residual);
         }
         let len_seed = session.len_seed();
         let iat_mode = session.iat_mode();
