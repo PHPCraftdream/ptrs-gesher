@@ -28,6 +28,7 @@ tracing = "0.1"
 getrandom = "0.2"
 base64 = "0.22"
 url = "2"
+hickory-resolver = { version = "0.26.1", default-features = false, features = ["https-ring", "tokio"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt", "macros", "io-util", "net"] }

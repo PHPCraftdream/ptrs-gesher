@@ -12,12 +12,15 @@
 //! - **Sec-WebSocket-Key**: server does NOT validate it. We generate a
 //!   proper one (16 random bytes, base64-encoded) for camouflage.
 
+use std::io;
+use std::net::SocketAddr;
 use std::sync::Arc;
 
 use base64::Engine;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use crate::dns::{DohMode, DohResolver};
 use crate::{Error, PrefixStream, WebTunnelConfig, WebTunnelStream};
 
 /// Generate a Sec-WebSocket-Key (16 random bytes, base64-encoded).
@@ -94,8 +97,7 @@ pub fn parse_response(buf: &[u8]) -> Result<(u16, &[u8]), Error> {
 /// mid-handshake may leave the underlying stream in a partially-written
 /// state. Wrap in `tokio::spawn` if cancellation is possible.
 pub async fn connect(config: &WebTunnelConfig) -> Result<PrefixStream<WebTunnelStream>, Error> {
-    let target = config.connect_host_port()?;
-    let tcp = TcpStream::connect(&target).await?;
+    let tcp = open_tcp(config).await?;
 
     if config.use_tls() {
         let tls_stream = tls_connect(config, tcp).await?;
@@ -103,6 +105,109 @@ pub async fn connect(config: &WebTunnelConfig) -> Result<PrefixStream<WebTunnelS
     } else {
         upgrade_and_return(tcp, config).await
     }
+}
+
+/// Decide how to resolve the bridge URL into a TCP connection. The
+/// decision matrix matches the issue-#74-adjacent design captured in
+/// the project notes:
+///
+/// |               | `addr=` set            | `addr=` unset, `doh_mode=Off` | `addr=` unset, `doh_mode=Strict` | `addr=` unset, `doh_mode=Fallback` |
+/// |---------------|------------------------|--------------------------------|----------------------------------|------------------------------------|
+/// | path          | direct connect to IP   | system DNS via tokio           | DoH-only — `Err` on pool failure | DoH first → system DNS on failure  |
+///
+/// `addr=` is a censorship-hardened operator override (a literal IP
+/// distributed out-of-band); it bypasses both system DNS and DoH.
+/// `doh_mode=Off` keeps backwards-compatible behaviour for anyone who
+/// explicitly opts out.
+async fn open_tcp(config: &WebTunnelConfig) -> Result<TcpStream, Error> {
+    let (host, port) = config.connect_host_and_port()?;
+
+    // Operator-supplied raw address — host is almost always an IP, so
+    // both `TcpStream::connect((host, port))` and DoH would be wrong:
+    // the user has already told us where to dial.
+    if config.tcp_addr.is_some() {
+        return TcpStream::connect((host.as_str(), port))
+            .await
+            .map_err(Error::from);
+    }
+
+    match config.doh_mode {
+        DohMode::Off => TcpStream::connect((host.as_str(), port))
+            .await
+            .map_err(Error::from),
+        DohMode::Strict => {
+            let resolver = DohResolver::with_default_pool().map_err(Error::from)?;
+            connect_via_doh_strict(&resolver, &host, port).await
+        }
+        DohMode::Fallback => {
+            let resolver = DohResolver::with_default_pool().ok();
+            connect_via_doh_fallback(resolver.as_ref(), &host, port).await
+        }
+    }
+}
+
+/// Strict path: DoH only. On any failure (lookup error or every
+/// connect attempt failing) return an error — never silently fall back
+/// to the system resolver. This is the §F1 invariant the
+/// censorship-resistance use case depends on.
+///
+/// Exposed at `pub(crate)` so tests can drive it with a `DohResolver`
+/// built from a known-unreachable pool — that exercises the "all DoH
+/// failed" branch without needing a real network outage.
+pub(crate) async fn connect_via_doh_strict(
+    resolver: &DohResolver,
+    host: &str,
+    port: u16,
+) -> Result<TcpStream, Error> {
+    let addrs = resolver.resolve(host, port).await.map_err(Error::from)?;
+    connect_first(&addrs).await.map_err(Error::from)
+}
+
+/// Fallback path: DoH first, system DNS on full DoH failure. A
+/// connect-time failure to a resolved DoH address is treated the same
+/// as a DoH lookup failure: try the system resolver before giving up,
+/// so a partially-blocked DoH pool does not break webtunnel for a
+/// caller who explicitly opted into "best-effort hardening".
+///
+/// `resolver` is `Option` so the caller can pass `None` when the
+/// resolver itself failed to build — fallback still tries the system
+/// resolver in that case, matching the "best-effort" contract.
+pub(crate) async fn connect_via_doh_fallback(
+    resolver: Option<&DohResolver>,
+    host: &str,
+    port: u16,
+) -> Result<TcpStream, Error> {
+    if let Some(r) = resolver {
+        if let Ok(addrs) = r.resolve(host, port).await {
+            if let Ok(stream) = connect_first(&addrs).await {
+                return Ok(stream);
+            }
+        }
+    }
+    TcpStream::connect((host, port)).await.map_err(Error::from)
+}
+
+/// Try each `SocketAddr` in order, returning the first successful TCP
+/// connection. If every attempt fails, return the last error.
+///
+/// This is a thin sequential "happy-eyeballs-lite". A full RFC 8305
+/// happy-eyeballs (parallel v6/v4) is intentionally out of scope: at
+/// the bridge-handshake layer one extra RTT is acceptable, and the
+/// simpler implementation is easier to audit.
+async fn connect_first(addrs: &[SocketAddr]) -> io::Result<TcpStream> {
+    let mut last_err: Option<io::Error> = None;
+    for &addr in addrs {
+        match TcpStream::connect(addr).await {
+            Ok(s) => return Ok(s),
+            Err(e) => last_err = Some(e),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::AddrNotAvailable,
+            "no addresses to connect to",
+        )
+    }))
 }
 
 async fn tls_connect(
@@ -298,5 +403,116 @@ mod tests {
         let resp = b"NOT HTTP AT ALL\r\n\r\n";
         let err = parse_response(resp).unwrap_err();
         assert!(matches!(err, Error::HttpParse(_)));
+    }
+
+    // -- DoH connect-path tests ------------------------------------------------
+    //
+    // These tests exercise the strict-vs-fallback decision logic without
+    // touching the network. The "unreachable" DoH pool uses 127.0.0.1 as
+    // its bootstrap IP: hickory will dial 127.0.0.1:443 to perform the DoH
+    // TLS handshake, which fails immediately with `ConnectionRefused` on a
+    // host with no service on that port — fast enough that the test never
+    // hangs and never has to talk to the real internet.
+    //
+    // The DoH-resolver build itself is fallible; in production we build
+    // anew per connect, so a bad pool can surface either as a build error
+    // (caught here by the empty-pool / IP-only test in `dns::resolver`) or
+    // a resolve error (caught here). The build-error path of fallback is
+    // covered by passing `None` for the resolver — same shape.
+
+    use std::net::{IpAddr, Ipv4Addr};
+
+    use crate::dns::endpoints::DohEndpoint;
+
+    /// A DoH pool whose only "endpoint" dials 127.0.0.1 — no TLS listener
+    /// on :443 there, so every lookup terminates with a connection error
+    /// without involving the network. Pinned `localhost.invalid` SNI
+    /// ensures `rustls` rejects the (non-existent) certificate.
+    const UNREACHABLE_ENDPOINT: DohEndpoint = DohEndpoint {
+        name: "unreachable-test",
+        sni: "localhost.invalid",
+        path: Some("/dns-query"),
+        bootstrap: &[IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))],
+    };
+
+    /// §F1: `Strict` MUST surface an error when the DoH pool cannot
+    /// resolve. It MUST NOT silently fall through to the system DNS
+    /// resolver — that would defeat the censorship-resistance contract.
+    ///
+    /// We use an `.invalid` host (RFC 2606 reserved TLD — guaranteed
+    /// non-resolvable by any honest resolver) so a hypothetical leak
+    /// into the system resolver could not "rescue" the call. Combined
+    /// with an unreachable DoH pool the only path to success would be
+    /// a strict-mode bypass — which is exactly what this test is
+    /// guarding against. The companion `fallback_*` tests demonstrate
+    /// that the system-resolver path itself is wired up correctly.
+    #[tokio::test]
+    async fn strict_returns_err_when_doh_pool_unreachable() {
+        let resolver =
+            DohResolver::from_endpoints(&[UNREACHABLE_ENDPOINT]).expect("unreachable pool builds");
+
+        let result = connect_via_doh_strict(&resolver, "bridge.test.invalid", 443).await;
+        assert!(
+            result.is_err(),
+            "strict must NOT fall through to system DNS or any other resolver, but got Ok",
+        );
+    }
+
+    /// `Fallback` MUST recover via the system resolver when the DoH
+    /// pool is unreachable — that is its entire contract.
+    #[tokio::test]
+    async fn fallback_recovers_via_system_resolver() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let resolver =
+            DohResolver::from_endpoints(&[UNREACHABLE_ENDPOINT]).expect("unreachable pool builds");
+
+        let stream = connect_via_doh_fallback(Some(&resolver), "localhost", port)
+            .await
+            .expect("fallback must reach the system-resolved localhost");
+        // Sanity: stream is connected to the listener.
+        assert_eq!(stream.peer_addr().unwrap().port(), port);
+    }
+
+    /// `Fallback` with `resolver = None` (resolver-build failed) must
+    /// still try the system resolver. Same end behaviour as the case
+    /// above, exercising the resolver-absent branch.
+    #[tokio::test]
+    async fn fallback_with_no_resolver_still_uses_system_resolver() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+
+        let stream = connect_via_doh_fallback(None, "localhost", port)
+            .await
+            .expect("fallback with None resolver must use system DNS");
+        assert_eq!(stream.peer_addr().unwrap().port(), port);
+    }
+
+    /// `connect_first` picks the first reachable address, skipping
+    /// unreachable ones. Two-element list where the first refuses and
+    /// the second accepts — must succeed and report the second port.
+    #[tokio::test]
+    async fn connect_first_picks_reachable_after_skipping_dead() {
+        let good = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let good_port = good.local_addr().unwrap().port();
+
+        // Port 1 on 127.0.0.1 is almost certainly closed; if it isn't,
+        // the test would skip past it via the "second succeeds" path.
+        let dead: SocketAddr = "127.0.0.1:1".parse().unwrap();
+        let alive: SocketAddr = format!("127.0.0.1:{good_port}").parse().unwrap();
+
+        let stream = connect_first(&[dead, alive]).await.expect("alive must win");
+        assert_eq!(stream.peer_addr().unwrap().port(), good_port);
+    }
+
+    /// `connect_first` returns the last error when no address is
+    /// reachable (and `AddrNotAvailable` for an empty input). The
+    /// empty-input shape is the regression guard for the helper's
+    /// "no addresses to connect to" branch.
+    #[tokio::test]
+    async fn connect_first_returns_error_on_empty_input() {
+        let err = connect_first(&[]).await.expect_err("empty must fail");
+        assert_eq!(err.kind(), io::ErrorKind::AddrNotAvailable);
     }
 }

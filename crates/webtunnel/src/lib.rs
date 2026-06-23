@@ -16,7 +16,10 @@ use ptrs::args::Args;
 use ptrs::{info, warn, FutureResult as F};
 use tokio::io::{AsyncRead, AsyncWrite};
 
+pub mod dns;
 pub mod handshake;
+
+pub use dns::DohMode;
 
 /// Transport name constant.
 pub const WEBTUNNEL_NAME: &str = "webtunnel";
@@ -87,6 +90,15 @@ pub struct WebTunnelConfig {
     pub servername: Option<String>,
     /// TCP address override from `addr=`. Defaults to URL host:port.
     pub tcp_addr: Option<String>,
+    /// DNS-over-HTTPS resolution mode for the bridge URL hostname.
+    ///
+    /// Defaults to [`DohMode::Fallback`] — additive defence that never
+    /// breaks existing webtunnel deployments. Set via the `doh-mode=`
+    /// bridge-line argument or [`WebTunnelConfig::with_doh_mode`].
+    ///
+    /// When `tcp_addr` (`addr=`) is set, the bridge line already carries
+    /// an IP and DoH is bypassed regardless of this field's value.
+    pub doh_mode: DohMode,
 }
 
 impl WebTunnelConfig {
@@ -105,6 +117,13 @@ impl WebTunnelConfig {
         let servername = args.retrieve("servername");
         let tcp_addr = args.retrieve("addr");
 
+        let doh_mode = match args.retrieve("doh-mode") {
+            Some(s) => s
+                .parse::<DohMode>()
+                .map_err(|e| Error::InvalidUrl(format!("doh-mode: {e}")))?,
+            None => DohMode::default(),
+        };
+
         // Log and ignore `utls=` (TLS fingerprint emulation — deferred).
         if let Some(ref utls) = args.retrieve("utls") {
             info!("utls={utls} parameter accepted but ignored (not yet implemented)");
@@ -115,7 +134,44 @@ impl WebTunnelConfig {
             version,
             servername,
             tcp_addr,
+            doh_mode,
         })
+    }
+
+    /// Override the DoH resolution mode (chainable).
+    pub fn with_doh_mode(mut self, mode: DohMode) -> Self {
+        self.doh_mode = mode;
+        self
+    }
+
+    /// Hostname and port to resolve / connect to. Equivalent to
+    /// [`Self::connect_host_port`] but returns the host and port as
+    /// separate values so the resolver can hand the hostname to DoH
+    /// without re-parsing.
+    pub(crate) fn connect_host_and_port(&self) -> Result<(String, u16), Error> {
+        if let Some(ref addr) = self.tcp_addr {
+            // `addr=` is a raw `host:port` (typically an IP) — split it
+            // for symmetry with the URL-derived path, even though the
+            // host part here is almost always already an IP and DoH is
+            // bypassed in that case.
+            let (host, port) = addr.rsplit_once(':').ok_or_else(|| {
+                Error::InvalidUrl(format!("addr= missing ':' (expected host:port): {addr}"))
+            })?;
+            let port: u16 = port
+                .parse()
+                .map_err(|e| Error::InvalidUrl(format!("addr= invalid port {port:?}: {e}")))?;
+            return Ok((host.to_string(), port));
+        }
+        let parsed = url::Url::parse(&self.url)
+            .map_err(|e: url::ParseError| Error::InvalidUrl(e.to_string()))?;
+        let host = parsed
+            .host_str()
+            .ok_or_else(|| Error::InvalidUrl("url has no host".into()))?
+            .to_string();
+        let port = parsed
+            .port_or_known_default()
+            .ok_or_else(|| Error::InvalidUrl("cannot determine port from url scheme".into()))?;
+        Ok((host, port))
     }
 
     /// The hostname used for the TLS SNI extension and the HTTP Host header.
@@ -132,6 +188,12 @@ impl WebTunnelConfig {
     }
 
     /// The host:port to actually connect to via TCP. Either `addr=` or the URL's host:port.
+    ///
+    /// Kept on the test surface only — the production connect path uses
+    /// [`Self::connect_host_and_port`], which returns the host and port
+    /// separately so DoH can hand the host to the resolver without a
+    /// re-parse round-trip.
+    #[cfg(test)]
     fn connect_host_port(&self) -> Result<String, Error> {
         if let Some(ref addr) = self.tcp_addr {
             return Ok(addr.clone());
@@ -749,6 +811,72 @@ mod tests {
         );
     }
 
+    // -- DoH config parsing tests ----------------------------------------
+
+    #[test]
+    fn config_doh_mode_defaults_to_fallback() {
+        let args = make_args(&[("url", "https://example.com/x")]);
+        let cfg = WebTunnelConfig::from_args(&args).unwrap();
+        assert_eq!(cfg.doh_mode, DohMode::Fallback);
+    }
+
+    #[test]
+    fn config_doh_mode_parses_off_strict_fallback() {
+        for (raw, expected) in [
+            ("off", DohMode::Off),
+            ("strict", DohMode::Strict),
+            ("fallback", DohMode::Fallback),
+            ("STRICT", DohMode::Strict),
+        ] {
+            let args = make_args(&[("url", "https://example.com/x"), ("doh-mode", raw)]);
+            let cfg = WebTunnelConfig::from_args(&args).unwrap();
+            assert_eq!(cfg.doh_mode, expected, "doh-mode={raw}");
+        }
+    }
+
+    #[test]
+    fn config_doh_mode_rejects_garbage() {
+        let args = make_args(&[("url", "https://example.com/x"), ("doh-mode", "dnsstrict")]);
+        let err = WebTunnelConfig::from_args(&args).unwrap_err();
+        assert!(matches!(err, Error::InvalidUrl(_)), "{err:?}");
+    }
+
+    #[test]
+    fn config_with_doh_mode_overrides() {
+        let args = make_args(&[("url", "https://example.com/x")]);
+        let cfg = WebTunnelConfig::from_args(&args)
+            .unwrap()
+            .with_doh_mode(DohMode::Strict);
+        assert_eq!(cfg.doh_mode, DohMode::Strict);
+    }
+
+    #[test]
+    fn config_connect_host_and_port_from_url() {
+        let args = make_args(&[("url", "https://example.com:8443/x")]);
+        let cfg = WebTunnelConfig::from_args(&args).unwrap();
+        assert_eq!(
+            cfg.connect_host_and_port().unwrap(),
+            ("example.com".to_string(), 8443)
+        );
+    }
+
+    #[test]
+    fn config_connect_host_and_port_from_tcp_addr() {
+        let args = make_args(&[("url", "https://example.com/x"), ("addr", "192.0.2.1:8443")]);
+        let cfg = WebTunnelConfig::from_args(&args).unwrap();
+        assert_eq!(
+            cfg.connect_host_and_port().unwrap(),
+            ("192.0.2.1".to_string(), 8443)
+        );
+    }
+
+    #[test]
+    fn config_connect_host_and_port_rejects_bad_addr() {
+        let args = make_args(&[("url", "https://example.com/x"), ("addr", "noport")]);
+        let cfg = WebTunnelConfig::from_args(&args).unwrap();
+        assert!(cfg.connect_host_and_port().is_err());
+    }
+
     #[test]
     fn config_connect_host_port_http_defaults_to_80() {
         let args = make_args(&[("url", "http://example.com/path")]);
@@ -763,6 +891,7 @@ mod tests {
             version: None,
             servername: None,
             tcp_addr: None,
+            doh_mode: DohMode::default(),
         };
         assert!(!cfg.use_tls());
     }
@@ -776,6 +905,7 @@ mod tests {
             version: None,
             servername: None,
             tcp_addr: None,
+            doh_mode: DohMode::default(),
         };
         assert!(cfg.use_tls());
     }
@@ -787,6 +917,7 @@ mod tests {
             version: None,
             servername: None,
             tcp_addr: None,
+            doh_mode: DohMode::default(),
         };
         assert!(!cfg.use_tls());
     }
@@ -801,6 +932,7 @@ mod tests {
             version: None,
             servername: None,
             tcp_addr: None,
+            doh_mode: DohMode::default(),
         };
         assert!(cfg.use_tls());
     }
@@ -814,6 +946,7 @@ mod tests {
             version: None,
             servername: None,
             tcp_addr: None,
+            doh_mode: DohMode::default(),
         };
         assert!(!cfg.use_tls());
     }
