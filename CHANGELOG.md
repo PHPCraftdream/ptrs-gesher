@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-07-19
+
+### Fixed
+
+- **lyrebird**: honor the [`NO_COLOR`](https://no-color.org) convention in
+  the PT-child console logger. `init_logging_recvr` built its
+  `tracing_subscriber::fmt::layer()` with no `.with_ansi(...)` call, so
+  ANSI color codes were always emitted to stderr regardless of the
+  launching process's own logging configuration — when the parent (e.g.
+  a busybox-dispatch host binary) disabled ANSI for its own logs and the
+  terminal/sink didn't render escape codes, the PT child's lines showed
+  up as raw `\x1b[...m` sequences. The layer now checks `NO_COLOR` (any
+  value, including empty, per the convention) and disables ANSI when
+  set; a launching process can propagate its own color preference by
+  setting `NO_COLOR` in the child's environment before spawning the PT
+  binary.
+
 ## [0.5.0] - 2026-06-23
 
 Synchronized release: every crate is bumped to 0.5.0 in lockstep. The

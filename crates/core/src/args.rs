@@ -825,13 +825,13 @@ mod tests {
             assert_eq!(
                 &encoded, expected,
                 "{:?} → {} (expected {})",
-                input, &encoded, expected
+                input, encoded, expected
             );
 
             let mut smethod = String::from("ARGS:");
             smethod.push_str(&encoded);
             let m = parse_smethod_args(&smethod).unwrap();
-            assert!(!m.is_empty(), "{:?} -> {}", &input_map, &encoded);
+            assert!(!m.is_empty(), "{:?} -> {}", input_map, encoded);
             // println!("{} → {:?}", encoded, m);
         }
     }

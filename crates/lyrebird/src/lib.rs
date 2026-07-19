@@ -169,7 +169,15 @@ fn init_logging_recvr(
                 "info,fast_socks5=warn,obfs4::sessions=warn,lyrebird::handshake=info",
             )
         });
+    // Honor the https://no-color.org convention: any (even empty) NO_COLOR
+    // disables ANSI. We're normally launched as a PT child by the parent
+    // process's busybox dispatch and inherit its environment, so the parent
+    // can propagate its own color preference by setting NO_COLOR before
+    // spawning us — without that, this layer defaulted to ANSI-always-on
+    // regardless of the parent's own logging config.
+    let ansi = std::env::var_os("NO_COLOR").is_none();
     let console_layer = tracing_subscriber::fmt::layer()
+        .with_ansi(ansi)
         .with_writer(std::io::stderr)
         .with_filter(console_filter);
 
