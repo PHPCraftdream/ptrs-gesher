@@ -2399,7 +2399,7 @@ dependencies = [
 
 [[package]]
 name = "ptrs-gesher"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "criterion",
  "ptrs-gesher-bridge-line",
@@ -2412,7 +2412,7 @@ dependencies = [
 
 [[package]]
 name = "ptrs-gesher-bridge-line"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "criterion",
  "proptest",
@@ -2421,7 +2421,7 @@ dependencies = [
 
 [[package]]
 name = "ptrs-gesher-core"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "criterion",
  "futures",
@@ -2452,7 +2452,7 @@ dependencies = [
 
 [[package]]
 name = "ptrs-gesher-lyrebird"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2475,7 +2475,7 @@ dependencies = [
 
 [[package]]
 name = "ptrs-gesher-obfs4"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "base64",
  "bytes",
@@ -2516,7 +2516,7 @@ dependencies = [
 
 [[package]]
 name = "ptrs-gesher-webtunnel"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "base64",
  "criterion",
