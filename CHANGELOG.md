@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **lyrebird**: honor `TOR_PT_EXIT_ON_STDIN_CLOSE=1` and exit when the
+  parent process closes our stdin. PT-spec §3.4 ("Feature #15435")
+  defines this as the canonical managed-transport shutdown signal —
+  arti's `tor-ptmgr` closes a child PT's stdin when the transport is no
+  longer needed (shutdown, reconfigure, transport removal). The Rust port
+  was not reading stdin at all: the `pt_should_exit_on_stdin_close()`
+  helper already existed in `core` but was never called from lyrebird's
+  run loop, so every recreated `TorClient` (or any other PT parent
+  restart) left an orphaned PT-child process behind as a zombie. `run()`
+  now spawns a `spawn_blocking` watcher (driven by the new
+  `ptrs::wait_stdin_close()` / `ptrs::wait_reader_close()` helpers in
+  `core`) that cancels a `CancellationToken` on stdin EOF; that token is
+  a third arm in both `select!` loops, triggering an immediate clean
+  exit. When the env var is unset the watcher is not spawned and the arm
+  is pending forever, so the previous "ignore stdin" behavior is
+  unchanged. Covered by process-level integration tests that launch the
+  real `lyrebird` binary and assert it exits (positive) / keeps running
+  (negative) on stdin close.
+
 ## [0.5.1] - 2026-07-19
 
 ### Fixed

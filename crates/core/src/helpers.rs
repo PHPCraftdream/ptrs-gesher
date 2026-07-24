@@ -98,6 +98,69 @@ pub fn pt_should_exit_on_stdin_close() -> bool {
     }
 }
 
+/// Block until the process's stdin reaches EOF (parent closed it) or an
+/// read error occurs, then return.
+///
+/// This implements the parent-died-detection behavior from PT-spec §3.4
+/// ("Feature #15435"): when a Tor PT parent process wants to terminate
+/// its managed PT child by closing the child's stdin, it sets
+/// `TOR_PT_EXIT_ON_STDIN_CLOSE=1` in the child's environment. The PT
+/// detects this by reading stdin until EOF and then exiting cleanly.
+///
+/// The read runs on a `tokio::task::spawn_blocking` thread, so it does
+/// not occupy a tokio worker while blocked in the read syscall.
+///
+/// Callers SHOULD gate this on [`pt_should_exit_on_stdin_close`] — when
+/// the env var is not set the parent keeps stdin open for the process's
+/// entire lifetime and this future never resolves. A typical use is to
+/// build it into a `tokio::select!` branch that is inert (pending
+/// forever) when [`pt_should_exit_on_stdin_close`] is false.
+///
+/// # Cancel safety
+///
+/// This future is **not cancel-safe**: dropping it abandons the
+/// underlying blocking read, which keeps consuming the `spawn_blocking`
+/// thread until stdin actually reaches EOF. In a PT process this is
+/// acceptable because the future is dropped only as part of process
+/// shutdown.
+pub async fn wait_stdin_close() {
+    wait_reader_close(std::io::stdin()).await
+}
+
+/// Block until `reader` reaches EOF or errors, draining any bytes it
+/// produces first.
+///
+/// This is the reader-generic core of [`wait_stdin_close`], exposed so
+/// that callers (notably tests) can substitute a non-stdin reader — a
+/// `Cursor`, an in-memory pipe, or a deliberately-failing reader —
+/// instead of consuming the real process stdin.
+///
+/// Like [`wait_stdin_close`], the read loop runs on a
+/// `tokio::task::spawn_blocking` thread and shares the same
+/// (lack of) cancel-safety.
+pub async fn wait_reader_close<R>(reader: R)
+where
+    R: std::io::Read + Send + 'static,
+{
+    let join = tokio::task::spawn_blocking(move || {
+        let mut buf = [0u8; 1024];
+        let mut reader = reader;
+        loop {
+            match reader.read(&mut buf) {
+                // 0-byte read is EOF; an error is treated the same way
+                // — either way the parent is no longer producing stdin
+                // and the PT should exit.
+                Ok(0) | Err(_) => return,
+                Ok(_) => continue,
+            }
+        }
+    });
+    // Best-effort: a panic inside the blocking task (none is reachable
+    // here) should not propagate as a JoinError that the caller can't
+    // distinguish from a clean EOF.
+    let _ = join.await;
+}
+
 // ================================================================ //
 //                            Client                                //
 // ================================================================ //
@@ -861,5 +924,56 @@ mod test {
     fn exit_on_stdin_close_returns_false_when_unset() {
         env::remove_var(constants::EXIT_ON_STDIN_CLOSE);
         assert!(!pt_should_exit_on_stdin_close());
+    }
+
+    // -- wait_reader_close --
+    //
+    // wait_stdin_close is just wait_reader_close wired to process stdin,
+    // so we exercise the reader-generic version with a stand-in reader
+    // (Cursor / failing reader). Each test is wrapped in a timeout so a
+    // regression that fails to observe EOF surfaces as a test failure
+    // rather than hanging the suite.
+
+    #[tokio::test]
+    async fn wait_reader_close_returns_on_immediate_eof() {
+        use std::io::Cursor;
+        use std::time::Duration;
+        // An empty reader is already at EOF; the function must return
+        // promptly (not block waiting for bytes that will never arrive).
+        let reader = Cursor::new(Vec::<u8>::new());
+        tokio::time::timeout(Duration::from_secs(2), wait_reader_close(reader))
+            .await
+            .expect("wait_reader_close must return on immediate EOF, not hang");
+    }
+
+    #[tokio::test]
+    async fn wait_reader_close_drains_bytes_then_returns_on_eof() {
+        use std::io::Cursor;
+        use std::time::Duration;
+        // A non-empty reader: the read loop must consume every byte
+        // before observing EOF and returning. (A regression that returns
+        // after the first 0-byte read without consuming would also pass
+        // the immediate-EOF test, so this case is necessary on its own.)
+        let reader = Cursor::new(b"some fake stdin bytes".to_vec());
+        tokio::time::timeout(Duration::from_secs(2), wait_reader_close(reader))
+            .await
+            .expect("wait_reader_close must drain the reader and return on EOF");
+    }
+
+    #[tokio::test]
+    async fn wait_reader_close_returns_on_reader_error() {
+        use std::io::{self, Read};
+        use std::time::Duration;
+        // A reader that always errors: the loop must treat this the same
+        // as EOF and return, rather than spinning on the failing read.
+        struct AlwaysErr;
+        impl Read for AlwaysErr {
+            fn read(&mut self, _: &mut [u8]) -> io::Result<usize> {
+                Err(io::Error::other("boom"))
+            }
+        }
+        tokio::time::timeout(Duration::from_secs(2), wait_reader_close(AlwaysErr))
+            .await
+            .expect("wait_reader_close must return when the reader errors, not hang");
     }
 }

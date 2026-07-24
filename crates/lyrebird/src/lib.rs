@@ -262,6 +262,23 @@ pub async fn run() -> Result<()> {
 
     let cancel_token = tokio_util::sync::CancellationToken::new();
 
+    // PT-spec §3.4 ("Feature #15435"): when the parent process sets
+    // `TOR_PT_EXIT_ON_STDIN_CLOSE=1` it signals "stop" by closing our
+    // stdin — that's the canonical managed-PT shutdown path arti's
+    // ptmgr uses when a transport is removed/reconfigured. Watch stdin
+    // in the background and cancel this token on EOF so the select!
+    // branches below can exit promptly. When the env var is not set the
+    // watcher is not spawned and the token never fires, preserving the
+    // previous "ignore stdin" behavior exactly.
+    let parent_died = tokio_util::sync::CancellationToken::new();
+    if ptrs::pt_should_exit_on_stdin_close() {
+        let parent_died = parent_died.clone();
+        tokio::spawn(async move {
+            ptrs::wait_stdin_close().await;
+            parent_died.cancel();
+        });
+    }
+
     // launch runners
     let mut exit_rx = if ptrs::is_client()? {
         // running as CLIENT
@@ -307,6 +324,13 @@ pub async fn run() -> Result<()> {
             info!("received interrupt, shutting down");
             cancel_token.cancel();
         }
+        // `parent_died` only fires when TOR_PT_EXIT_ON_STDIN_CLOSE=1 was
+        // set AND the parent closed our stdin. When the env var is unset
+        // the watcher is never spawned and this branch is pending forever.
+        _ = parent_died.cancelled() => {
+            info!("parent process closed stdin, exiting");
+            return Ok(())
+        }
     }
 
     // Ok, it was the first interrupt, close all listeners, and wait till
@@ -315,6 +339,9 @@ pub async fn run() -> Result<()> {
     tokio::select! {
         _ = exit_rx => {}
         _ = shutdown_signal() => {}
+        _ = parent_died.cancelled() => {
+            info!("parent process closed stdin during shutdown, exiting");
+        }
     }
 
     Ok(())
