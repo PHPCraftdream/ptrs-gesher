@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **obfs4**: continue decoding buffered frames after padding or unknown packets.
+  Previously request/response streams could stall waiting for bytes already in
+  the buffer, and EOF could discard a buffered reply. Regression tests cover an
+  open peer socket and EOF; cryptography and wire encoding are unchanged.
+- **obfs4**: preserve packet-length padding with `iat-mode=0`, encode padding as
+  separate bounded frames, and use the reference implementation's 100-microsecond
+  IAT units. Padding a full data frame previously exceeded the frame limit and
+  closed the transport. Wire-level tests cover both modes and padding boundaries.
+
 ## [0.5.2] - 2026-07-24
 
 ### Fixed

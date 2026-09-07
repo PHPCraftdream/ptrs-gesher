@@ -16,7 +16,7 @@ use ptrs::trace;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::time::{Duration, Instant, Sleep};
-use tokio_util::codec::Framed;
+use tokio_util::codec::{Encoder, Framed};
 
 use std::{
     io::Error as IoError,
@@ -251,67 +251,34 @@ where
         }
     }
 
-    /// Pad the marshalled burst `buf` so the trailing wire segment lands on
-    /// `to_pad_to` bytes. The padding is emitted as one or more `Payload`
-    /// frames with zero-length data, chosen so they always satisfy the
-    /// codec's per-frame size limit (`build_and_marshall` rejects a frame
-    /// whose `data.len() + pad_bytes >= MAX_MESSAGE_PAYLOAD_LENGTH`).
-    ///
-    /// Each padding frame contributes `MESSAGE_OVERHEAD + pad_bytes` bytes
-    /// to the buffer, so the contribution range per frame is
-    /// `[MESSAGE_OVERHEAD, MESSAGE_OVERHEAD + (MAX_MESSAGE_PAYLOAD_LENGTH - 1)]`
-    /// — i.e. `[3, 1429]` with current constants. Two invariants drive the
-    /// loop below:
-    ///
-    /// * A frame contributing fewer than `MESSAGE_OVERHEAD` bytes cannot be
-    ///   expressed, so if the target `pad_len` itself falls in `(0, MESSAGE_OVERHEAD)`
-    ///   we cannot land on it inside the current segment — we deliberately
-    ///   wrap into the next segment (`pad_len += MAX_SEGMENT_LENGTH`) so the
-    ///   final tail matches `to_pad_to` after exactly one full segment of
-    ///   extra padding.
-    /// * Within the loop, if taking the maximum-size frame would leave a
-    ///   remainder in `[1, MESSAGE_OVERHEAD - 1]` (also unexpressible), we
-    ///   shrink the current frame by `MESSAGE_OVERHEAD` to push that
-    ///   remainder back into the expressible range.
-    ///
-    /// `pad_len == 0` (`to_pad_to == tail_len`) is a no-op.
-    pub(crate) fn pad_burst(buf: &mut BytesMut, to_pad_to: usize) -> Result<()> {
-        const SEG: usize = framing::MAX_SEGMENT_LENGTH;
-        // Largest contribution a single padding frame can make: the codec
-        // rejects `data.len() + pad_bytes >= MAX_MESSAGE_PAYLOAD_LENGTH`, so
-        // with `data.len() == 0` the cap is `pad_bytes == MAX - 1`, giving
-        // a per-frame contribution of `MESSAGE_OVERHEAD + (MAX - 1)` bytes.
-        const MAX_CONTRIB: usize = MESSAGE_OVERHEAD + (framing::MAX_MESSAGE_PAYLOAD_LENGTH - 1);
-
-        let tail_len = buf.len() % SEG;
-        let mut pad_len = (to_pad_to + SEG - tail_len) % SEG;
-
-        if pad_len == 0 {
-            return Ok(()); // tail already matches the target
+    /// Append independently encrypted padding packets, as in obfs4proxy's padBurst.
+    /// https://github.com/Yawning/obfs4/blob/master/transports/obfs4/obfs4.go
+    fn pad_burst(
+        stream: &mut Framed<T, framing::Obfs4Codec>,
+        burst_len: usize,
+        target: usize,
+    ) -> Result<()> {
+        let tail = burst_len % framing::MAX_SEGMENT_LENGTH;
+        let pad = if target >= tail {
+            target - tail
+        } else {
+            framing::MAX_SEGMENT_LENGTH - tail + target
+        };
+        let lengths = if pad == 0 {
+            [None, None]
+        } else if pad > HEADER_LENGTH {
+            [Some(pad - HEADER_LENGTH), None]
+        } else {
+            [Some(framing::MAX_MESSAGE_PAYLOAD_LENGTH), Some(pad)]
+        };
+        let mut wire = BytesMut::new();
+        for length in lengths.into_iter().flatten() {
+            let mut packet = BytesMut::new();
+            Messages::Padding(length).marshall(&mut packet)?;
+            stream.codec_mut().encode(packet, &mut wire)?;
         }
-        if pad_len < MESSAGE_OVERHEAD {
-            // Cannot emit a frame smaller than the header — wrap into the
-            // next segment so the final tail still ends on `to_pad_to`.
-            pad_len += SEG;
-        }
-
-        while pad_len > 0 {
-            let mut contrib = pad_len.min(MAX_CONTRIB);
-            let remainder = pad_len - contrib;
-            if remainder != 0 && remainder < MESSAGE_OVERHEAD {
-                // Would leave 1 or 2 bytes that the next frame cannot
-                // express; shrink this frame so the remainder is at least
-                // MESSAGE_OVERHEAD (i.e. >= one whole frame).
-                contrib -= MESSAGE_OVERHEAD;
-            }
-            framing::build_and_marshall(
-                buf,
-                framing::MessageTypes::Payload.into(),
-                Vec::<u8>::new(),
-                contrib - MESSAGE_OVERHEAD,
-            )?;
-            pad_len -= contrib;
-        }
+        // At most two extra frames; the next poll_ready applies backpressure.
+        stream.write_buffer_mut().extend_from_slice(&wire);
         Ok(())
     }
 }
@@ -325,6 +292,9 @@ where
         cx: &mut Context<'_>,
         buf: &[u8],
     ) -> Poll<StdResult<usize, IoError>> {
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
         // ── IAT delay gate ──────────────────────────────────────────────
         // If a previous write armed an inter-arrival delay, wait for it
         // to expire before sending the next batch. This shapes the write
@@ -377,6 +347,7 @@ where
         // frame: the codec's `Encoder` drains it as a `Buf` on `start_send`, and
         // `clear()` resets the length while keeping the allocation.
         let mut len_sent: usize = 0;
+        let mut burst_len = 0;
         let mut out_buf = BytesMut::with_capacity(framing::MAX_MESSAGE_PAYLOAD_LENGTH);
         while msg_len - len_sent > chunk_size {
             // package one chunk of the mesage as a payload
@@ -384,6 +355,7 @@ where
 
             // send the marshalled payload
             payload.marshall(&mut out_buf)?;
+            burst_len += out_buf.len() + framing::FRAME_OVERHEAD;
             this.stream.as_mut().start_send(&mut out_buf)?;
 
             len_sent += chunk_size;
@@ -391,7 +363,17 @@ where
 
             // determine if the stream is ready to send more data. if not back off
             match futures::Sink::<&[u8]>::poll_ready(this.stream.as_mut(), cx) {
-                Poll::Pending => return Poll::Ready(Ok(len_sent)),
+                Poll::Pending => {
+                    let target = this.length_dist.sample().max(0) as usize;
+                    Self::pad_burst(this.stream.as_mut().get_mut(), burst_len, target)?;
+                    if iat_mode != IAT::Off {
+                        let delay =
+                            Duration::from_micros(this.iat_dist.sample().max(0) as u64 * 100);
+                        this.iat_sleep.as_mut().reset(Instant::now() + delay);
+                        *this.iat_delay_pending = true;
+                    }
+                    return Poll::Ready(Ok(len_sent));
+                }
                 Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
                 Poll::Ready(Ok(())) => {}
             }
@@ -401,22 +383,17 @@ where
         let payload = framing::Messages::Payload(buf[len_sent..].to_vec());
         payload.marshall(&mut out_buf)?;
 
-        // Apply pad_burst: pad the marshalled buffer so the last wire
-        // segment lands on a length sampled from `length_dist`. This
-        // hides the true payload size behind the negotiated distribution.
-        if iat_mode != IAT::Off {
-            let target = this.length_dist.sample().max(0) as usize;
-            let target = target.min(framing::MAX_SEGMENT_LENGTH);
-            Self::pad_burst(&mut out_buf, target)?;
-        }
-
+        // Length padding remains enabled independently of IAT delays.
+        burst_len += out_buf.len() + framing::FRAME_OVERHEAD;
         this.stream.as_mut().start_send(&mut out_buf)?;
+        let target = this.length_dist.sample().max(0) as usize;
+        Self::pad_burst(this.stream.as_mut().get_mut(), burst_len, target)?;
 
         // ── Arm the IAT delay for the *next* write ──────────────────────
         if iat_mode != IAT::Off {
             let this = self.as_mut().project();
             let sample = this.iat_dist.sample().max(0) as u64;
-            let delay = Duration::from_micros(sample);
+            let delay = Duration::from_micros(sample * 100);
             this.iat_sleep.as_mut().reset(Instant::now() + delay);
             *this.iat_delay_pending = true;
         }
@@ -556,6 +533,62 @@ mod tests {
     use super::*;
     use std::str::FromStr;
 
+    async fn stream_pair(
+        mode: IAT,
+    ) -> (
+        Obfs4Stream<tokio::io::DuplexStream>,
+        Obfs4Stream<tokio::io::DuplexStream>,
+    ) {
+        let server = crate::server::Server::getrandom();
+        let client = crate::sessions::new_client_session(server.0.identity_keys.pk, mode);
+        let (a, b) = tokio::io::duplex(64 * 1024);
+        let (client, server) = tokio::join!(
+            client.handshake(a, Some(Instant::now() + Duration::from_secs(30)), None),
+            server.wrap(b),
+        );
+        (client.unwrap(), server.unwrap())
+    }
+
+    fn fixed_length_distribution() -> WeightedDist {
+        WeightedDist::new(
+            drbg::Seed::try_from(&[7u8; SEED_LENGTH][..]).unwrap(),
+            64,
+            65,
+            false,
+        )
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wire_padding_remains_enabled_when_iat_delays_are_off() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut client, mut server) = stream_pair(IAT::Off).await;
+        client.s.length_dist = fixed_length_distribution();
+        let before = Instant::now();
+        client.write_all(b"x").await.unwrap();
+        assert!(
+            client.s.stream.write_buffer().len() >= 64,
+            "iat-mode=0 disables delays, not packet-length padding"
+        );
+        client.flush().await.unwrap();
+        let mut reply = [0u8; 1];
+        server.read_exact(&mut reply).await.unwrap();
+        assert_eq!(&reply, b"x");
+        assert_eq!(Instant::now(), before);
+    }
+
+    #[tokio::test]
+    async fn wire_padding_does_not_overflow_a_full_payload_frame() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut client, mut server) = stream_pair(IAT::Enabled).await;
+        client.s.length_dist = fixed_length_distribution();
+        let payload = vec![7u8; framing::MAX_MESSAGE_PAYLOAD_LENGTH];
+        client.write_all(&payload).await.unwrap();
+        client.flush().await.unwrap();
+        let mut reply = vec![0u8; payload.len()];
+        server.read_exact(&mut reply).await.unwrap();
+        assert_eq!(reply, payload);
+    }
+
     #[test]
     fn iat_from_str_valid() {
         assert_eq!(IAT::from_str("0").unwrap(), IAT::Off);
@@ -653,168 +686,36 @@ mod tests {
         assert_eq!(delivered, message, "payload corrupted across reads");
     }
 
-    // ── pad_burst tests ─────────────────────────────────────────────────
-
-    /// pad_burst should pad a buffer so the last segment lands on the
-    /// target length. Without pad_burst the raw marshalled payload is
-    /// shorter.
-    ///
-    /// Negative control: if pad_burst is a no-op, the buffer length will
-    /// NOT increase, and this test fails.
-    #[test]
-    fn pad_burst_extends_to_target() {
-        let mut buf = BytesMut::new();
-        let payload = framing::Messages::Payload(b"hello".to_vec());
-        payload.marshall(&mut buf).unwrap();
-        let before_len = buf.len();
-
-        // Pick a target that requires meaningful padding.
-        let target = framing::MAX_SEGMENT_LENGTH / 2;
-        O4Stream::<tokio::io::DuplexStream>::pad_burst(&mut buf, target).unwrap();
-        let after_len = buf.len();
-
-        // The buffer must have grown.
-        assert!(
-            after_len > before_len,
-            "pad_burst did not add padding: before={before_len}, after={after_len}"
-        );
-
-        // The last segment's size should match the target (mod MAX_SEGMENT_LENGTH).
-        let tail = after_len % framing::MAX_SEGMENT_LENGTH;
-        assert_eq!(
-            tail, target,
-            "pad_burst did not hit target: tail={tail}, target={target}"
-        );
-    }
-
-    /// Without pad_burst, a small payload occupies far fewer bytes than
-    /// a half-segment target. This test proves the negative control: the
-    /// assertion on tail == target would fail if pad_burst were skipped.
-    #[test]
-    fn pad_burst_negative_control_fails_without_padding() {
-        let mut buf = BytesMut::new();
-        let payload = framing::Messages::Payload(b"hello".to_vec());
-        payload.marshall(&mut buf).unwrap();
-
-        let target = framing::MAX_SEGMENT_LENGTH / 2;
-        let tail = buf.len() % framing::MAX_SEGMENT_LENGTH;
-        // Without pad_burst the tail does NOT match the target.
-        assert_ne!(
-            tail, target,
-            "negative control broken: raw payload already at target length"
-        );
-    }
-
-    /// pad_burst with target == 0 and a buffer that's already segment-
-    /// aligned should be a no-op.
-    #[test]
-    fn pad_burst_zero_target_on_aligned_buffer() {
-        let mut buf = BytesMut::new();
-        // Fill exactly one full segment worth of data.
-        buf.extend_from_slice(&vec![0u8; framing::MAX_SEGMENT_LENGTH]);
-        let before = buf.len();
-        O4Stream::<tokio::io::DuplexStream>::pad_burst(&mut buf, 0).unwrap();
-        assert_eq!(
-            buf.len(),
-            before,
-            "pad_burst(0) on aligned buffer should be no-op"
-        );
-    }
-
-    /// Exhaustive check (§F: enumerate, don't sample) that `pad_burst`
-    /// (a) never returns an error and (b) always lands the trailing wire
-    /// segment exactly on `target`, for *every* `target` in
-    /// `0..MAX_SEGMENT_LENGTH` and for representative starting tails —
-    /// including the corners that drove issue #74:
-    ///   * `tail == 0`, `target` just below `MAX_SEGMENT_LENGTH` (large
-    ///     pad_len, would have produced an over-sized single frame in the
-    ///     old implementation),
-    ///   * `tail` non-zero with `target == tail + small`, exercising the
-    ///     `pad_len < MESSAGE_OVERHEAD` wrap path,
-    ///   * `tail == MAX_SEGMENT_LENGTH - 1`, the boundary just before a
-    ///     full-segment wrap.
-    ///
-    /// The previous Etap-2 tests only sampled three target lengths, which
-    /// is why the out-of-range frame bug slipped through.
-    #[test]
-    fn pad_burst_hits_target_for_all_lengths() {
+    #[tokio::test]
+    async fn wire_padding_matches_reference_lengths_and_authenticates() {
+        use tokio_util::codec::Decoder;
         const SEG: usize = framing::MAX_SEGMENT_LENGTH;
-        // A representative cross-section of starting tail values: empty,
-        // tiny, just-past-overhead, mid, near-max-single-frame, just-below-segment.
-        let tails = [0usize, 1, 3, 100, 1426, SEG - 1];
-
-        for &tail in &tails {
-            for target in 0..SEG {
-                let mut buf = BytesMut::from(&vec![0u8; tail][..]);
-                O4Stream::<tokio::io::DuplexStream>::pad_burst(&mut buf, target).unwrap_or_else(
-                    |e| panic!("pad_burst failed for tail={tail}, target={target}: {e}"),
-                );
-
-                let final_tail = buf.len() % SEG;
-                assert_eq!(
-                    final_tail,
-                    target,
-                    "pad_burst missed target: tail={tail}, target={target}, \
-                     buf_len={}, final_tail={final_tail}",
-                    buf.len()
-                );
-            }
-        }
-    }
-
-    /// Round-trip (§F4): every padding frame emitted by `pad_burst` must
-    /// parse back through the message decoder. This guards against a
-    /// regression where `pad_burst` writes bytes that satisfy the local
-    /// `build_and_marshall` check but the parser cannot read back. We
-    /// drive a representative set of (tail, target) corners through the
-    /// pre-encryption parser (`framing::Messages::try_parse`), starting
-    /// from an empty buffer (so the bytes left in `buf` after `pad_burst`
-    /// are exclusively padding frames).
-    #[test]
-    fn pad_burst_padding_frames_round_trip_through_decoder() {
-        const SEG: usize = framing::MAX_SEGMENT_LENGTH;
-        // Pairs exercising: small pad, single-segment wrap, two-segment span,
-        // and the previous bug's hot zone (large target on empty tail).
-        let cases: &[(usize, usize)] = &[
-            (0, 100),
-            (0, 1430), // would have tripped the old single-frame path
-            (0, SEG - 1),
-            (1, 2),    // pad_len < MESSAGE_OVERHEAD → wraps into next seg
-            (100, 50), // target < tail → wraps
-            (1426, 1447),
-        ];
-
-        for &(tail, target) in cases {
-            let mut buf = BytesMut::from(&vec![0u8; tail][..]);
-            O4Stream::<tokio::io::DuplexStream>::pad_burst(&mut buf, target).unwrap();
-
-            // Skip the tail bytes — those are raw fill, not encoded frames.
-            // The padding frames live in the suffix `buf[tail..]`.
-            let mut cursor = BytesMut::from(&buf[tail..]);
-            let mut parsed_total = 0usize;
-            while !cursor.is_empty() {
-                let before = cursor.len();
-                let msg = framing::Messages::try_parse(&mut cursor).unwrap_or_else(|e| {
-                    panic!(
-                        "padding-frame parse failed at offset {parsed_total} \
-                         (tail={tail}, target={target}, remaining={before}): {e}"
-                    )
-                });
-                // pad_burst emits `Payload`-typed frames with empty data,
-                // which the parser canonicalises to `Padding(n)` (see
-                // `Messages::try_parse`: type == Payload && length == 0
-                // → Padding(pad_len)).
+        for tail in [0, 1, HEADER_LENGTH, 100, SEG - 1] {
+            for target in 0..=SEG {
+                let (socket, _peer) = tokio::io::duplex(1);
+                let km = [0x42; framing::KEY_MATERIAL_LENGTH];
+                let mut framed = Framed::new(socket, framing::Obfs4Codec::new(km, km));
+                O4Stream::pad_burst(&mut framed, tail, target).unwrap();
+                let mut wire = framed.write_buffer().clone();
+                let pad = if target >= tail {
+                    target - tail
+                } else {
+                    SEG - tail + target
+                };
+                // Independent oracle: Go obfs4Conn.padBurst includes encrypted-frame headers.
+                let expected = match pad {
+                    0 => 0,
+                    1..=HEADER_LENGTH => SEG + HEADER_LENGTH + pad,
+                    _ => pad,
+                };
+                assert_eq!(wire.len(), expected, "tail={tail}, target={target}");
+                let mut decoder = framing::Obfs4Codec::new(km, km);
+                assert_eq!(decoder.decode(&mut wire).unwrap(), None);
                 assert!(
-                    matches!(msg, framing::Messages::Padding(_)),
-                    "unexpected parsed message variant for a padding frame: {msg:?}"
+                    wire.is_empty(),
+                    "all padding frames must authenticate and be consumed"
                 );
-                parsed_total += before - cursor.len();
             }
-            assert_eq!(
-                parsed_total,
-                buf.len() - tail,
-                "padding frames consumed != bytes pad_burst wrote (tail={tail}, target={target})"
-            );
         }
     }
 

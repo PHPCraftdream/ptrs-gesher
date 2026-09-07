@@ -127,112 +127,115 @@ impl Decoder for EncryptingCodec {
         &mut self,
         src: &mut BytesMut,
     ) -> std::result::Result<Option<Self::Item>, Self::Error> {
-        trace!(
-            "decoding src:{}B next_length={}",
-            src.remaining(),
-            self.decoder.next_length,
-        );
-        // `next_length == 0` is the marker for "no frame length parsed yet";
-        // a real frame always has length >= MIN_FRAME_LENGTH > 0, so this is
-        // not ambiguous with a valid in-progress frame.
-        if self.decoder.next_length == 0 {
-            // Attempt to pull out the next frame length
-            if LENGTH_LENGTH > src.remaining() {
+        // obfs4 spec §5: ignored packets must not hide the next buffered frame.
+        // https://github.com/Yawning/obfs4/blob/master/doc/obfs4-spec.txt
+        loop {
+            trace!(
+                "decoding src:{}B next_length={}",
+                src.remaining(),
+                self.decoder.next_length,
+            );
+            // `next_length == 0` is the marker for "no frame length parsed yet";
+            // a real frame always has length >= MIN_FRAME_LENGTH > 0, so this is
+            // not ambiguous with a valid in-progress frame.
+            if self.decoder.next_length == 0 {
+                // Attempt to pull out the next frame length
+                if LENGTH_LENGTH > src.remaining() {
+                    return Ok(None);
+                }
+
+                // derive the nonce that the peer would have used
+                self.decoder.next_nonce = self.decoder.nonce.next()?;
+
+                let mut length = src.get_u16();
+
+                // De-obfuscate the length field
+                let length_mask = self.decoder.drbg.length_mask();
+                trace!(
+                    "decoding {length:04x}^{length_mask:04x} {:04x}B",
+                    length ^ length_mask
+                );
+                length ^= length_mask;
+                if MAX_FRAME_LENGTH < length as usize || MIN_FRAME_LENGTH > length as usize {
+                    // The obfs4 data channel is AEAD-protected (XSalsa20-Poly1305),
+                    // so the Albrecht/Paterson/Watson SSH-CBC plaintext-recovery
+                    // attack and the Bider countermeasure do not apply. An
+                    // out-of-range length here can only mean a corrupted, tampered,
+                    // or desynchronised stream. We must reject immediately: the
+                    // nonce counter has already been consumed for this frame, so
+                    // any attempt to keep reading would desynchronise the AEAD
+                    // nonces for the remainder of the session.
+                    error!("invalid frame length after demask: {length}");
+                    return Err(FrameError::InvalidFrame);
+                }
+
+                self.decoder.next_length = length;
+            }
+
+            let next_len = self.decoder.next_length as usize;
+
+            if next_len > src.len() {
+                // The full frame has not yet arrived. Reserve space and ask the
+                // caller for more bytes.
+                src.reserve(next_len - src.len());
+
+                trace!(
+                    "next_len > src.len --> reading more {}",
+                    self.decoder.next_length,
+                );
+
                 return Ok(None);
             }
 
-            // derive the nonce that the peer would have used
-            self.decoder.next_nonce = self.decoder.nonce.next()?;
+            // Copy exactly this frame's bytes into the reusable working buffer and
+            // unseal it in place. The NaCl secretbox layout is `[tag(16) ||
+            // ciphertext]`, so the Poly1305 tag is the 16-byte prefix and the
+            // sealed payload is everything after it. `next_len >= MIN_FRAME_LENGTH
+            // == TAG_SIZE` is guaranteed by the length-range check above, so the
+            // `[TAG_SIZE..]` slice below is always in bounds.
+            let dec = &mut self.decoder;
+            dec.scratch.clear();
+            dec.scratch.extend_from_slice(&src[..next_len]);
 
-            let mut length = src.get_u16();
+            let nonce = GenericArray::from_slice(&dec.next_nonce); // unique per message
+            let tag = crypto_secretbox::Tag::clone_from_slice(&dec.scratch[..TAG_SIZE]);
 
-            // De-obfuscate the length field
-            let length_mask = self.decoder.drbg.length_mask();
-            trace!(
-                "decoding {length:04x}^{length_mask:04x} {:04x}B",
-                length ^ length_mask
-            );
-            length ^= length_mask;
-            if MAX_FRAME_LENGTH < length as usize || MIN_FRAME_LENGTH > length as usize {
-                // The obfs4 data channel is AEAD-protected (XSalsa20-Poly1305),
-                // so the Albrecht/Paterson/Watson SSH-CBC plaintext-recovery
-                // attack and the Bider countermeasure do not apply. An
-                // out-of-range length here can only mean a corrupted, tampered,
-                // or desynchronised stream. We must reject immediately: the
-                // nonce counter has already been consumed for this frame, so
-                // any attempt to keep reading would desynchronise the AEAD
-                // nonces for the remainder of the session.
-                error!("invalid frame length after demask: {length}");
-                return Err(FrameError::InvalidFrame);
+            // Authenticate + decrypt in place. A tamper anywhere in the frame
+            // (header length is already validated; here it is the ciphertext or
+            // tag) makes the constant-time Poly1305 comparison fail and we return
+            // the crypto error without consuming `src`, exactly as before. We MUST
+            // NOT advance the nonce/`next_length` further on failure — the session
+            // is fatal at that point.
+            if let Err(e) =
+                dec.cipher
+                    .decrypt_in_place_detached(nonce, b"", &mut dec.scratch[TAG_SIZE..], &tag)
+            {
+                trace!("failed to decrypt result: {e}");
+                return Err(e.into());
             }
 
-            self.decoder.next_length = length;
-        }
+            // Drop the tag prefix so the buffer now begins at the recovered
+            // plaintext; `scratch[TAG_SIZE..next_len]` is the message.
+            dec.scratch.advance(TAG_SIZE);
+            if dec.scratch.remaining() < MESSAGE_OVERHEAD {
+                return Err(FrameError::InvalidMessage);
+            }
 
-        let next_len = self.decoder.next_length as usize;
+            // Clean up and prepare for the next frame
+            //
+            // we read a whole frame, we no longer know the size of the next pkt
+            dec.next_length = 0;
+            src.advance(next_len);
 
-        if next_len > src.len() {
-            // The full frame has not yet arrived. Reserve space and ask the
-            // caller for more bytes.
-            src.reserve(next_len - src.len());
-
-            trace!(
-                "next_len > src.len --> reading more {}",
-                self.decoder.next_length,
-            );
-
-            return Ok(None);
-        }
-
-        // Copy exactly this frame's bytes into the reusable working buffer and
-        // unseal it in place. The NaCl secretbox layout is `[tag(16) ||
-        // ciphertext]`, so the Poly1305 tag is the 16-byte prefix and the
-        // sealed payload is everything after it. `next_len >= MIN_FRAME_LENGTH
-        // == TAG_SIZE` is guaranteed by the length-range check above, so the
-        // `[TAG_SIZE..]` slice below is always in bounds.
-        let dec = &mut self.decoder;
-        dec.scratch.clear();
-        dec.scratch.extend_from_slice(&src[..next_len]);
-
-        let nonce = GenericArray::from_slice(&dec.next_nonce); // unique per message
-        let tag = crypto_secretbox::Tag::clone_from_slice(&dec.scratch[..TAG_SIZE]);
-
-        // Authenticate + decrypt in place. A tamper anywhere in the frame
-        // (header length is already validated; here it is the ciphertext or
-        // tag) makes the constant-time Poly1305 comparison fail and we return
-        // the crypto error without consuming `src`, exactly as before. We MUST
-        // NOT advance the nonce/`next_length` further on failure — the session
-        // is fatal at that point.
-        if let Err(e) =
-            dec.cipher
-                .decrypt_in_place_detached(nonce, b"", &mut dec.scratch[TAG_SIZE..], &tag)
-        {
-            trace!("failed to decrypt result: {e}");
-            return Err(e.into());
-        }
-
-        // Drop the tag prefix so the buffer now begins at the recovered
-        // plaintext; `scratch[TAG_SIZE..next_len]` is the message.
-        dec.scratch.advance(TAG_SIZE);
-        if dec.scratch.remaining() < MESSAGE_OVERHEAD {
-            return Err(FrameError::InvalidMessage);
-        }
-
-        // Clean up and prepare for the next frame
-        //
-        // we read a whole frame, we no longer know the size of the next pkt
-        dec.next_length = 0;
-        src.advance(next_len);
-
-        debug!("decoding {next_len}B src:{}B", src.remaining());
-        // `try_parse` consumes the plaintext out of the working buffer; the
-        // owned `Vec` it builds for a `Payload` is the message's own storage
-        // and is unavoidable here.
-        match Messages::try_parse(&mut self.decoder.scratch) {
-            Ok(Messages::Padding(_)) => Ok(None),
-            Ok(m) => Ok(Some(m)),
-            Err(FrameError::UnknownMessageType(_)) => Ok(None),
-            Err(e) => Err(e),
+            debug!("decoding {next_len}B src:{}B", src.remaining());
+            // `try_parse` consumes the plaintext out of the working buffer; the
+            // owned `Vec` it builds for a `Payload` is the message's own storage
+            // and is unavoidable here.
+            match Messages::try_parse(&mut self.decoder.scratch) {
+                Ok(Messages::Padding(_)) | Err(FrameError::UnknownMessageType(_)) => continue,
+                Ok(m) => return Ok(Some(m)),
+                Err(e) => return Err(e),
+            }
         }
     }
 
@@ -414,6 +417,48 @@ impl NonceBox {
 mod testing {
     use super::*;
     use crate::Result;
+
+    fn padded_reply() -> BytesMut {
+        let km = [0x42; KEY_MATERIAL_LENGTH];
+        let mut encoder = EncryptingCodec::new(km, km);
+        let mut wire = BytesMut::new();
+        // obfs4 spec §5: zero-length payloads and unknown types are ignored.
+        for packet in [&[0, 0, 0, 0][..], &[0x7f, 0, 0], &[0, 0, 2, b'O', b'K']] {
+            encoder.encode(packet, &mut wire).unwrap();
+        }
+        wire
+    }
+
+    #[tokio::test]
+    async fn padding_does_not_stall_a_buffered_reply_on_an_open_socket() {
+        use futures::{FutureExt, StreamExt};
+        use tokio::io::AsyncWriteExt;
+        use tokio_util::codec::FramedRead;
+
+        let wire = padded_reply();
+        let (mut peer, transport) = tokio::io::duplex(wire.len());
+        peer.write_all(&wire).await.unwrap();
+        let km = [0x42; KEY_MATERIAL_LENGTH];
+        let mut reader = FramedRead::new(transport, EncryptingCodec::new(km, km));
+        let reply = reader.next().now_or_never();
+        assert!(
+            matches!(&reply, Some(Some(Ok(Messages::Payload(data)))) if data == b"OK"),
+            "a complete buffered reply must not wait for another network packet: {reply:?}"
+        );
+    }
+
+    #[test]
+    fn padding_at_eof_does_not_discard_a_buffered_reply() {
+        let km = [0x42; KEY_MATERIAL_LENGTH];
+        let mut decoder = EncryptingCodec::new(km, km);
+        let mut wire = padded_reply();
+        assert_eq!(
+            decoder.decode_eof(&mut wire).unwrap(),
+            Some(Messages::Payload(b"OK".to_vec()))
+        );
+        assert!(wire.is_empty());
+        assert_eq!(decoder.decode_eof(&mut wire).unwrap(), None);
+    }
 
     #[test]
     fn nonce_wrap() -> Result<()> {
