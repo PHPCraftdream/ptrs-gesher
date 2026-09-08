@@ -522,3 +522,79 @@ async fn client_handle_connection_no_success_reply_when_bridge_not_obfs4() {
 
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), bridge).await;
 }
+
+// -- TOR_PT_PROXY fail-closed (PT-spec §3.3.2) --
+//
+// `TOR_PT_PROXY` is a parent requirement: every outgoing connection must
+// be routed through that upstream proxy. The transport stack has no proxy
+// dialer (`dial_bridge` connects directly), so a configured proxy must be
+// rejected via `PROXY-ERROR` with setup aborting before any listener is
+// bound or any dial can happen -- never silently ignored (the parent
+// would believe the route is honored) and never answered with
+// `PROXY DONE` (the route would not actually be used). The exact
+// control-channel wire sequence is asserted end to end by
+// `tests/proxy_error.rs`, which spawns the real binary.
+
+/// Serialize the env-mutating tests below: `TOR_PT_*` variables are
+/// process-global state, and `ClientInfo::new()` reads them. A tokio
+/// mutex is used because the guarded region spans the awaits of
+/// `client_setup` (a std `MutexGuard` held across `.await` is a lint
+/// error and a deadlock hazard).
+static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn set_client_env(proxy: Option<&str>) {
+    std::env::set_var("TOR_PT_MANAGED_TRANSPORT_VER", "1");
+    std::env::set_var("TOR_PT_CLIENT_TRANSPORTS", "obfs4");
+    match proxy {
+        Some(uri) => std::env::set_var("TOR_PT_PROXY", uri),
+        None => std::env::remove_var("TOR_PT_PROXY"),
+    }
+}
+
+fn clear_client_env() {
+    std::env::remove_var("TOR_PT_MANAGED_TRANSPORT_VER");
+    std::env::remove_var("TOR_PT_CLIENT_TRANSPORTS");
+    std::env::remove_var("TOR_PT_PROXY");
+}
+
+#[tokio::test]
+async fn client_setup_rejects_configured_upstream_proxy() {
+    let _guard = ENV_LOCK.lock().await;
+    set_client_env(Some("socks5://user:pass@127.0.0.1:9050"));
+
+    let outcome = client_setup("unused-test-state-dir", CancellationToken::new()).await;
+
+    clear_client_env();
+
+    // The setup must fail closed: an error naming the refused proxy, so
+    // the parent process sees a failed configuration instead of a PT that
+    // quietly connects directly.
+    let err = outcome.expect_err("a configured TOR_PT_PROXY must abort client_setup");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("TOR_PT_PROXY") && msg.contains("127.0.0.1:9050"),
+        "the refusal must name the offending variable and proxy URI, got: {msg}"
+    );
+}
+
+#[tokio::test]
+async fn client_setup_without_proxy_completes_and_signals_done() {
+    let _guard = ENV_LOCK.lock().await;
+    set_client_env(None);
+
+    // Without TOR_PT_PROXY the fail-closed path must not trigger: the
+    // normal setup runs (listener bound, CMETHOD announced upstream) and
+    // signals completion over the exit channel once shut down.
+    let cancel = CancellationToken::new();
+    let outcome = client_setup("unused-test-state-dir", cancel.clone()).await;
+    let rx = outcome.expect("without TOR_PT_PROXY, client_setup must proceed normally");
+
+    cancel.cancel();
+    let finished = tokio::time::timeout(std::time::Duration::from_secs(5), rx).await;
+    assert!(
+        matches!(finished, Ok(Ok(true))),
+        "listener shutdown must resolve the exit channel with true"
+    );
+
+    clear_client_env();
+}

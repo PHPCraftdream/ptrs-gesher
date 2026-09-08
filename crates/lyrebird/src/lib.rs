@@ -241,6 +241,14 @@ async fn dial_bridge(remote_addr: SocketAddr) -> std::io::Result<TcpStream> {
 /// `TOR_PT_*` environment variables set by the parent process (arti /
 /// tor) and speaks the PT-managed-transport protocol on stdin/stdout.
 ///
+/// # Upstream proxies
+///
+/// Client setup is *fail-closed* with respect to `TOR_PT_PROXY`
+/// (PT-spec §3.3.2): no upstream proxy dialer is implemented, so a
+/// configured upstream proxy is answered with `PROXY-ERROR` on the
+/// control channel and setup aborts before any transport starts. The
+/// parent is never told the proxy is in use when it is not.
+///
 /// # Cancel safety
 ///
 /// This function is **not cancel-safe**. It manages long-lived server
@@ -394,17 +402,49 @@ async fn client_setup(
 ) -> Result<oneshot::Receiver<bool>> {
     let obfs4_name = Obfs4PT::name();
     let webtunnel_name = webtunnel::WEBTUNNEL_NAME.to_string();
-    let client_pt_info = ptrs::ClientInfo::new()?;
-    // TOR_PT_PROXY is optional. The downstream code never reads this
-    // value (see `client_handle_connection`'s `_proxy_uri`), so we
-    // substitute a placeholder URL when tor did not supply one.
-    let proxy_uri = client_pt_info
-        .uri
-        .unwrap_or_else(|| url::Url::parse("data:,").expect("placeholder url"));
-    let (tx, rx) = oneshot::channel::<bool>();
 
-    // PT spec §3.3.3: announce our protocol version to the parent.
+    // PT spec §3.3.1: announce our protocol version to the parent before
+    // anything else the parent parses on the control channel.
     pt_proto::print_version();
+
+    // PT-spec §3.3.2, fail-closed: when the parent sets TOR_PT_PROXY, ALL
+    // outgoing traffic MUST be routed through that upstream proxy, and the
+    // PT must answer with either `PROXY DONE` (proxy supported and
+    // actually in use) or `PROXY-ERROR` and terminate — before any
+    // transport is initialized. There is no upstream proxy dialer in this
+    // codebase: `dial_bridge` always opens a *direct* TCP connection, and
+    // the requested URI used to be dropped on the floor (`_proxy_uri`).
+    // Proceeding silently would route traffic around the configured proxy
+    // while the parent believes its routing requirement is honored, and
+    // answering `PROXY DONE` would promise a route the code never uses.
+    //
+    // The gate therefore tests the raw variable BEFORE the core `TOR_PT_*`
+    // reader: ANY set (non-empty) value is refused outright — even a URI
+    // the reader would reject must be answered on the control channel with
+    // `PROXY-ERROR`, not with the reader's bare exit. An empty value means
+    // "no upstream proxy requested", matching the reference PT
+    // implementations. Either way the parent sees the transport fail to
+    // configure instead of believing its proxy is in use.
+    let proxy_requested = std::env::var_os(ptrs::constants::PROXY)
+        .map(|value| value.to_string_lossy().into_owned())
+        .filter(|value| !value.is_empty());
+    if let Some(proxy_uri) = proxy_requested {
+        let reason = format!(
+            "upstream proxy dialing is not supported by this transport; refusing to connect directly instead of via {proxy_uri}"
+        );
+        pt_proto::print_proxy_error(&reason);
+        return Err(anyhow!(
+            "TOR_PT_PROXY={proxy_uri} is set but upstream proxy dialing is not implemented; refusing to bypass the configured proxy (PT-spec fail-closed)"
+        ));
+    }
+
+    // TOR_PT_PROXY is guaranteed unset or empty from here on (fail-closed
+    // check above). The per-connection `proxy_uri` plumbing stays inert;
+    // it is kept as the seam a future upstream proxy-dialer would attach
+    // to.
+    let (tx, rx) = oneshot::channel::<bool>();
+    let client_pt_info = ptrs::ClientInfo::new()?;
+    let proxy_uri = url::Url::parse("data:,").expect("placeholder url");
 
     let mut listeners: Vec<
         std::pin::Pin<Box<dyn std::future::Future<Output = Result<()>> + Send>>,
