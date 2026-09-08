@@ -1,4 +1,7 @@
+#[cfg(feature = "experimental-server")]
 use super::*;
+#[cfg(feature = "experimental-server")]
+use ptrs::{ServerBuilder as _, ServerTransport};
 
 // ================================================================ //
 //                            Server                                //
@@ -93,7 +96,7 @@ where
                 break
             }
             res = listener.accept() => {
-                let (mut conn, client_addr) = match res {
+                let (conn, client_addr) = match res {
                     Err(e) => {
                        error!("{method_name} closing listener - failed to accept tcp connection {e}");
                        break;

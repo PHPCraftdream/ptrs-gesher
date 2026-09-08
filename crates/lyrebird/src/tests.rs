@@ -158,9 +158,8 @@ fn arg_string_passwd_is_nul_only() {
 // `build`), then run the real obfs4 handshake over the duplex against a
 // matching obfs4 `Server`.
 
-use ptrs::ClientBuilder as _;
 use tokio::io::DuplexStream;
-use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite};
 
 /// Build an obfs4 client transport from a bridge-line arg string via the
 /// same `ptrs` builder path lyrebird uses for a real SOCKS connection:

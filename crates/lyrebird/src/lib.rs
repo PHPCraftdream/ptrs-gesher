@@ -80,22 +80,14 @@
 //   - replace `tokio::io::copy_bidirectional` with an interactive copy
 //     that flushes only when the reader stalls.
 
-#![allow(unused, dead_code)]
 #![deny(missing_docs)]
 
-use obfs4::{ClientBuilder, Obfs4PT};
-use ptrs::{error, info, warn};
-use ptrs::{
-    ClientBuilder as _, ClientTransport, PluggableTransport, ServerBuilder, ServerTransport,
-};
+use obfs4::Obfs4PT;
+use ptrs::{error, info, warn, PluggableTransport};
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use fast_socks5::{
-    server::{DenyAuthentication, SimpleUserPassword},
-    util::target_addr::TargetAddr,
-    AuthenticationMethod,
-};
+use fast_socks5::util::target_addr::TargetAddr;
 use safelog::sensitive;
 #[cfg(feature = "experimental-server")]
 use tokio::sync::oneshot;
@@ -109,7 +101,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::Level;
 use tracing_subscriber::{filter::LevelFilter, prelude::*};
 
-use std::{env, net::SocketAddr, pin::Pin, str::FromStr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, pin::Pin, str::FromStr, sync::Arc, time::Duration};
 
 /// Maximum number of concurrently handled client connections. This is also
 /// the size of the lifecycle permit pool: every in-flight connection task
@@ -162,9 +154,9 @@ fn init_logging_recvr(
     statedir: &str,
 ) -> Result<()> {
     if should_scrub {
-        safelog::enforce_safe_logging();
+        let _ = safelog::enforce_safe_logging();
     } else {
-        safelog::disable_safe_logging();
+        let _ = safelog::disable_safe_logging();
     }
 
     // The PT protocol owns stdout for the parent ↔ PT control channel.
@@ -609,7 +601,7 @@ async fn shutdown_signal() -> Shutdown {
 //                            Client                                //
 // ================================================================ //
 
-async fn client_setup(statedir: &str, ctx: RunTasks) -> Result<JoinSet<Result<()>>> {
+async fn client_setup(_statedir: &str, ctx: RunTasks) -> Result<JoinSet<Result<()>>> {
     let obfs4_name = Obfs4PT::name();
     let webtunnel_name = webtunnel::WEBTUNNEL_NAME.to_string();
 
@@ -903,106 +895,6 @@ where
         }
         Ok(c) => Ok(c),
     }
-}
-
-/// This function assumes that the provided connection / socket manages reconstruction
-/// and reliability before passing to this layer.
-///
-/// proxy_uri (currently unused) is meant to indicate that the outgoing connection
-/// should be made through _another_ proxy based on the proxy uri. This is relatively
-/// easy in golang, but I am not sure how easy it will be here. I believe this is
-/// a rather uncommon option so it is left unimplemented for now.
-async fn client_handle_connection_clientpt<In, C>(
-    conn: In,
-    pt_client: C,
-    _proxy_uri: url::Url,
-    client_addr: SocketAddr,
-) -> Result<()>
-where
-    // the provided T must be usable as a connection in an async context
-    In: AsyncRead + AsyncWrite + Send + Unpin,
-    // the provided B must implement the Client Builder interface for T
-    C: ptrs::ClientTransport<TcpStream, std::io::Error>,
-{
-    let mut config: fast_socks5::server::Config<SimpleUserPassword> =
-        fast_socks5::server::Config::default();
-    // config.set_skip_auth(true);
-    let mut socks5_conn = fast_socks5::server::Socks5Socket::new(conn, Arc::new(config));
-
-    // let mut socks5_conn = socks5_conn.upgrade_to_socks5().await?;
-    let target_addr = socks5_conn
-        .target_addr()
-        .ok_or(BridgeLineParseError)
-        .context("missing remote address in request")?;
-
-    // TODO: get args from the socks request username:Password if it exists.
-    // This seems non-trivial to match against the golang obfs4 implementation.
-    // Maybe implement my own thing that implements the `Authenticate` trait?
-    // Maybe work with the tor_socksproto package?
-    //
-    // Pluggable transports use the username/password field to pass
-    // per-connection arguments.  The fields contain ASCII strings that
-    // are combined and then parsed into key/value pairs.
-    // argStr := string(uname)
-    // if !(plen == 1 && passwd[0] == 0x00) {
-    let args: Option<ptrs::args::Args> = match socks5_conn.auth() {
-        AuthenticationMethod::Password { username, password } => {
-            if username.is_empty() {
-                socks5_conn.flush().await?;
-                socks5_conn.shutdown().await?;
-                return Err(anyhow!("username with 0 length"));
-            }
-            if password.is_empty() {
-                socks5_conn.flush().await?;
-                socks5_conn.shutdown().await?;
-                return Err(anyhow!("password with 0 length"));
-            }
-
-            let mut arg_string = username.clone();
-            // tor will set the password to 'NUL', if the field doesn't contain any
-            // actual argument data.
-            if !(password.len() == 1 && password.as_bytes().first().copied() == Some(0x00)) {
-                arg_string.push_str(password);
-            }
-
-            match ptrs::args::Args::from_str(&arg_string) {
-                Ok(a) => Some(a),
-                Err(e) => {
-                    return Err(anyhow!(
-                        "failed to parse provided args \"{arg_string}\": {e}"
-                    ))
-                }
-            }
-        }
-        AuthenticationMethod::None => None,
-        _ => return Err(anyhow!("negotiated unsupported authentication method")),
-    };
-
-    let remote_addr = resolve_target_addr(target_addr).context("no remote address")?;
-
-    let remote = dial_bridge(remote_addr);
-
-    // build the pluggable transport client and then dial, completing the
-    // connection and handshake when the `wrap(..)` is await-ed.
-    let mut pt_conn = match pt_client.establish(Box::pin(remote)).await {
-        Ok(c) => c,
-        Err(e) => {
-            warn!(
-                address = sensitive(client_addr).to_string(),
-                "handshake failed: {e:#?}"
-            );
-            return Err(obfs4::Error::from(e.to_string())).context("handshake failed");
-        }
-    };
-
-    if let Err(e) = copy_bidirectional(&mut socks5_conn.into_inner(), &mut pt_conn).await {
-        warn!(
-            addres = sensitive(client_addr).to_string(),
-            "tunnel closed with error: {e:#?}"
-        );
-    }
-
-    Ok(())
 }
 
 mod server;
