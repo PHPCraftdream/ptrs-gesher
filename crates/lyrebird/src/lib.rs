@@ -264,9 +264,10 @@ async fn dial_bridge(remote_addr: SocketAddr) -> std::io::Result<TcpStream> {
 ///
 /// * terminate (`SIGTERM` / Ctrl+Break) or parent EOF
 ///   (`TOR_PT_EXIT_ON_STDIN_CLOSE=1`): in-flight connections are
-///   cancelled immediately and awaited, bounded by [`FORCE_GRACE`].
+///   cancelled immediately and awaited, bounded by a short internal grace
+///   period.
 /// * interrupt (`SIGINT` / Ctrl+C): accepting stops first, then in-flight
-///   connections get [`DRAIN_GRACE`] to finish on their own; whatever is
+///   connections get a grace period to finish on their own; whatever is
 ///   still alive after the budget is cancelled and awaited. A second
 ///   interrupt or a parent EOF during the drain escalates to the
 ///   immediate teardown.
