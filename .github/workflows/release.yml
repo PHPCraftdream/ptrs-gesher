@@ -20,8 +20,29 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Release gate added after 0.5.3, where the semver comparison was done by
+  # hand. Runs only at release cadence (tag push / manual dispatch), since
+  # rustdoc-JSON builds of every crate are too expensive for every push.
+  semver-checks:
+    name: Semver checks
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install cargo-semver-checks
+        uses: taiki-e/install-action@cargo-semver-checks
+      # Compares each workspace crate against its currently published version
+      # on crates.io and fails the release if the public API breaks without
+      # the required version bump (major for 1.x, minor for 0.x crates).
+      - name: Check public API against the last published release
+        run: cargo semver-checks check-release
+
   publish:
     name: Publish to crates.io
+    needs: semver-checks
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -60,6 +81,13 @@ jobs:
 
       - name: Run tests
         run: cargo test --workspace --locked --no-fail-fast
+
+      # Release-profile tests, also only at release cadence: proptest-heavy
+      # suites run their recommended 10k iterations under --release (see
+      # CONTRIBUTING.md), and the thin-LTO/codegen-units=1 release profile is
+      # too slow to pay for on every push. Until 0.5.3 this was manual, too.
+      - name: Run tests (release profile)
+        run: cargo test --workspace --release --locked --no-fail-fast
 
       - name: Make publish script executable
         run: chmod +x .github/scripts/publish.sh
