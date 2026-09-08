@@ -1,7 +1,7 @@
 use crate::{
     constants::*,
     handshake::Obfs4NtorPublicKey,
-    proto::{Obfs4Stream, IAT},
+    proto::{MaybeTimeout, Obfs4Stream, IAT},
     Error, OBFS4_NAME,
 };
 use ptrs::{args::Args, FutureResult as F};
@@ -95,7 +95,8 @@ where
         Ok(self)
     }
 
-    fn timeout(&mut self, _timeout: Option<Duration>) -> Result<&mut Self, Self::Error> {
+    fn timeout(&mut self, timeout: Option<Duration>) -> Result<&mut Self, Self::Error> {
+        self.handshake_timeout = timeout.map_or(MaybeTimeout::Default_, MaybeTimeout::Length);
         Ok(self)
     }
 
@@ -190,7 +191,8 @@ where
 
     /// The maximum time we should wait for a pluggable transport binary to
     /// report successful initialization. If `None`, a default value is used.
-    fn timeout(&mut self, _timeout: Option<Duration>) -> Result<&mut Self, Self::Error> {
+    fn timeout(&mut self, timeout: Option<Duration>) -> Result<&mut Self, Self::Error> {
+        self.handshake_timeout = timeout.map_or(MaybeTimeout::Default_, MaybeTimeout::Length);
         Ok(self)
     }
 

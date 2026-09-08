@@ -7,8 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-09-08
+
 ### Fixed
 
+- **obfs4**: preserve absolute handshake deadlines across builder creation and
+  delayed use; apply the establishment budget to TCP dialing too. Transport-trait
+  timeout setters now take effect, and server defaults use the server timeout.
+- **obfs4**: retain payload coalesced with the server handshake, propagate invalid
+  buffered-frame errors, and apply later PRNG seeds to both shaping distributions.
+  Reading into an empty buffer returns immediately.
+- **webtunnel**: bound DNS, TCP, TLS, and HTTP Upgrade by one configurable timeout
+  (30 seconds by default). Expiration closes the owned connection.
+- **webtunnel**: normalize IPv6 socket/SNI addresses, preserve nondefault ports in
+  HTTP Host, reject unsupported URL schemes and invalid server names, and honor
+  the configured DNS policy for hostname address overrides.
+- **webtunnel**: enable trusted roots for standalone DNS-over-HTTPS resolution;
+  trust configuration no longer depends on another crate enabling the feature.
+- **lyrebird**: cancellation interrupts admission when the connection limit is full.
 - **obfs4**: continue decoding buffered frames after padding or unknown packets.
   Previously request/response streams could stall waiting for bytes already in
   the buffer, and EOF could discard a buffered reply. Regression tests cover an
@@ -17,6 +33,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   separate bounded frames, and use the reference implementation's 100-microsecond
   IAT units. Padding a full data frame previously exceeded the frame limit and
   closed the transport. Wire-level tests cover both modes and padding boundaries.
+
+### Changed
+
+- Refresh compatible dependencies while retaining Rust 1.89 support. The lockfile
+  includes patched `h2` and non-yanked `chacha20` releases.
+- Require this release of internal dependencies so consumers receive the fixes.
+- Move stream and WebTunnel tests into separate modules; Rust files remain below
+  1000 lines. Correct the description of the reference obfs4 sampling source.
 
 ## [0.5.2] - 2026-07-24
 

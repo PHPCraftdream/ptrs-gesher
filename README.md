@@ -50,16 +50,16 @@ needed when moving from `jmwample/ptrs` to `ptrs-gesher`. Adjust only the
 
 ```toml
 [dependencies]
-ptrs    = { package = "ptrs-gesher-core",   version = "0.5" }
-obfs4   = { package = "ptrs-gesher-obfs4",  version = "0.5" }
-webtunnel = "ptrs-gesher-webtunnel"  # new, no upstream equivalent
+ptrs    = { package = "ptrs-gesher-core",   version = "0.5.3" }
+obfs4   = { package = "ptrs-gesher-obfs4",  version = "0.5.3" }
+webtunnel = { package = "ptrs-gesher-webtunnel", version = "0.5.3" }
 ```
 
 ## Differences from upstream
 
 | Change | Why |
 |---|---|
-| New crate `ptrs-gesher-webtunnel` | Adds WebTunnel transport — TLS + HTTP/1.1 Upgrade, no WebSocket framing. Bridge URL hostname resolves via DNS-over-HTTPS (`doh-mode=fallback` default; `strict` / `off` available; `addr=` override bypasses both). |
+| New crate `ptrs-gesher-webtunnel` | Adds WebTunnel transport — TLS + HTTP/1.1 Upgrade, no WebSocket framing. Hostnames resolve via DNS-over-HTTPS (`doh-mode=fallback` default; `strict` / `off` available); literal IP addresses bypass DNS. |
 | `lyrebird` refactored: `lib.rs` with `pub async fn run()` + thin `main.rs` | Lets parent applications embed the PT loop in-process (busybox-style PT dispatch). |
 | `lyrebird::client_setup` dispatches by transport name (`obfs4` / `webtunnel`) | Single PT-manager process serves multiple transports. |
 | Dropped: `o5`, `o7`, lyrebird `fwd/` forward-proxy binary | Upstream-WIP / scope unrelated to bridge transport. |
@@ -68,10 +68,10 @@ webtunnel = "ptrs-gesher-webtunnel"  # new, no upstream equivalent
 ## Status
 
 - Workspace builds on stable Rust ≥ 1.89.
-- 279 tests passing (E2E, property-based, fuzz-like × 10k iterations).
-- All crates are versioned in lockstep; 0.5.0 is the current release line (0.4.0 is the prior line, kept available). The earlier 0.1.x and 0.2.0 versions are yanked (`ptrs-gesher-lyrebird` 0.2.0 could not connect to bridges).
-- **Interoperability with reference `obfs4proxy` (Go) and the
-  WebTunnel reference server has not been smoke-tested at this point.**
+- Unit, integration, property, and protocol tests run in CI.
+- All six published crates are versioned in lockstep; the workspace is at 0.5.3.
+- Real Tor HTTPS smoke tests complement the offline protocol tests. They measure
+  functional connectivity, not long-term availability under every network condition.
 
 ## Quickstart
 

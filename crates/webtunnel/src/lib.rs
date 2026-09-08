@@ -7,7 +7,7 @@
 
 use std::{
     io,
-    net::{SocketAddrV4, SocketAddrV6},
+    net::{SocketAddr, SocketAddrV4, SocketAddrV6},
     pin::Pin,
     time::Duration,
 };
@@ -23,6 +23,8 @@ pub use dns::DohMode;
 
 /// Transport name constant.
 pub const WEBTUNNEL_NAME: &str = "webtunnel";
+
+pub(crate) const DEFAULT_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -96,8 +98,7 @@ pub struct WebTunnelConfig {
     /// breaks existing webtunnel deployments. Set via the `doh-mode=`
     /// bridge-line argument or [`WebTunnelConfig::with_doh_mode`].
     ///
-    /// When `tcp_addr` (`addr=`) is set, the bridge line already carries
-    /// an IP and DoH is bypassed regardless of this field's value.
+    /// Literal IP addresses bypass DNS. Hostnames in `tcp_addr` also honor this mode.
     pub doh_mode: DohMode,
 }
 
@@ -111,6 +112,9 @@ impl WebTunnelConfig {
 
         if parsed.host_str().is_none() {
             return Err(Error::InvalidUrl("url has no host".into()));
+        }
+        if !matches!(parsed.scheme(), "http" | "https") {
+            return Err(Error::InvalidUrl("url scheme must be http or https".into()));
         }
 
         let version = args.retrieve("ver");
@@ -129,13 +133,28 @@ impl WebTunnelConfig {
             info!("utls={utls} parameter accepted but ignored (not yet implemented)");
         }
 
-        Ok(Self {
+        let config = Self {
             url: url_str,
             version,
             servername,
             tcp_addr,
             doh_mode,
-        })
+        };
+        config.validate()?;
+        Ok(config)
+    }
+
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        let url = url::Url::parse(&self.url).map_err(|e| Error::InvalidUrl(e.to_string()))?;
+        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+            return Err(Error::InvalidUrl(
+                "expected an http or https URL with a host".into(),
+            ));
+        }
+        rustls::pki_types::ServerName::try_from(self.tls_sni()?)
+            .map_err(|e| Error::InvalidUrl(format!("invalid servername: {e}")))?;
+        self.connect_host_and_port()?;
+        Ok(())
     }
 
     /// Override the DoH resolution mode (chainable).
@@ -150,6 +169,9 @@ impl WebTunnelConfig {
     /// without re-parsing.
     pub(crate) fn connect_host_and_port(&self) -> Result<(String, u16), Error> {
         if let Some(ref addr) = self.tcp_addr {
+            if let Ok(addr) = addr.parse::<SocketAddr>() {
+                return Ok((addr.ip().to_string(), addr.port()));
+            }
             // `addr=` is a raw `host:port` (typically an IP) — split it
             // for symmetry with the URL-derived path, even though the
             // host part here is almost always already an IP and DoH is
@@ -157,6 +179,9 @@ impl WebTunnelConfig {
             let (host, port) = addr.rsplit_once(':').ok_or_else(|| {
                 Error::InvalidUrl(format!("addr= missing ':' (expected host:port): {addr}"))
             })?;
+            if host.is_empty() || host.contains([':', '[', ']']) {
+                return Err(Error::InvalidUrl(format!("invalid addr= host: {host}")));
+            }
             let port: u16 = port
                 .parse()
                 .map_err(|e| Error::InvalidUrl(format!("addr= invalid port {port:?}: {e}")))?;
@@ -167,6 +192,8 @@ impl WebTunnelConfig {
         let host = parsed
             .host_str()
             .ok_or_else(|| Error::InvalidUrl("url has no host".into()))?
+            .trim_start_matches('[')
+            .trim_end_matches(']')
             .to_string();
         let port = parsed
             .port_or_known_default()
@@ -177,13 +204,20 @@ impl WebTunnelConfig {
     /// The hostname used for the TLS SNI extension and the HTTP Host header.
     fn tls_sni(&self) -> Result<String, Error> {
         if let Some(ref sni) = self.servername {
-            return Ok(sni.clone());
+            return Ok(sni
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_string());
         }
         let parsed = url::Url::parse(&self.url)
             .map_err(|e: url::ParseError| Error::InvalidUrl(e.to_string()))?;
         parsed
             .host_str()
-            .map(String::from)
+            .map(|host| {
+                host.trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .to_string()
+            })
             .ok_or_else(|| Error::InvalidUrl("url has no host".into()))
     }
 
@@ -222,9 +256,19 @@ impl WebTunnelConfig {
 // ---------------------------------------------------------------------------
 
 /// Builder for the WebTunnel client transport.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct WebTunnelBuilder {
     config: Option<WebTunnelConfig>,
+    timeout: Duration,
+}
+
+impl Default for WebTunnelBuilder {
+    fn default() -> Self {
+        Self {
+            config: None,
+            timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+        }
+    }
 }
 
 impl WebTunnelBuilder {
@@ -251,6 +295,7 @@ where
         // typed error at connect time (`establish`/`wrap`).
         WebTunnelClient {
             config: self.config.clone(),
+            timeout: self.timeout,
         }
     }
 
@@ -263,7 +308,8 @@ where
         Ok(self)
     }
 
-    fn timeout(&mut self, _timeout: Option<Duration>) -> Result<&mut Self, Self::Error> {
+    fn timeout(&mut self, timeout: Option<Duration>) -> Result<&mut Self, Self::Error> {
+        self.timeout = timeout.unwrap_or(DEFAULT_HANDSHAKE_TIMEOUT);
         Ok(self)
     }
 
@@ -287,6 +333,7 @@ where
 /// typed [`Error`] instead of panicking.
 pub struct WebTunnelClient {
     config: Option<WebTunnelConfig>,
+    timeout: Duration,
 }
 
 impl<InRW, InErr> ptrs::ClientTransport<InRW, InErr> for WebTunnelClient
@@ -307,7 +354,7 @@ where
         drop(input);
         Box::pin(async move {
             let config = self.config.ok_or(Error::MissingUrl)?;
-            handshake::connect(&config).await
+            handshake::connect_with_timeout(&config, self.timeout).await
         })
     }
 
@@ -318,7 +365,7 @@ where
         drop(io);
         Box::pin(async move {
             let config = self.config.ok_or(Error::MissingUrl)?;
-            handshake::connect(&config).await
+            handshake::connect_with_timeout(&config, self.timeout).await
         })
     }
 
@@ -327,8 +374,6 @@ where
     }
 }
 
-/// The result of a successful webtunnel handshake: a TLS stream
-/// (or plain TCP for `http://` URLs) that carries raw bytes.
 /// The result of a successful webtunnel handshake: a TLS stream
 /// (or plain TCP for `http://` URLs) that carries raw bytes.
 pub enum WebTunnelStream {
@@ -471,505 +516,4 @@ where
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use base64::Engine;
-    use ptrs::ClientBuilder;
-    use tokio::net::TcpStream;
-
-    fn make_args(pairs: &[(&str, &str)]) -> Args {
-        let mut args = Args::new();
-        for (k, v) in pairs {
-            args.add(k, v);
-        }
-        args
-    }
-
-    // -- Config parsing tests -------------------------------------------------
-
-    #[test]
-    fn webtunnel_config_from_bridge_args() {
-        let args = make_args(&[
-            ("url", "https://example.com/secretRoute"),
-            ("ver", "0.0.3"),
-            ("servername", "cdn.example.com"),
-        ]);
-        let cfg = WebTunnelConfig::from_args(&args).unwrap();
-        assert_eq!(cfg.url, "https://example.com/secretRoute");
-        assert_eq!(cfg.version.as_deref(), Some("0.0.3"));
-        assert_eq!(cfg.servername.as_deref(), Some("cdn.example.com"));
-        assert!(cfg.tcp_addr.is_none());
-    }
-
-    #[test]
-    fn config_missing_url_is_error() {
-        let args = make_args(&[("ver", "0.0.3")]);
-        let err = WebTunnelConfig::from_args(&args).unwrap_err();
-        assert!(matches!(err, Error::MissingUrl));
-    }
-
-    #[test]
-    fn config_servername_falls_back_to_url_host() {
-        let args = make_args(&[("url", "https://myhost.example.com:443/path")]);
-        let cfg = WebTunnelConfig::from_args(&args).unwrap();
-        assert_eq!(cfg.tls_sni().unwrap(), "myhost.example.com");
-    }
-
-    #[test]
-    fn config_addr_overrides_url_host_port() {
-        let args = make_args(&[
-            ("url", "https://example.com/secret"),
-            ("addr", "1.2.3.4:8443"),
-        ]);
-        let cfg = WebTunnelConfig::from_args(&args).unwrap();
-        assert_eq!(cfg.connect_host_port().unwrap(), "1.2.3.4:8443");
-    }
-
-    #[test]
-    fn config_connect_host_port_defaults_to_url() {
-        let args = make_args(&[("url", "https://example.com:443/secret")]);
-        let cfg = WebTunnelConfig::from_args(&args).unwrap();
-        assert_eq!(cfg.connect_host_port().unwrap(), "example.com:443");
-    }
-
-    #[test]
-    fn config_ignores_utls_param() {
-        let args = make_args(&[("url", "https://example.com/secret"), ("utls", "chrome")]);
-        let cfg = WebTunnelConfig::from_args(&args).unwrap();
-        // utls is not stored; config should succeed.
-        assert_eq!(cfg.url, "https://example.com/secret");
-    }
-
-    #[test]
-    fn config_http_scheme_means_no_tls() {
-        let args = make_args(&[("url", "http://example.com:80/secret")]);
-        let cfg = WebTunnelConfig::from_args(&args).unwrap();
-        assert!(!cfg.use_tls());
-    }
-
-    #[test]
-    fn config_https_scheme_means_tls() {
-        let args = make_args(&[("url", "https://example.com:443/secret")]);
-        let cfg = WebTunnelConfig::from_args(&args).unwrap();
-        assert!(cfg.use_tls());
-    }
-
-    // -- HTTP request construction tests --------------------------------------
-
-    #[test]
-    fn request_line_contains_path_from_url() {
-        let cfg =
-            WebTunnelConfig::from_args(&make_args(&[("url", "https://example.com/secretRoute")]))
-                .unwrap();
-        let req = handshake::build_upgrade_request(&cfg);
-        assert!(req.starts_with("GET /secretRoute HTTP/1.1\r\n"));
-    }
-
-    #[test]
-    fn host_header_uses_url_hostname() {
-        let cfg =
-            WebTunnelConfig::from_args(&make_args(&[("url", "https://myhost.example.com/path")]))
-                .unwrap();
-        let req = handshake::build_upgrade_request(&cfg);
-        assert!(req.contains("Host: myhost.example.com\r\n"));
-    }
-
-    #[test]
-    fn host_header_uses_servername_when_set() {
-        let cfg = WebTunnelConfig::from_args(&make_args(&[
-            ("url", "https://real.example.com/path"),
-            ("servername", "front.example.com"),
-        ]))
-        .unwrap();
-        let req = handshake::build_upgrade_request(&cfg);
-        assert!(req.contains("Host: front.example.com\r\n"));
-    }
-
-    #[test]
-    fn request_includes_websocket_headers() {
-        let cfg =
-            WebTunnelConfig::from_args(&make_args(&[("url", "https://example.com/path")])).unwrap();
-        let req = handshake::build_upgrade_request(&cfg);
-        assert!(req.contains("Upgrade: websocket\r\n"));
-        assert!(req.contains("Connection: Upgrade\r\n"));
-        assert!(req.contains("Sec-WebSocket-Version: 13\r\n"));
-    }
-
-    // -- Sec-WebSocket-Key generation tests -----------------------------------
-
-    #[test]
-    fn sec_websocket_key_is_valid_base64_of_16_bytes() {
-        let key_b64 = handshake::generate_websocket_key();
-        let engine = base64::engine::general_purpose::STANDARD;
-        let decoded = engine.decode(&key_b64).expect("key must be valid base64");
-        assert_eq!(decoded.len(), 16, "key must decode to exactly 16 bytes");
-        // 16 bytes base64-encoded → 24 chars (no padding).
-        assert_eq!(key_b64.len(), 24);
-    }
-
-    #[test]
-    fn sec_websocket_key_differs_across_calls() {
-        let k1 = handshake::generate_websocket_key();
-        let k2 = handshake::generate_websocket_key();
-        // Not guaranteed by the type system but overwhelmingly likely
-        // with 128 bits of randomness.
-        assert_ne!(k1, k2, "two generated keys should differ");
-    }
-
-    // -- HTTP response parsing tests ------------------------------------------
-
-    #[test]
-    fn parse_101_response() {
-        let response = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n";
-        let (status, _leftover) = handshake::parse_response(response).unwrap();
-        assert_eq!(status, 101);
-        assert!(status != 0);
-    }
-
-    #[test]
-    fn parse_101_with_trailing_body_bytes() {
-        let response = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n\xAB\xCD\xEF";
-        let (status, leftover) = handshake::parse_response(response).unwrap();
-        assert_eq!(status, 101);
-        assert_eq!(leftover, b"\xAB\xCD\xEF");
-    }
-
-    #[test]
-    fn parse_101_with_sec_websocket_accept() {
-        let response = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=\r\n\r\n";
-        let (status, _leftover) = handshake::parse_response(response).unwrap();
-        assert_eq!(status, 101);
-    }
-
-    #[test]
-    fn parse_non_101_rejects() {
-        let response = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
-        let err = handshake::parse_response(response).unwrap_err();
-        assert!(
-            matches!(err, Error::Non101(ref msg) if msg.contains("404")),
-            "expected Non101 error, got {err:?}"
-        );
-    }
-
-    #[test]
-    fn parse_empty_response_is_error() {
-        let response = b"";
-        let err = handshake::parse_response(response).unwrap_err();
-        assert!(matches!(err, Error::HttpParse(_)));
-    }
-
-    // -- Builder trait tests --------------------------------------------------
-
-    #[test]
-    fn builder_method_name() {
-        assert_eq!(
-            <WebTunnelBuilder as ClientBuilder<TcpStream>>::method_name(),
-            "webtunnel"
-        );
-    }
-
-    #[test]
-    fn builder_rejects_missing_url() {
-        let mut builder = WebTunnelBuilder::default();
-        let args = Args::new();
-        let result =
-            <WebTunnelBuilder as ptrs::ClientBuilder<TcpStream>>::options(&mut builder, &args);
-        assert!(result.is_err());
-    }
-
-    #[tokio::test]
-    async fn build_without_options_fails_gracefully_on_wrap() {
-        // The `ClientBuilder` trait requires an infallible `build`. Building an
-        // un-configured builder must NOT panic; the missing config has to
-        // surface as a typed error at connect time. (On the previous code
-        // path `build` called `.expect(..)` and this test would panic.)
-        let builder = WebTunnelBuilder::default();
-        let client =
-            <WebTunnelBuilder as ptrs::ClientBuilder<tokio::io::DuplexStream>>::build(&builder);
-
-        // `wrap` drops its socket argument before checking config, so the
-        // duplex stream is never driven and no network access occurs.
-        let (a, b) = tokio::io::duplex(64);
-        drop(a);
-        let result = <WebTunnelClient as ptrs::ClientTransport<
-            tokio::io::DuplexStream,
-            io::Error,
-        >>::wrap(client, b)
-        .await;
-
-        assert!(matches!(result, Err(Error::MissingUrl)));
-    }
-
-    #[test]
-    fn builder_accepts_valid_args() {
-        let mut builder = WebTunnelBuilder::default();
-        let args = make_args(&[("url", "https://example.com/secret")]);
-        <WebTunnelBuilder as ptrs::ClientBuilder<TcpStream>>::options(&mut builder, &args).unwrap();
-    }
-
-    #[test]
-    fn request_has_no_obs_fold_whitespace() {
-        let cfg =
-            WebTunnelConfig::from_args(&make_args(&[("url", "https://example.com/path")])).unwrap();
-        let req = handshake::build_upgrade_request(&cfg);
-        assert!(
-            !req.contains("\r\n "),
-            "request must not contain obs-fold (CRLF followed by leading whitespace): {req:?}"
-        );
-    }
-
-    // -- PrefixStream tests ---------------------------------------------------
-
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-    #[tokio::test]
-    async fn trailing_bytes_after_101_are_preserved() {
-        // Simulate leftover bytes fused into the HTTP read: the prefix
-        // should be the first thing returned by the wrapper.
-        let (_mock_server, mock_client) = tokio::io::duplex(64);
-        // We don't need the mock_server side for this test — the prefix
-        // is read first, before the inner stream is ever polled.
-        drop(_mock_server);
-
-        let mut wrapped = PrefixStream::new(mock_client, vec![0xAB, 0xCD, 0xEF]);
-        let mut buf = [0u8; 3];
-        wrapped.read_exact(&mut buf).await.unwrap();
-        assert_eq!(&buf, b"\xAB\xCD\xEF");
-    }
-
-    #[tokio::test]
-    async fn trailing_bytes_followed_by_live_stream_bytes() {
-        let (mut mock_server, mock_client) = tokio::io::duplex(64);
-
-        let mut wrapped = PrefixStream::new(mock_client, vec![0xAB, 0xCD, 0xEF]);
-
-        // Read the prefix first.
-        let mut buf = [0u8; 3];
-        wrapped.read_exact(&mut buf).await.unwrap();
-        assert_eq!(&buf, b"\xAB\xCD\xEF");
-
-        // Now write data to the server side — the wrapper should read it.
-        mock_server.write_all(b"\x01\x02\x03\x04").await.unwrap();
-
-        let mut buf2 = [0u8; 4];
-        wrapped.read_exact(&mut buf2).await.unwrap();
-        assert_eq!(&buf2, b"\x01\x02\x03\x04");
-    }
-
-    // -- Config validation edge cases -----------------------------------------
-
-    #[test]
-    fn config_invalid_url_format() {
-        let args = make_args(&[("url", "not a url at all")]);
-        let err = WebTunnelConfig::from_args(&args).unwrap_err();
-        assert!(matches!(err, Error::InvalidUrl(_)));
-    }
-
-    #[test]
-    fn config_url_without_path_defaults_to_slash() {
-        let args = make_args(&[("url", "https://example.com")]);
-        let cfg = WebTunnelConfig::from_args(&args).unwrap();
-        let req = handshake::build_upgrade_request(&cfg);
-        assert!(req.starts_with("GET / HTTP/1.1\r\n"));
-    }
-
-    #[test]
-    fn config_url_with_query_string() {
-        let args = make_args(&[("url", "https://example.com/path?token=abc&v=1")]);
-        let cfg = WebTunnelConfig::from_args(&args).unwrap();
-        let req = handshake::build_upgrade_request(&cfg);
-        // The GET request-target MUST include path AND query — the Go
-        // reference sends path?query.  Auth tokens / routing hints live
-        // in the query; dropping it silently breaks the handshake.
-        assert!(
-            req.starts_with("GET /path?token=abc&v=1 HTTP/1.1\r\n"),
-            "query string must appear in request-target, got: {req}"
-        );
-    }
-
-    #[test]
-    fn query_string_absent_means_plain_path() {
-        // URL without a query must produce a bare path (no trailing '?').
-        let args = make_args(&[("url", "https://example.com/secret")]);
-        let cfg = WebTunnelConfig::from_args(&args).unwrap();
-        let req = handshake::build_upgrade_request(&cfg);
-        assert!(
-            req.starts_with("GET /secret HTTP/1.1\r\n"),
-            "path-only URL must not grow a query part, got: {req}"
-        );
-    }
-
-    #[test]
-    fn query_only_no_path() {
-        // Edge case: root path with a query string.
-        let args = make_args(&[("url", "https://example.com/?k=v")]);
-        let cfg = WebTunnelConfig::from_args(&args).unwrap();
-        let req = handshake::build_upgrade_request(&cfg);
-        assert!(
-            req.starts_with("GET /?k=v HTTP/1.1\r\n"),
-            "root path with query must be preserved, got: {req}"
-        );
-    }
-
-    // -- DoH config parsing tests ----------------------------------------
-
-    #[test]
-    fn config_doh_mode_defaults_to_fallback() {
-        let args = make_args(&[("url", "https://example.com/x")]);
-        let cfg = WebTunnelConfig::from_args(&args).unwrap();
-        assert_eq!(cfg.doh_mode, DohMode::Fallback);
-    }
-
-    #[test]
-    fn config_doh_mode_parses_off_strict_fallback() {
-        for (raw, expected) in [
-            ("off", DohMode::Off),
-            ("strict", DohMode::Strict),
-            ("fallback", DohMode::Fallback),
-            ("STRICT", DohMode::Strict),
-        ] {
-            let args = make_args(&[("url", "https://example.com/x"), ("doh-mode", raw)]);
-            let cfg = WebTunnelConfig::from_args(&args).unwrap();
-            assert_eq!(cfg.doh_mode, expected, "doh-mode={raw}");
-        }
-    }
-
-    #[test]
-    fn config_doh_mode_rejects_garbage() {
-        let args = make_args(&[("url", "https://example.com/x"), ("doh-mode", "dnsstrict")]);
-        let err = WebTunnelConfig::from_args(&args).unwrap_err();
-        assert!(matches!(err, Error::InvalidUrl(_)), "{err:?}");
-    }
-
-    #[test]
-    fn config_with_doh_mode_overrides() {
-        let args = make_args(&[("url", "https://example.com/x")]);
-        let cfg = WebTunnelConfig::from_args(&args)
-            .unwrap()
-            .with_doh_mode(DohMode::Strict);
-        assert_eq!(cfg.doh_mode, DohMode::Strict);
-    }
-
-    #[test]
-    fn config_connect_host_and_port_from_url() {
-        let args = make_args(&[("url", "https://example.com:8443/x")]);
-        let cfg = WebTunnelConfig::from_args(&args).unwrap();
-        assert_eq!(
-            cfg.connect_host_and_port().unwrap(),
-            ("example.com".to_string(), 8443)
-        );
-    }
-
-    #[test]
-    fn config_connect_host_and_port_from_tcp_addr() {
-        let args = make_args(&[("url", "https://example.com/x"), ("addr", "192.0.2.1:8443")]);
-        let cfg = WebTunnelConfig::from_args(&args).unwrap();
-        assert_eq!(
-            cfg.connect_host_and_port().unwrap(),
-            ("192.0.2.1".to_string(), 8443)
-        );
-    }
-
-    #[test]
-    fn config_connect_host_and_port_rejects_bad_addr() {
-        let args = make_args(&[("url", "https://example.com/x"), ("addr", "noport")]);
-        let cfg = WebTunnelConfig::from_args(&args).unwrap();
-        assert!(cfg.connect_host_and_port().is_err());
-    }
-
-    #[test]
-    fn config_connect_host_port_http_defaults_to_80() {
-        let args = make_args(&[("url", "http://example.com/path")]);
-        let cfg = WebTunnelConfig::from_args(&args).unwrap();
-        assert_eq!(cfg.connect_host_port().unwrap(), "example.com:80");
-    }
-
-    #[test]
-    fn config_use_tls_ftp_scheme_is_false() {
-        let cfg = WebTunnelConfig {
-            url: "ftp://example.com/x".into(),
-            version: None,
-            servername: None,
-            tcp_addr: None,
-            doh_mode: DohMode::default(),
-        };
-        assert!(!cfg.use_tls());
-    }
-
-    // -- use_tls scheme-parsing correctness tests --------------------------------
-
-    #[test]
-    fn use_tls_https_lowercase_is_true() {
-        let cfg = WebTunnelConfig {
-            url: "https://example.com/path".into(),
-            version: None,
-            servername: None,
-            tcp_addr: None,
-            doh_mode: DohMode::default(),
-        };
-        assert!(cfg.use_tls());
-    }
-
-    #[test]
-    fn use_tls_http_lowercase_is_false() {
-        let cfg = WebTunnelConfig {
-            url: "http://example.com/path".into(),
-            version: None,
-            servername: None,
-            tcp_addr: None,
-            doh_mode: DohMode::default(),
-        };
-        assert!(!cfg.use_tls());
-    }
-
-    #[test]
-    fn use_tls_https_uppercase_is_true() {
-        // The url crate normalises the scheme to lowercase during parsing,
-        // so Url::parse("HTTPS://...").scheme() == "https".  The raw
-        // starts_with("https") check would have returned false here.
-        let cfg = WebTunnelConfig {
-            url: "HTTPS://example.com/path".into(),
-            version: None,
-            servername: None,
-            tcp_addr: None,
-            doh_mode: DohMode::default(),
-        };
-        assert!(cfg.use_tls());
-    }
-
-    #[test]
-    fn use_tls_httpsx_garbage_scheme_is_false() {
-        // "httpsx://" starts with "https" but is not the https scheme.
-        // Parsed scheme would be "httpsx", not "https".
-        let cfg = WebTunnelConfig {
-            url: "httpsx://example.com".into(),
-            version: None,
-            servername: None,
-            tcp_addr: None,
-            doh_mode: DohMode::default(),
-        };
-        assert!(!cfg.use_tls());
-    }
-
-    // -- PrefixStream edge cases ---
-
-    #[tokio::test]
-    async fn prefix_stream_empty_prefix_is_transparent() {
-        let (mut mock_server, mock_client) = tokio::io::duplex(64);
-        let mut wrapped = PrefixStream::new(mock_client, vec![]);
-        mock_server.write_all(b"hello").await.unwrap();
-        let mut buf = [0u8; 5];
-        wrapped.read_exact(&mut buf).await.unwrap();
-        assert_eq!(&buf, b"hello");
-    }
-
-    #[tokio::test]
-    async fn prefix_stream_write_passes_through() {
-        let (mut mock_server, mock_client) = tokio::io::duplex(64);
-        let mut wrapped = PrefixStream::new(mock_client, vec![0xAA]);
-        wrapped.write_all(b"data").await.unwrap();
-        let mut buf = [0u8; 4];
-        mock_server.read_exact(&mut buf).await.unwrap();
-        assert_eq!(&buf, b"data");
-    }
-}
+mod tests;

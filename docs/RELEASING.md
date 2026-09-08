@@ -1,73 +1,49 @@
 # Releasing ptrs-gesher
 
-Step-by-step procedure for publishing a new version to crates.io.
+All six published crates use the same version. Version changes, commits, pushes,
+and publication require the maintainer's authorization.
 
-## 1. Pre-flight checks
+## Prepare and verify
 
-Ensure the tree is clean and everything passes:
+1. Review source and dependency changes. Keep the declared Rust 1.89 minimum.
+2. Move the changelog entries into a dated release section and leave a new
+   `[Unreleased]` section above it.
+3. Update all six package versions and their internal dependency requirements.
+   Refresh `Cargo.lock`; the private examples package keeps its own version.
+4. Run the release checks:
 
 ```sh
-git diff --exit-code
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --release
-cargo bench --workspace            # ~4 min, sanity-check for regressions
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace
+cargo test --locked --workspace --release
+cargo test --locked -p ptrs-gesher-lyrebird --features experimental-server
+cargo +1.89 check --workspace --locked
+cargo deny --locked check
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --no-deps --all-features
+cargo semver-checks --workspace --exclude ptrs-gesher-examples --baseline-version PREVIOUS_VERSION --all-features
+cargo package --locked --workspace --exclude ptrs-gesher-examples --allow-dirty
 ```
 
-## 2. Update CHANGELOG
+`--allow-dirty` permits reviewing the exact package contents before committing.
+Inspect the archives and exclude unrelated local drafts from the commit.
+Benchmarks are a separate, explicitly requested performance check.
 
-Rename the `[Unreleased]` heading in `CHANGELOG.md` to
-`[X.Y.Z] - YYYY-MM-DD` and add a fresh `[Unreleased]` section above it.
+## Publish
 
-## 3. Bump versions
+Commit the reviewed release and push the branch. Wait for CI to succeed, then
+create and push `vX.Y.Z`. The tag triggers `.github/workflows/release.yml`.
+It validates all six versions, builds and tests the workspace, and publishes in
+dependency order: core, bridge-line, obfs4, webtunnel, lyrebird, umbrella.
 
-Update the `version` field in **all six** `Cargo.toml` files to the same
-version number. If workspace inter-dependency versions are pinned (e.g.
-`version = "0.1.0"` in `dep.ptrs-gesher-core`), update those too.
+The publish script waits for Cargo's registry acknowledgement. No manual delay
+between packages is needed. Monitor the workflow through its terminal result,
+then verify all six versions on crates.io and create the GitHub release notes.
 
-Crate paths:
-- `crates/core/Cargo.toml`
-- `crates/bridge-line/Cargo.toml`
-- `crates/obfs4/Cargo.toml`
-- `crates/webtunnel/Cargo.toml`
-- `crates/lyrebird/Cargo.toml`
-- `crates/ptrs-gesher/Cargo.toml`
+## Resume a partial publication
 
-## 4. Commit and tag
-
-```sh
-git add -A
-git commit -m "Release vX.Y.Z"
-git tag vX.Y.Z
-```
-
-## 5. Publish in DAG order
-
-Leaves first, then their dependents. Wait ~30 seconds between batches
-for the crates.io index to refresh.
-
-```sh
-# Batch 1: leaves (no internal deps)
-cargo publish -p ptrs-gesher-core
-cargo publish -p ptrs-gesher-bridge-line
-
-# Wait ~30s, then batch 2
-cargo publish -p ptrs-gesher-obfs4
-cargo publish -p ptrs-gesher-webtunnel
-
-# Wait ~30s, then batch 3
-cargo publish -p ptrs-gesher-lyrebird
-
-# Wait ~30s, then the umbrella
-cargo publish -p ptrs-gesher
-```
-
-## 6. Post-publish
-
-- Push the tag: `git push origin vX.Y.Z`
-- Draft a GitHub Release with the relevant `CHANGELOG.md` entry.
-
-## 7. If a publish fails halfway
-
-**Never re-use a version number on crates.io.** Bump to the next patch
-version (e.g. `X.Y.(Z+1)`), fix the issue, and retry from step 3.
+Re-run the failed workflow, or dispatch it manually with the same version and
+the intended source revision. Already published packages are skipped; rate limits
+receive bounded retries. Never overwrite published package contents or create a
+new version merely to retry a failed upload. A source correction to an already
+published package needs a separately authorized release.

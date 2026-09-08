@@ -33,10 +33,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
 
       - name: Verify tag matches crate versions
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="${{ inputs.version }}"
+            TAG="$RELEASE_VERSION"
           else
             TAG="${GITHUB_REF_NAME#v}"
           fi
@@ -57,7 +59,7 @@ jobs:
         run: cargo build --workspace --all-targets --locked
 
       - name: Run tests
-        run: cargo test --workspace --all-targets --locked --no-fail-fast
+        run: cargo test --workspace --locked --no-fail-fast
 
       - name: Make publish script executable
         run: chmod +x .github/scripts/publish.sh

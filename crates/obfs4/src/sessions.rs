@@ -26,7 +26,6 @@ use ptrs::{debug, info, trace};
 use rand_core::RngCore;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::Instant;
-use tokio_util::codec::Decoder;
 
 /// Initial state for a Session, created with any params.
 pub(crate) struct Initialized;
@@ -183,9 +182,8 @@ impl ClientSession<Initialized> {
     ///
     /// # Cancel safety
     ///
-    /// This function is **not cancel-safe**. Dropping the returned future
-    /// mid-handshake may leave the underlying stream in a partially-written
-    /// state. Wrap in `tokio::spawn` if cancellation is possible.
+    /// Cancellation drops an owned stream. If the stream is borrowed, discard
+    /// it after cancellation because its handshake may be partial.
     pub async fn handshake<T>(
         self,
         mut stream: T,
@@ -203,7 +201,7 @@ impl ClientSession<Initialized> {
         // default deadline
         let d_def = Instant::now() + CLIENT_HANDSHAKE_TIMEOUT;
         let handshake_fut = Self::complete_handshake(&mut stream, materials, deadline, pre_ephem);
-        let (mut remainder, mut keygen) =
+        let (remainder, mut keygen) =
             match tokio::time::timeout_at(deadline.unwrap_or(d_def), handshake_fut).await {
                 Ok(result) => match result {
                     Ok(handshake) => handshake,
@@ -229,16 +227,6 @@ impl ClientSession<Initialized> {
         session.set_session_id(keygen.session_id());
         let mut codec: framing::Obfs4Codec = keygen.into();
 
-        let res = codec.decode(&mut remainder);
-        if let Ok(Some(framing::Messages::PrngSeed(seed))) = res {
-            // try to parse the remainder of the server hello packet as a
-            // PrngSeed since it should be there.
-            let len_seed = drbg::Seed::from(seed);
-            session.set_len_seed(len_seed);
-        } else {
-            debug!("NOPE {res:?}");
-        }
-
         // mark session as Established
         let session_state: ClientSession<Established> = session.transition(Established {});
         info!("{} handshake complete", session_state.session_id());
@@ -251,7 +239,7 @@ impl ClientSession<Initialized> {
         // decoder and corrupts the stream on the very first data read over a
         // real TCP socket (in-memory `duplex` hid this by preserving write
         // boundaries).
-        let o4 = O4Stream::new(stream, codec, Session::Client(session_state), remainder);
+        let o4 = O4Stream::new(stream, codec, Session::Client(session_state), remainder)?;
 
         Ok(Obfs4Stream::from_o4(o4))
     }
@@ -326,7 +314,7 @@ impl ClientSession<Initialized> {
     }
 }
 
-impl ClientSession<ClientHandshaking> {
+impl ClientSession<Established> {
     pub(crate) fn set_len_seed(&mut self, seed: drbg::Seed) {
         debug!("{} setting length seed", self.session_id());
         self.len_seed = seed;
@@ -434,9 +422,8 @@ impl ServerSession<Initialized> {
     ///
     /// # Cancel safety
     ///
-    /// This function is **not cancel-safe**. Dropping the returned future
-    /// mid-handshake may leave the underlying stream in a partially-written
-    /// state. Wrap in `tokio::spawn` if cancellation is possible.
+    /// Cancellation drops an owned stream. If the stream is borrowed, discard
+    /// it after cancellation because its handshake may be partial.
     pub async fn handshake<T>(
         self,
         server: &Server,
@@ -497,7 +484,7 @@ impl ServerSession<Initialized> {
             codec,
             Session::Server(session_state),
             BytesMut::new(),
-        );
+        )?;
 
         Ok(Obfs4Stream::from_o4(o4))
     }
@@ -572,6 +559,53 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn payload_coalesced_with_handshake_is_not_discarded() {
+        use crate::common::ntor_arti::KeyGenerator;
+        use tokio_util::codec::Encoder;
+        let server = Server::getrandom();
+        let client = new_client_session(server.0.identity_keys.pk, IAT::Off);
+        let materials = SHSMaterials::new(
+            &server.0.identity_keys,
+            "test-server".into(),
+            [7; SEED_LENGTH],
+        );
+        let (client_io, mut server_io) = tokio::io::duplex(65_536);
+        let peer = async {
+            let mut request = [0u8; MAX_HANDSHAKE_LENGTH];
+            let n = server_io.read(&mut request).await.unwrap();
+            let (keygen, mut response) = server
+                .server(&mut |_: &()| Some(()), &[materials], &request[..n])
+                .unwrap();
+            // Replace the optional inline seed with the first application frame.
+            response.truncate(response.len() - INLINE_SEED_FRAME_LENGTH);
+            let keys = keygen.expand(framing::KEY_MATERIAL_LENGTH * 2).unwrap();
+            let mut codec = framing::Obfs4Codec::new(
+                keys[framing::KEY_MATERIAL_LENGTH..].try_into().unwrap(),
+                keys[..framing::KEY_MATERIAL_LENGTH].try_into().unwrap(),
+            );
+            let mut payload = BytesMut::new();
+            framing::Messages::Payload(b"hello".to_vec())
+                .marshall(&mut payload)
+                .unwrap();
+            let mut wire = BytesMut::from(response.as_slice());
+            codec.encode(payload, &mut wire).unwrap();
+            server_io.write_all(&wire).await.unwrap();
+            server_io
+        };
+        let (client, _peer) = tokio::join!(client.handshake(client_io, None, None), peer);
+        let mut client = client.unwrap();
+        let mut bytes = [0; 5];
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            client.read_exact(&mut bytes),
+        )
+        .await
+        .expect("first payload must remain readable")
+        .unwrap();
+        assert_eq!(&bytes, b"hello");
+    }
 
     fn test_pubkey() -> Obfs4NtorPublicKey {
         Obfs4NtorPublicKey::new([0x01; NODE_PUBKEY_LENGTH], [0x02; NODE_ID_LENGTH])

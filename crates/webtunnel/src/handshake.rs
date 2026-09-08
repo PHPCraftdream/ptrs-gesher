@@ -13,8 +13,9 @@
 //!   proper one (16 random bytes, base64-encoded) for camouflage.
 
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, Ipv6Addr, SocketAddr};
 use std::sync::Arc;
+use std::time::Duration;
 
 use base64::Engine;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -48,6 +49,15 @@ pub fn build_upgrade_request(config: &WebTunnelConfig) -> String {
     };
 
     let host = config.tls_sni().expect("tls_sni already validated");
+    let host = if host.parse::<Ipv6Addr>().is_ok() {
+        format!("[{host}]")
+    } else {
+        host
+    };
+    let host = match parsed.port() {
+        Some(port) => format!("{host}:{port}"),
+        None => host,
+    };
     let key = generate_websocket_key();
 
     format!(
@@ -93,10 +103,28 @@ pub fn parse_response(buf: &[u8]) -> Result<(u16, &[u8]), Error> {
 ///
 /// # Cancel safety
 ///
-/// This function is **not cancel-safe**. Dropping the returned future
-/// mid-handshake may leave the underlying stream in a partially-written
-/// state. Wrap in `tokio::spawn` if cancellation is possible.
+/// Cancellation closes the owned connection. The complete operation has a
+/// 30-second budget, including DNS, TCP, TLS, and HTTP Upgrade.
 pub async fn connect(config: &WebTunnelConfig) -> Result<PrefixStream<WebTunnelStream>, Error> {
+    connect_with_timeout(config, crate::DEFAULT_HANDSHAKE_TIMEOUT).await
+}
+
+pub(crate) async fn connect_with_timeout(
+    config: &WebTunnelConfig,
+    timeout: Duration,
+) -> Result<PrefixStream<WebTunnelStream>, Error> {
+    tokio::time::timeout(timeout, connect_inner(config))
+        .await
+        .map_err(|_| {
+            Error::Io(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "WebTunnel handshake timed out",
+            ))
+        })?
+}
+
+async fn connect_inner(config: &WebTunnelConfig) -> Result<PrefixStream<WebTunnelStream>, Error> {
+    config.validate()?;
     let tcp = open_tcp(config).await?;
 
     if config.use_tls() {
@@ -111,22 +139,19 @@ pub async fn connect(config: &WebTunnelConfig) -> Result<PrefixStream<WebTunnelS
 /// decision matrix matches the issue-#74-adjacent design captured in
 /// the project notes:
 ///
-/// |               | `addr=` set            | `addr=` unset, `doh_mode=Off` | `addr=` unset, `doh_mode=Strict` | `addr=` unset, `doh_mode=Fallback` |
+/// |               | `addr=` literal IP     | hostname, `doh_mode=Off` | hostname, `doh_mode=Strict` | hostname, `doh_mode=Fallback` |
 /// |---------------|------------------------|--------------------------------|----------------------------------|------------------------------------|
 /// | path          | direct connect to IP   | system DNS via tokio           | DoH-only — `Err` on pool failure | DoH first → system DNS on failure  |
 ///
-/// `addr=` is a censorship-hardened operator override (a literal IP
-/// distributed out-of-band); it bypasses both system DNS and DoH.
+/// Literal IP overrides bypass DNS. Hostname overrides honor `doh_mode`.
 /// `doh_mode=Off` keeps backwards-compatible behaviour for anyone who
 /// explicitly opts out.
 async fn open_tcp(config: &WebTunnelConfig) -> Result<TcpStream, Error> {
     let (host, port) = config.connect_host_and_port()?;
 
-    // Operator-supplied raw address — host is almost always an IP, so
-    // both `TcpStream::connect((host, port))` and DoH would be wrong:
-    // the user has already told us where to dial.
-    if config.tcp_addr.is_some() {
-        return TcpStream::connect((host.as_str(), port))
+    // Literal addresses need neither encrypted nor system DNS.
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        return TcpStream::connect(SocketAddr::new(ip, port))
             .await
             .map_err(Error::from);
     }

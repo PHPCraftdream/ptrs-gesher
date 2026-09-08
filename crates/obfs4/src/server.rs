@@ -121,7 +121,7 @@ impl<T> ServerBuilder<T> {
             identity_keys: self.identity_keys.clone(),
             iat_mode: self.iat_mode,
             biased: false,
-            handshake_timeout: self.handshake_timeout.duration(),
+            handshake_timeout: self.handshake_timeout.clone(),
 
             // metrics: Arc::new(std::sync::Mutex::new(ServerMetrics {})),
             replay_filter: ReplayFilter::new(REPLAY_TTL),
@@ -261,7 +261,7 @@ pub struct Server(pub(crate) Arc<ServerInner>);
 /// (`self.0`), never through a public `Deref`, so none of these fields are
 /// observable outside the crate.
 pub(crate) struct ServerInner {
-    pub(crate) handshake_timeout: Option<tokio::time::Duration>,
+    pub(crate) handshake_timeout: MaybeTimeout,
     pub(crate) iat_mode: IAT,
     pub(crate) biased: bool,
     pub(crate) identity_keys: Obfs4NtorSecretKey,
@@ -286,7 +286,7 @@ impl Server {
 
     pub(crate) fn new_from_key(identity_keys: Obfs4NtorSecretKey) -> Self {
         Self(Arc::new(ServerInner {
-            handshake_timeout: Some(SERVER_HANDSHAKE_TIMEOUT),
+            handshake_timeout: MaybeTimeout::Default_,
             identity_keys,
             iat_mode: IAT::Off,
             biased: false,
@@ -326,15 +326,17 @@ impl Server {
     ///
     /// # Cancel safety
     ///
-    /// This function is **not cancel-safe**. Dropping the returned future
-    /// mid-handshake may leave the underlying stream in a partially-written
-    /// state. Wrap in `tokio::spawn` if cancellation is possible.
+    /// Cancellation drops an owned stream. If the stream is borrowed, discard
+    /// it after cancellation because its handshake may be partial.
     pub async fn wrap<T>(self, stream: T) -> Result<Obfs4Stream<T>>
     where
         T: AsyncRead + AsyncWrite + Unpin,
     {
+        let deadline = self.0.handshake_timeout.deadline(SERVER_HANDSHAKE_TIMEOUT);
+        if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
+            return Err(Error::HandshakeTimeout);
+        }
         let session = self.new_server_session()?;
-        let deadline = self.0.handshake_timeout.map(|d| Instant::now() + d);
 
         session.handshake(&self, stream, deadline).await
     }

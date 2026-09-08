@@ -1,5 +1,19 @@
 use super::*;
 
+#[tokio::test(start_paused = true)]
+async fn cancellation_interrupts_a_full_connection_limit() {
+    use futures::FutureExt;
+    let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
+    let _occupied = semaphore.acquire().await.unwrap();
+    let cancel = CancellationToken::new();
+    let permit = connection_permit(semaphore.clone(), &cancel);
+    tokio::pin!(permit);
+    assert!(permit.as_mut().now_or_never().is_none());
+    cancel.cancel();
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), permit).await;
+    assert!(matches!(outcome, Ok(None)));
+}
+
 #[test]
 fn arg_string_uname_only_when_passwd_is_nul() {
     let creds = Some(("cert=AAA;iat-mode=0".to_string(), "\0".to_string()));

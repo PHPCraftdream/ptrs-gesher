@@ -30,6 +30,9 @@ pub(crate) mod sessions;
 #[cfg(test)]
 mod testing;
 
+#[cfg(test)]
+mod deadline_tests;
+
 mod pt;
 pub use pt::{Obfs4PT, Transport};
 

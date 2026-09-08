@@ -474,6 +474,17 @@ async fn client_setup(
     Ok(rx)
 }
 
+async fn connection_permit(
+    semaphore: Arc<tokio::sync::Semaphore>,
+    cancel: &CancellationToken,
+) -> Option<tokio::sync::OwnedSemaphorePermit> {
+    tokio::select! {
+        biased;
+        _ = cancel.cancelled() => None,
+        permit = semaphore.acquire_owned() => permit.ok(),
+    }
+}
+
 async fn client_accept_loop<C>(
     listener: TcpListener,
     builder: impl ptrs::ClientBuilder<TcpStream, ClientPT = C> + Send + 'static,
@@ -502,9 +513,9 @@ where
                 };
                 // Acquire a concurrency permit before spawning, bounding
                 // the number of in-flight connection tasks (DoS mitigation).
-                let permit = match Arc::clone(&sem).acquire_owned().await {
-                    Ok(p) => p,
-                    Err(_) => break, // semaphore closed — shutting down
+                let permit = match connection_permit(Arc::clone(&sem), &cancel_token).await {
+                    Some(p) => p,
+                    None => break,
                 };
                 let builder_clone = builder.clone();
                 let proxy_clone = proxy_uri.clone();

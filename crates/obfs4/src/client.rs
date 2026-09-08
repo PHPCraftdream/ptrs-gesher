@@ -129,7 +129,7 @@ impl ClientBuilder {
                 id: self.station_id.into(),
                 pk: self.station_pubkey.into(),
             },
-            handshake_timeout: self.handshake_timeout.duration(),
+            handshake_timeout: self.handshake_timeout.clone(),
         }
     }
 
@@ -151,7 +151,7 @@ impl fmt::Display for ClientBuilder {
 pub struct Client {
     iat_mode: IAT,
     station_pubkey: Obfs4NtorPublicKey,
-    handshake_timeout: Option<tokio::time::Duration>,
+    handshake_timeout: MaybeTimeout,
 }
 
 impl Client {
@@ -163,16 +163,17 @@ impl Client {
     ///
     /// # Cancel safety
     ///
-    /// This function is **not cancel-safe**. Dropping the returned future
-    /// mid-handshake may leave the underlying stream in a partially-written
-    /// state. Wrap in `tokio::spawn` if cancellation is possible.
+    /// Cancellation drops an owned stream. If the stream is borrowed, discard
+    /// it after cancellation because its handshake may be partial.
     pub async fn wrap<'a, T>(self, mut stream: T) -> Result<Obfs4Stream<T>>
     where
         T: AsyncRead + AsyncWrite + Unpin + 'a,
     {
+        let deadline = self.handshake_timeout.deadline(CLIENT_HANDSHAKE_TIMEOUT);
+        if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
+            return Err(Error::HandshakeTimeout);
+        }
         let session = sessions::new_client_session(self.station_pubkey, self.iat_mode);
-
-        let deadline = self.handshake_timeout.map(|d| Instant::now() + d);
 
         // The stream is already connected here, so there is no dial→keygen gap
         // to worry about: let `Session::handshake` generate the ephemeral key
@@ -185,9 +186,8 @@ impl Client {
     ///
     /// # Cancel safety
     ///
-    /// This function is **not cancel-safe**. Dropping the returned future
-    /// mid-handshake may leave the underlying stream in a partially-written
-    /// state. Wrap in `tokio::spawn` if cancellation is possible.
+    /// Cancellation drops an owned stream. If the stream is borrowed, discard
+    /// it after cancellation because its handshake may be partial.
     pub async fn establish<'a, T, E>(
         self,
         stream_fut: Pin<ptrs::FutureResult<T, E>>,
@@ -217,6 +217,12 @@ impl Client {
         E: std::error::Error + Send + Sync + 'static,
         F: FnOnce(rand::rngs::ThreadRng) -> Result<EphemeralSecret>,
     {
+        let deadline = self.handshake_timeout.deadline(CLIENT_HANDSHAKE_TIMEOUT);
+        let budget = deadline.unwrap_or_else(|| Instant::now() + CLIENT_HANDSHAKE_TIMEOUT);
+        if budget <= Instant::now() {
+            return Err(Error::HandshakeTimeout);
+        }
+
         // Issue #15: generate the elligator2-representable ephemeral key
         // BEFORE awaiting the TCP dial. The elligator2 retry loop has ~50%
         // success per iteration, so doing it after the dial inserts a
@@ -225,13 +231,13 @@ impl Client {
         // that variance entirely before the wire is touched.
         let ephem = keygen(rand::thread_rng())?;
 
-        let stream = stream_fut.await.map_err(|e| Error::Other(Box::new(e)))?;
-
-        let session = sessions::new_client_session(self.station_pubkey, self.iat_mode);
-
-        let deadline = self.handshake_timeout.map(|d| Instant::now() + d);
-
-        session.handshake(stream, deadline, Some(ephem)).await
+        tokio::time::timeout_at(budget, async {
+            let stream = stream_fut.await.map_err(|e| Error::Other(Box::new(e)))?;
+            let session = sessions::new_client_session(self.station_pubkey, self.iat_mode);
+            session.handshake(stream, deadline, Some(ephem)).await
+        })
+        .await
+        .map_err(|_| Error::HandshakeTimeout)?
     }
 }
 

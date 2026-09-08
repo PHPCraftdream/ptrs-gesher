@@ -4,16 +4,9 @@
 //! protocol parameterization.  To allow for easy reproduction of a given
 //! distribution, the drbg package is used as the random number source.
 //!
-//! # Known issue: sampling is non-reproducible
-//!
-//! The distribution *tables* are derived deterministically from a [`drbg::Seed`]
-//! (see [`WeightedDist::reseed`]), but [`WeightedDist::sample`] draws its die-roll
-//! and coin-flip from the OS CSPRNG (`getrandom`), **not** from a seeded DRBG.
-//! As a consequence the obfuscation produced at run time is not reproducible from
-//! the seed alone. Upstream obfs4 (go-fil) samples from the seeded DRBG, so this
-//! is a behavioural divergence. It is documented rather than fixed here because a
-//! reference vector / wire-compat decision is needed before changing the sampling
-//! source; do not "fix" it casually as it alters observable traffic shaping.
+//! Distribution tables are seeded deterministically; samples use the OS CSPRNG.
+//! The Go reference also samples with `csrand`, independently of its seeded tables:
+//! <https://github.com/Yawning/obfs4/blob/master/common/probdist/weighted_dist.go>.
 
 use crate::common::drbg;
 
