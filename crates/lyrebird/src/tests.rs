@@ -160,7 +160,7 @@ fn arg_string_passwd_is_nul_only() {
 
 use ptrs::ClientBuilder as _;
 use tokio::io::DuplexStream;
-use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 
 /// Build an obfs4 client transport from a bridge-line arg string via the
 /// same `ptrs` builder path lyrebird uses for a real SOCKS connection:
@@ -309,9 +309,11 @@ async fn client_accept_loop_exits_on_pre_cancelled_token() {
         .await
         .expect("bind listener for test");
 
-    // Cancel BEFORE entering the loop — simulates shutdown race.
-    let cancel = CancellationToken::new();
-    cancel.cancel();
+    // Cancel BEFORE entering the loop — simulates shutdown race. Only the
+    // phase-1 (`accept`) token needs to be pre-cancelled: that is the one
+    // `client_accept_loop`'s accept arm watches.
+    let ctx = RunTasks::new();
+    ctx.accept.cancel();
 
     let builder = Obfs4PT::client_builder();
     let proxy_uri = url::Url::parse("data:,").expect("placeholder url");
@@ -320,7 +322,7 @@ async fn client_accept_loop_exits_on_pre_cancelled_token() {
     // it would spin indefinitely and the timeout would fire.
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        client_accept_loop(listener, builder, proxy_uri, cancel),
+        client_accept_loop(listener, builder, proxy_uri, ctx),
     )
     .await;
 
@@ -349,7 +351,12 @@ async fn client_accept_loop_exits_on_pre_cancelled_token() {
 /// Play the SOCKS5 client (as arti/tor would) over `parent`: user/pass
 /// auth carrying the PT arg string, then a CONNECT to `bridge`. Returns
 /// after the CONNECT request is sent; the caller asserts on the reply.
-async fn socks5_client_connect(parent: &mut DuplexStream, arg_string: &str, bridge: SocketAddr) {
+async fn socks5_client_connect<S>(parent: &mut S, arg_string: &str, bridge: SocketAddr)
+where
+    // Both the in-memory duplex (handshake unit tests) and a real
+    // TcpStream (lifecycle tests below) drive the same protocol.
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     // greeting: VER=5, 1 method, user/pass (0x02)
     parent.write_all(&[0x05, 0x01, 0x02]).await.unwrap();
     parent.flush().await.unwrap();
@@ -562,7 +569,7 @@ async fn client_setup_rejects_configured_upstream_proxy() {
     let _guard = ENV_LOCK.lock().await;
     set_client_env(Some("socks5://user:pass@127.0.0.1:9050"));
 
-    let outcome = client_setup("unused-test-state-dir", CancellationToken::new()).await;
+    let outcome = client_setup("unused-test-state-dir", RunTasks::new()).await;
 
     clear_client_env();
 
@@ -578,23 +585,280 @@ async fn client_setup_rejects_configured_upstream_proxy() {
 }
 
 #[tokio::test]
-async fn client_setup_without_proxy_completes_and_signals_done() {
+async fn client_setup_without_proxy_spawns_owned_listener_tasks() {
     let _guard = ENV_LOCK.lock().await;
     set_client_env(None);
 
     // Without TOR_PT_PROXY the fail-closed path must not trigger: the
     // normal setup runs (listener bound, CMETHOD announced upstream) and
-    // signals completion over the exit channel once shut down.
-    let cancel = CancellationToken::new();
-    let outcome = client_setup("unused-test-state-dir", cancel.clone()).await;
-    let rx = outcome.expect("without TOR_PT_PROXY, client_setup must proceed normally");
-
-    cancel.cancel();
-    let finished = tokio::time::timeout(std::time::Duration::from_secs(5), rx).await;
+    // hands its accept loops back to the caller as an owned task set.
+    let ctx = RunTasks::new();
+    let outcome = client_setup("unused-test-state-dir", ctx.clone()).await;
+    let mut listeners = outcome.expect("without TOR_PT_PROXY, client_setup must proceed normally");
     assert!(
-        matches!(finished, Ok(Ok(true))),
-        "listener shutdown must resolve the exit channel with true"
+        !listeners.is_empty(),
+        "client_setup must return its accept loops for run() to own"
     );
 
+    // Shutdown stops every accept loop, and each one exits CLEANLY: the
+    // join surface now carries each listener's own Result plus the outer
+    // JoinError, so neither error level can be lost silently.
+    ctx.accept.cancel();
+    loop {
+        let next = tokio::time::timeout(TEST_STEP, listeners.join_next())
+            .await
+            .expect("accept loops must exit promptly after cancel");
+        match next {
+            None => break,
+            Some(res) => assert!(
+                matches!(res, Ok(Ok(()))),
+                "accept loops must exit cleanly on cancel, got {res:?}"
+            ),
+        }
+    }
+
+    // No connection task can remain: every lifecycle permit is back.
+    assert_no_connection_tasks(&ctx);
+
     clear_client_env();
+}
+
+// -- run() task-lifecycle regression (unified ownership + cancel paths) --
+//
+// `run()` must own every task it spawns and never return while any of them
+// is still alive in the caller's runtime. `run()` itself cannot be called
+// from a test (it parses argv), so these tests exercise the exact helpers
+// run()'s exit paths use — `stop_accepting`, `join_accept_loops`,
+// `drain_connections`, `cancel_connections` — against a REAL accept loop
+// serving a REAL obfs4 tunnel, and assert lifecycle facts explicitly:
+// the lifecycle-permit counter (an exact in-flight-connection count), the
+// listener JoinSet being drained, and connect-refused on the bound port.
+// Nothing here guesses by sleeping.
+
+/// How long the lifecycle tests allow for a step that must be prompt.
+const TEST_STEP: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// All lifecycle permits must be back: zero connection tasks in flight.
+fn assert_no_connection_tasks(ctx: &RunTasks) {
+    assert_eq!(
+        ctx.lifecycle.available_permits(),
+        MAX_CONCURRENT_CONNS,
+        "connection tasks are still holding lifecycle permits"
+    );
+}
+
+/// The port must refuse new connections: the listener task is gone, so
+/// the socket is closed — the "ports are closed after run() returns"
+/// property, asserted through the actual connect outcome.
+async fn assert_port_closed(addr: SocketAddr) {
+    match tokio::time::timeout(TEST_STEP, TcpStream::connect(addr)).await {
+        Err(_) => panic!("connect to {addr} timed out — port looks open"),
+        Ok(Ok(_)) => panic!("connect to {addr} succeeded — port is still open"),
+        Ok(Err(_)) => {} // refused: the listener socket is gone
+    }
+}
+
+/// Write `msg` into the tunnel and read the echo back.
+async fn roundtrip_through_tunnel(parent: &mut TcpStream, msg: &[u8]) {
+    parent.write_all(msg).await.expect("tunnel write");
+    parent.flush().await.expect("tunnel flush");
+    let mut got = vec![0u8; msg.len()];
+    tokio::time::timeout(TEST_STEP, parent.read_exact(&mut got))
+        .await
+        .expect("tunnel echo timed out")
+        .expect("read tunnel echo");
+    assert_eq!(&got, msg, "probe must round-trip through the tunnel");
+}
+
+/// Build one "listener + in-flight tunnel" stack: a real obfs4 echo
+/// bridge, a `client_accept_loop` owned by `ctx` and registered in
+/// `listeners` exactly the way run() owns it, and a parent TCP connection
+/// that has completed SOCKS5 and round-tripped one probe through the
+/// tunnel. Returns the parent stream and the accept-loop port.
+async fn spawn_stack_with_active_tunnel(
+    ctx: &RunTasks,
+    listeners: &mut JoinSet<Result<()>>,
+) -> (TcpStream, SocketAddr) {
+    // The bridge: a real obfs4 server echoing everything it receives.
+    let server_builder = obfs4::ServerBuilder::<TcpStream>::default();
+    let arg_string = server_builder.client_params();
+    let server = server_builder.build();
+    let bridge_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bridge_addr = bridge_listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let (sock, _peer) = bridge_listener.accept().await.expect("bridge accept");
+        let mut s = server.wrap(sock).await.expect("bridge obfs4 handshake");
+        let mut buf = [0u8; 512];
+        loop {
+            match s.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    if s.write_all(&buf[..n]).await.is_err() {
+                        break;
+                    }
+                    let _ = s.flush().await;
+                }
+            }
+        }
+    });
+
+    // The accept loop, owned exactly the way run() owns it.
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let socks_addr = listener.local_addr().unwrap();
+    let builder = Obfs4PT::client_builder();
+    let proxy_uri = url::Url::parse("data:,").expect("placeholder url");
+    listeners.spawn(client_accept_loop(
+        listener,
+        builder,
+        proxy_uri,
+        ctx.clone(),
+    ));
+
+    // The parent (arti/tor stand-in) connects over real TCP and drives
+    // the SOCKS5 handshake with the bridge-line args packed as user/pass.
+    let mut parent = TcpStream::connect(socks_addr)
+        .await
+        .expect("connect to accept loop");
+    socks5_client_connect(&mut parent, &arg_string, bridge_addr).await;
+
+    // The success reply arrives only after the obfs4 tunnel is up —
+    // proof that the connection task is alive and serving.
+    let mut reply = [0u8; 10];
+    tokio::time::timeout(TEST_STEP, parent.read_exact(&mut reply))
+        .await
+        .expect("SOCKS5 reply timed out")
+        .expect("read SOCKS5 reply");
+    assert_eq!(
+        reply,
+        [0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0],
+        "expected the SOCKS5 success frame written by the connection task"
+    );
+
+    // One round-trip proves the tunnel is actively relaying.
+    roundtrip_through_tunnel(&mut parent, b"pre-shutdown-probe").await;
+    (parent, socks_addr)
+}
+
+#[tokio::test]
+async fn terminate_path_closes_ports_and_leaves_no_tasks() {
+    let ctx = RunTasks::new();
+    let mut listeners = JoinSet::new();
+    let (mut parent, socks_addr) = spawn_stack_with_active_tunnel(&ctx, &mut listeners).await;
+
+    // Exactly the terminate/EOF teardown run() performs: stop accepting,
+    // cancel in-flight connections immediately, await them (bounded), and
+    // join the accept loops.
+    ctx.stop_accepting();
+    tokio::time::timeout(TEST_STEP, cancel_connections(&ctx))
+        .await
+        .expect("forced teardown must be prompt, not stall out");
+    join_accept_loops(&mut listeners).await;
+
+    // The explicit zero-active-tasks signal: every lifecycle permit is
+    // back, so no connection task survives run()'s shutdown.
+    assert_no_connection_tasks(&ctx);
+
+    // run()'s ports are closed: new connects are refused.
+    assert_port_closed(socks_addr).await;
+
+    // The in-flight tunnel was really torn down mid-transfer: the parent
+    // sees EOF instead of a live connection.
+    let mut buf = [0u8; 8];
+    let n = tokio::time::timeout(TEST_STEP, parent.read(&mut buf))
+        .await
+        .expect("EOF read should resolve")
+        .expect("read after teardown");
+    assert_eq!(
+        n, 0,
+        "terminate must drop the in-flight tunnel (parent sees EOF)"
+    );
+
+    // The listener JoinSet is fully drained: no owned task remains.
+    let leftover =
+        tokio::time::timeout(std::time::Duration::from_millis(100), listeners.join_next())
+            .await
+            .expect("joining an empty set must resolve immediately");
+    assert!(leftover.is_none(), "no accept-loop task may remain");
+}
+
+#[tokio::test]
+async fn soft_interrupt_lets_inflight_transfer_finish() {
+    let ctx = RunTasks::new();
+    let mut listeners = JoinSet::new();
+    let (mut parent, socks_addr) = spawn_stack_with_active_tunnel(&ctx, &mut listeners).await;
+
+    // Soft interrupt, exactly run()'s sequence: phase 1 stops accepting,
+    // then the accept loops are joined (so the port really closes).
+    ctx.stop_accepting();
+    join_accept_loops(&mut listeners).await;
+
+    // No new connections: the port is closed...
+    assert_port_closed(socks_addr).await;
+
+    // ...but the CURRENT transfer must keep flowing, not be cut off.
+    roundtrip_through_tunnel(&mut parent, b"post-shutdown-probe").await;
+    assert!(
+        !ctx.conns.is_cancelled(),
+        "graceful drain must not force-cancel in-flight connections"
+    );
+
+    // The parent goes away on its own; the connection task must finish
+    // within the drain budget (well under it here) and release its
+    // lifecycle permit — the explicit zero-tasks signal.
+    drop(parent);
+    let drained = tokio::time::timeout(TEST_STEP, drain_connections(&ctx, TEST_STEP))
+        .await
+        .expect("drain must resolve");
+    assert!(drained, "drain_connections must report graceful completion");
+    assert_no_connection_tasks(&ctx);
+
+    let leftover =
+        tokio::time::timeout(std::time::Duration::from_millis(100), listeners.join_next())
+            .await
+            .expect("joining an empty set must resolve immediately");
+    assert!(leftover.is_none(), "no owned task may remain");
+}
+
+#[tokio::test]
+async fn drain_budget_expiry_cancels_inflight_connections() {
+    let ctx = RunTasks::new();
+    let mut listeners = JoinSet::new();
+    let (mut parent, socks_addr) = spawn_stack_with_active_tunnel(&ctx, &mut listeners).await;
+
+    ctx.stop_accepting();
+    join_accept_loops(&mut listeners).await;
+
+    // The parent keeps the tunnel open, so it cannot finish on its own.
+    // A 150 ms budget must expire and report "not drained" — without
+    // force-cancelling anything yet.
+    let drained = drain_connections(&ctx, std::time::Duration::from_millis(150)).await;
+    assert!(
+        !drained,
+        "an open tunnel cannot finish within a 150 ms budget"
+    );
+    assert!(
+        !ctx.conns.is_cancelled(),
+        "the budget phase alone must not force-cancel"
+    );
+
+    // run() then cancels the remainder and awaits them (bounded) — this
+    // must be prompt, proving the forced teardown cannot hang run().
+    tokio::time::timeout(TEST_STEP, cancel_connections(&ctx))
+        .await
+        .expect("forced teardown must be prompt");
+    assert!(ctx.conns.is_cancelled());
+    assert_no_connection_tasks(&ctx);
+    assert_port_closed(socks_addr).await;
+
+    // The in-flight tunnel was really cancelled mid-transfer: the parent
+    // sees EOF.
+    let mut buf = [0u8; 8];
+    let n = tokio::time::timeout(TEST_STEP, parent.read(&mut buf))
+        .await
+        .expect("EOF read should resolve")
+        .expect("read after forced teardown");
+    assert_eq!(
+        n, 0,
+        "forced teardown must drop the tunnel (parent sees EOF)"
+    );
 }
