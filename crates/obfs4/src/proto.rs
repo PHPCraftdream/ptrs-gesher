@@ -27,6 +27,159 @@ use std::{
 
 use super::framing::{FrameError, Messages};
 
+#[pin_project]
+pub(crate) struct IatCarrier<T>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    #[pin]
+    inner: T,
+    mode: IAT,
+    iat_dist: probdist::WeightedDist,
+    length_dist: probdist::WeightedDist,
+    iat_sleep: Pin<Box<Sleep>>,
+    delay_pending: bool,
+    shutdown_requested: bool,
+    scheduled_target: Option<usize>,
+    pad_target: Option<usize>,
+}
+
+impl<T> IatCarrier<T>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    fn new(
+        inner: T,
+        mode: IAT,
+        iat_dist: probdist::WeightedDist,
+        length_dist: probdist::WeightedDist,
+    ) -> Self {
+        Self {
+            inner,
+            mode,
+            iat_dist,
+            length_dist,
+            iat_sleep: Box::pin(tokio::time::sleep(Duration::ZERO)),
+            delay_pending: false,
+            shutdown_requested: false,
+            scheduled_target: None,
+            pad_target: None,
+        }
+    }
+
+    fn clear_delay(&mut self) {
+        self.delay_pending = false;
+        self.shutdown_requested = true;
+    }
+
+    fn take_pad_target(&mut self) -> Option<usize> {
+        self.pad_target.take()
+    }
+
+    fn padding_added(&mut self, buffer_len: usize) {
+        if self.scheduled_target != Some(buffer_len) {
+            self.scheduled_target = None;
+        }
+    }
+}
+
+impl<T> AsyncRead for IatCarrier<T>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<StdResult<(), IoError>> {
+        self.project().inner.poll_read(cx, buf)
+    }
+}
+
+impl<T> AsyncWrite for IatCarrier<T>
+where
+    T: AsyncRead + AsyncWrite + Unpin,
+{
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<StdResult<usize, IoError>> {
+        if buf.is_empty() {
+            return Poll::Ready(Ok(0));
+        }
+
+        let scheduled = self.as_ref().get_ref().scheduled_target;
+        if self.as_ref().get_ref().mode == IAT::Paranoid && scheduled.is_none() {
+            let target = self.as_ref().get_ref().length_dist.sample().max(1) as usize;
+            let target = target.min(framing::MAX_SEGMENT_LENGTH);
+            if buf.len() < target {
+                let this = self.as_mut().project();
+                *this.scheduled_target = Some(target);
+                *this.pad_target = Some(target);
+                return Poll::Pending;
+            }
+            self.as_mut().project().scheduled_target.replace(target);
+        } else if self.as_ref().get_ref().mode != IAT::Off && scheduled.is_none() {
+            self.as_mut()
+                .project()
+                .scheduled_target
+                .replace(buf.len().min(framing::MAX_SEGMENT_LENGTH));
+        }
+
+        if self.as_ref().get_ref().mode != IAT::Off && self.as_ref().get_ref().delay_pending {
+            let this = self.as_mut().project();
+            match this.iat_sleep.as_mut().poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(()) => *this.delay_pending = false,
+            }
+        }
+
+        let write_len = self
+            .as_ref()
+            .get_ref()
+            .scheduled_target
+            .map_or(buf.len(), |target| target.min(buf.len()));
+        let result = self
+            .as_mut()
+            .project()
+            .inner
+            .poll_write(cx, &buf[..write_len]);
+        if let Poll::Ready(Ok(written)) = result {
+            if written > 0 && self.as_ref().get_ref().mode != IAT::Off {
+                let this = self.as_mut().project();
+                let target = this.scheduled_target.as_mut().expect("scheduled target");
+                *target -= written;
+                if *target == 0 {
+                    *this.scheduled_target = None;
+                    if !*this.shutdown_requested {
+                        let delay =
+                            Duration::from_micros(this.iat_dist.sample().max(0) as u64 * 100);
+                        this.iat_sleep.as_mut().reset(Instant::now() + delay);
+                        *this.delay_pending = true;
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<StdResult<(), IoError>> {
+        if self.as_ref().get_ref().mode != IAT::Off && self.as_ref().get_ref().delay_pending {
+            let this = self.as_mut().project();
+            match this.iat_sleep.as_mut().poll(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(()) => *this.delay_pending = false,
+            }
+        }
+        self.project().inner.poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<StdResult<(), IoError>> {
+        self.project().inner.poll_shutdown(cx)
+    }
+}
+
 #[derive(Clone, Debug)]
 struct StoredIoError {
     message: String,
@@ -151,7 +304,17 @@ where
     /// is heavily skewed toward small samples).
     #[cfg(test)]
     pub(crate) fn iat_delay_is_pending_for_test(&self) -> bool {
-        self.s.iat_delay_pending
+        self.s.stream.get_ref().delay_pending
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_iat_dist_for_test(&mut self, dist: probdist::WeightedDist) {
+        self.s.stream.get_mut().iat_dist = dist;
+    }
+
+    #[cfg(test)]
+    pub(crate) fn iat_dist_for_test(&self) -> &probdist::WeightedDist {
+        &self.s.stream.get_ref().iat_dist
     }
 }
 
@@ -161,10 +324,9 @@ where
     T: AsyncRead + AsyncWrite + Unpin,
 {
     #[pin]
-    pub stream: Framed<T, framing::Obfs4Codec>,
+    pub stream: Framed<IatCarrier<T>, framing::Obfs4Codec>,
 
     pub length_dist: probdist::WeightedDist,
-    pub iat_dist: probdist::WeightedDist,
 
     pub iat_mode: IAT,
 
@@ -176,22 +338,6 @@ where
     /// arbitrary caller buffer; the surplus is parked here and delivered on
     /// subsequent reads so no payload is lost (and `put_slice` never overflows).
     read_residual: BytesMut,
-
-    /// Inter-arrival time delay timer. When IAT mode is Enabled or Paranoid,
-    /// a delay sampled from `iat_dist` is imposed between successive writes.
-    /// The timer is reset after each write; the next `poll_write` waits for
-    /// it to expire before proceeding. Uses `tokio::time::Sleep` so it is
-    /// compatible with `tokio::time::pause()` for deterministic testing.
-    ///
-    /// Wrapped in `Pin<Box<...>>` so that `O4Stream` remains `Unpin` (required
-    /// by the `ptrs::ClientTransport::OutRW` bound). The `Pin<Box<Sleep>>`
-    /// itself is `Unpin`, avoiding the need for `#[pin]`.
-    iat_sleep: Pin<Box<Sleep>>,
-
-    /// Whether the current `iat_sleep` timer is active (waiting to fire).
-    /// Set to `true` after a write completes with IAT enabled; cleared when
-    /// the sleep fires and the next write can proceed.
-    iat_delay_pending: bool,
 
     /// Reusable plaintext/wire staging for padding added after backpressure.
     padding_scratch: BytesMut,
@@ -220,16 +366,6 @@ where
         // they are lost and the codec desynchronises on the next frame length.
         handshake_residual: BytesMut,
     ) -> Result<O4Stream<T>> {
-        let mut stream = Framed::new(inner, codec);
-        if !handshake_residual.is_empty() {
-            // Prepend the handshake over-read into the decode buffer so the
-            // first `poll_next` sees the data frames that arrived alongside the
-            // server hello, instead of starting from an empty buffer and
-            // desynchronising the frame decoder.
-            stream
-                .read_buffer_mut()
-                .extend_from_slice(&handshake_residual);
-        }
         let len_seed = session.len_seed();
         let iat_mode = session.iat_mode();
 
@@ -246,18 +382,26 @@ where
             session.biased(),
         );
         let iat_dist = WeightedDist::new(iat_seed, 0, MAX_IAT_DELAY as i32, session.biased());
+        let mut stream = Framed::new(
+            IatCarrier::new(inner, iat_mode, iat_dist, length_dist.clone()),
+            codec,
+        );
+        if !handshake_residual.is_empty() {
+            // Prepend the handshake over-read into the decode buffer so the
+            // first `poll_next` sees the data frames that arrived alongside the
+            // server hello, instead of starting from an empty buffer and
+            // desynchronising on the next frame length.
+            stream
+                .read_buffer_mut()
+                .extend_from_slice(&handshake_residual);
+        }
 
         let mut transport = Self {
             stream,
             session,
             length_dist,
-            iat_dist,
             iat_mode,
             read_residual: BytesMut::new(),
-            // Initialize with an already-elapsed sleep so the first write
-            // proceeds immediately without delay.
-            iat_sleep: Box::pin(tokio::time::sleep(Duration::ZERO)),
-            iat_delay_pending: false,
             padding_scratch: BytesMut::with_capacity(framing::MAX_SEGMENT_LENGTH),
             terminal_error: None,
             shutdown_complete: false,
@@ -307,7 +451,9 @@ where
                     client.set_len_seed(seed.clone());
                     self.length_dist.reseed(seed);
                     let digest = Sha256::digest(bytes);
-                    self.iat_dist
+                    self.stream
+                        .get_mut()
+                        .iat_dist
                         .reseed(drbg::Seed::try_from(&digest[..SEED_LENGTH])?);
                 }
                 Ok(())
@@ -317,12 +463,15 @@ where
 
     /// Append independently encrypted padding packets, as in obfs4proxy's padBurst.
     /// https://github.com/Yawning/obfs4/blob/master/transports/obfs4/obfs4.go
-    fn pad_burst(
-        stream: &mut Framed<T, framing::Obfs4Codec>,
+    fn pad_burst<W>(
+        stream: &mut Framed<W, framing::Obfs4Codec>,
         burst_len: usize,
         target: usize,
         scratch: &mut BytesMut,
-    ) -> Result<()> {
+    ) -> Result<()>
+    where
+        W: AsyncRead + AsyncWrite + Unpin,
+    {
         let tail = burst_len % framing::MAX_SEGMENT_LENGTH;
         let pad = if target >= tail {
             target - tail
@@ -347,6 +496,90 @@ where
         // At most two extra frames; the next poll_ready applies backpressure.
         Ok(())
     }
+
+    fn poll_ready_with_iat(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<StdResult<(), IoError>> {
+        loop {
+            let mut this = self.as_mut().project();
+            match futures::Sink::<framing::PayloadFrame<'_>>::poll_ready(this.stream.as_mut(), cx) {
+                Poll::Pending => {
+                    let target = this.stream.as_mut().get_mut().get_mut().take_pad_target();
+                    let Some(target) = target else {
+                        return Poll::Pending;
+                    };
+                    let stream = this.stream.as_mut().get_mut();
+                    let burst_len = stream.write_buffer().len();
+                    if let Err(error) =
+                        Self::pad_burst(stream, burst_len, target, this.padding_scratch)
+                    {
+                        return Poll::Ready(Err(error.into()));
+                    }
+                    let buffer_len = stream.write_buffer().len();
+                    stream.get_mut().padding_added(buffer_len);
+                }
+                Poll::Ready(Ok(())) => return Poll::Ready(Ok(())),
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+            }
+        }
+    }
+
+    fn poll_flush_with_iat(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<StdResult<(), IoError>> {
+        loop {
+            let mut this = self.as_mut().project();
+            match futures::Sink::<&[u8]>::poll_flush(this.stream.as_mut(), cx) {
+                Poll::Pending => {
+                    let target = this.stream.as_mut().get_mut().get_mut().take_pad_target();
+                    let Some(target) = target else {
+                        return Poll::Pending;
+                    };
+                    let stream = this.stream.as_mut().get_mut();
+                    let burst_len = stream.write_buffer().len();
+                    if let Err(error) =
+                        Self::pad_burst(stream, burst_len, target, this.padding_scratch)
+                    {
+                        return Poll::Ready(Err(error.into()));
+                    }
+                    let buffer_len = stream.write_buffer().len();
+                    stream.get_mut().padding_added(buffer_len);
+                }
+                Poll::Ready(Ok(())) => return Poll::Ready(Ok(())),
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+            }
+        }
+    }
+
+    fn poll_close_with_iat(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<StdResult<(), IoError>> {
+        loop {
+            let mut this = self.as_mut().project();
+            match futures::Sink::<&[u8]>::poll_close(this.stream.as_mut(), cx) {
+                Poll::Pending => {
+                    let target = this.stream.as_mut().get_mut().get_mut().take_pad_target();
+                    let Some(target) = target else {
+                        return Poll::Pending;
+                    };
+                    let stream = this.stream.as_mut().get_mut();
+                    let burst_len = stream.write_buffer().len();
+                    if let Err(error) =
+                        Self::pad_burst(stream, burst_len, target, this.padding_scratch)
+                    {
+                        return Poll::Ready(Err(error.into()));
+                    }
+                    let buffer_len = stream.write_buffer().len();
+                    stream.get_mut().padding_added(buffer_len);
+                }
+                Poll::Ready(Ok(())) => return Poll::Ready(Ok(())),
+                Poll::Ready(Err(error)) => return Poll::Ready(Err(error.into())),
+            }
+        }
+    }
 }
 
 impl<T> AsyncWrite for O4Stream<T>
@@ -370,38 +603,18 @@ where
         if let Some(error) = self.as_ref().get_ref().terminal_error.as_ref().cloned() {
             return Poll::Ready(Err(error.into_error()));
         }
-        // ── IAT delay gate ──────────────────────────────────────────────
-        // If a previous write armed an inter-arrival delay, wait for it
-        // to expire before sending the next batch. This shapes the write
-        // cadence according to the sampled distribution without blocking
-        // the executor (tokio::time::Sleep, not std::thread::sleep).
-        {
-            let this = self.as_mut().project();
-            if *this.iat_delay_pending {
-                match this.iat_sleep.as_mut().poll(cx) {
-                    Poll::Pending => return Poll::Pending,
-                    Poll::Ready(()) => {
-                        *this.iat_delay_pending = false;
-                    }
-                }
-            }
-        }
-
         let msg_len = buf.remaining();
         let iat_mode = {
             let this = self.as_mut().project();
             *this.iat_mode
         };
 
-        let mut this = self.as_mut().project();
-
-        // determine if the stream is ready to send an event?
-        match futures::Sink::<framing::PayloadFrame<'_>>::poll_ready(this.stream.as_mut(), cx) {
+        match self.as_mut().poll_ready_with_iat(cx) {
             Poll::Pending => return Poll::Pending,
-            Poll::Ready(Err(e)) => {
-                let error: IoError = e.into();
+            Poll::Ready(Err(error)) => {
                 if error.kind() != std::io::ErrorKind::Interrupted {
-                    *this.terminal_error = Some(StoredIoError::from_error(&error));
+                    *self.as_mut().project().terminal_error =
+                        Some(StoredIoError::from_error(&error));
                 } else {
                     cx.waker().wake_by_ref();
                     return Poll::Pending;
@@ -411,18 +624,7 @@ where
             Poll::Ready(Ok(())) => {}
         }
 
-        // Determine the chunk size for this write. In Paranoid mode, each
-        // chunk is sized by sampling the length distribution, producing
-        // variable-size segments that resist traffic analysis. In all other
-        // modes the full MAX_MESSAGE_PAYLOAD_LENGTH is used.
-        let chunk_size = if iat_mode == IAT::Paranoid {
-            let sampled = this.length_dist.sample().max(0) as usize;
-            // Clamp to valid message range: at least 1 byte, at most the
-            // protocol maximum.
-            sampled.clamp(1, framing::MAX_MESSAGE_PAYLOAD_LENGTH)
-        } else {
-            framing::MAX_MESSAGE_PAYLOAD_LENGTH
-        };
+        let chunk_size = framing::MAX_MESSAGE_PAYLOAD_LENGTH;
 
         // while we have bytes in the buffer write `chunk_size` pieces
         // until we have less than that amount left.
@@ -430,6 +632,7 @@ where
         let mut len_sent: usize = 0;
         let mut burst_len = 0;
         while msg_len - len_sent > chunk_size {
+            let mut this = self.as_mut().project();
             let payload = &buf[len_sent..len_sent + chunk_size];
             burst_len += framing::FRAME_OVERHEAD + framing::MESSAGE_OVERHEAD + payload.len();
             if let Err(e) = futures::Sink::<framing::PayloadFrame<'_>>::start_send(
@@ -455,55 +658,50 @@ where
             len_sent += chunk_size;
 
             // determine if the stream is ready to send more data. if not back off
-            match futures::Sink::<framing::PayloadFrame<'_>>::poll_ready(this.stream.as_mut(), cx) {
+            match self.as_mut().poll_ready_with_iat(cx) {
                 Poll::Pending => {
-                    let target = this.length_dist.sample().max(0) as usize;
-                    if let Err(e) = Self::pad_burst(
-                        this.stream.as_mut().get_mut(),
-                        burst_len,
-                        target,
-                        this.padding_scratch,
-                    ) {
-                        let error: IoError = e.into();
-                        *this.terminal_error = Some(StoredIoError::from_error(&error));
-                        return Poll::Ready(Ok(len_sent));
-                    }
-                    if iat_mode != IAT::Off {
-                        let delay =
-                            Duration::from_micros(this.iat_dist.sample().max(0) as u64 * 100);
-                        this.iat_sleep.as_mut().reset(Instant::now() + delay);
-                        *this.iat_delay_pending = true;
-                    }
-                    return Poll::Ready(Ok(len_sent));
-                }
-                Poll::Ready(Err(e)) => {
-                    let error: IoError = e.into();
-                    if error.kind() == std::io::ErrorKind::Interrupted {
+                    if iat_mode != IAT::Paranoid {
+                        let mut this = self.as_mut().project();
                         let target = this.length_dist.sample().max(0) as usize;
-                        if let Err(padding_error) = Self::pad_burst(
+                        if let Err(e) = Self::pad_burst(
                             this.stream.as_mut().get_mut(),
                             burst_len,
                             target,
                             this.padding_scratch,
                         ) {
-                            let padding_error: IoError = padding_error.into();
-                            *this.terminal_error = Some(StoredIoError::from_error(&padding_error));
+                            let error: IoError = e.into();
+                            *this.terminal_error = Some(StoredIoError::from_error(&error));
                         }
-                        if iat_mode != IAT::Off {
-                            let delay =
-                                Duration::from_micros(this.iat_dist.sample().max(0) as u64 * 100);
-                            this.iat_sleep.as_mut().reset(Instant::now() + delay);
-                            *this.iat_delay_pending = true;
+                    }
+                    return Poll::Ready(Ok(len_sent));
+                }
+                Poll::Ready(Err(error)) => {
+                    if error.kind() == std::io::ErrorKind::Interrupted {
+                        if iat_mode != IAT::Paranoid {
+                            let mut this = self.as_mut().project();
+                            let target = this.length_dist.sample().max(0) as usize;
+                            if let Err(padding_error) = Self::pad_burst(
+                                this.stream.as_mut().get_mut(),
+                                burst_len,
+                                target,
+                                this.padding_scratch,
+                            ) {
+                                let padding_error: IoError = padding_error.into();
+                                *this.terminal_error =
+                                    Some(StoredIoError::from_error(&padding_error));
+                            }
                         }
                         return Poll::Ready(Ok(len_sent));
                     }
-                    *this.terminal_error = Some(StoredIoError::from_error(&error));
+                    *self.as_mut().project().terminal_error =
+                        Some(StoredIoError::from_error(&error));
                     return Poll::Ready(Ok(len_sent));
                 }
                 Poll::Ready(Ok(())) => {}
             }
         }
 
+        let mut this = self.as_mut().project();
         // Length padding remains enabled independently of IAT delays.
         let payload = &buf[len_sent..];
         burst_len += framing::FRAME_OVERHEAD + framing::MESSAGE_OVERHEAD + payload.len();
@@ -526,31 +724,24 @@ where
                 Ok(len_sent)
             });
         }
-        let target = this.length_dist.sample().max(0) as usize;
-        if let Err(e) = Self::pad_burst(
-            this.stream.as_mut().get_mut(),
-            burst_len,
-            target,
-            this.padding_scratch,
-        ) {
-            let error: IoError = e.into();
-            *this.terminal_error = Some(StoredIoError::from_error(&error));
-            return Poll::Ready(Ok(msg_len));
-        }
-
-        // ── Arm the IAT delay for the *next* write ──────────────────────
-        if iat_mode != IAT::Off {
-            let this = self.as_mut().project();
-            let sample = this.iat_dist.sample().max(0) as u64;
-            let delay = Duration::from_micros(sample * 100);
-            this.iat_sleep.as_mut().reset(Instant::now() + delay);
-            *this.iat_delay_pending = true;
+        if iat_mode != IAT::Paranoid {
+            let target = this.length_dist.sample().max(0) as usize;
+            if let Err(e) = Self::pad_burst(
+                this.stream.as_mut().get_mut(),
+                burst_len,
+                target,
+                this.padding_scratch,
+            ) {
+                let error: IoError = e.into();
+                *this.terminal_error = Some(StoredIoError::from_error(&error));
+                return Poll::Ready(Ok(msg_len));
+            }
         }
 
         Poll::Ready(Ok(msg_len))
     }
 
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<StdResult<(), IoError>> {
+    fn poll_flush(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<StdResult<(), IoError>> {
         trace!("{} flushing", self.session.id());
         if self.as_ref().get_ref().shutdown_complete {
             return Poll::Ready(Ok(()));
@@ -558,13 +749,11 @@ where
         if let Some(error) = self.as_ref().get_ref().terminal_error.as_ref().cloned() {
             return Poll::Ready(Err(error.into_error()));
         }
-        let mut this = self.project();
-        match futures::Sink::<&[u8]>::poll_flush(this.stream.as_mut(), cx) {
-            Poll::Ready(Ok(_)) => Poll::Ready(Ok(())),
-            Poll::Ready(Err(e)) => {
-                let error: IoError = e.into();
+        match self.as_mut().poll_flush_with_iat(cx) {
+            Poll::Ready(Ok(())) => Poll::Ready(Ok(())),
+            Poll::Ready(Err(error)) => {
                 if error.kind() != std::io::ErrorKind::Interrupted {
-                    *this.terminal_error = Some(StoredIoError::from_error(&error));
+                    *self.project().terminal_error = Some(StoredIoError::from_error(&error));
                 } else {
                     cx.waker().wake_by_ref();
                     return Poll::Pending;
@@ -575,7 +764,10 @@ where
         }
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<StdResult<(), IoError>> {
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<StdResult<(), IoError>> {
         trace!("{} shutting down", self.session.id());
         if self.as_ref().get_ref().shutdown_complete {
             return Poll::Ready(Ok(()));
@@ -583,18 +775,21 @@ where
         if let Some(error) = self.as_ref().get_ref().terminal_error.as_ref().cloned() {
             return Poll::Ready(Err(error.into_error()));
         }
-        // On shutdown, skip any pending IAT delay — we want to close promptly.
-        let mut this = self.project();
-        *this.iat_delay_pending = false;
-        match futures::Sink::<&[u8]>::poll_close(this.stream.as_mut(), cx) {
+        self.as_mut()
+            .project()
+            .stream
+            .as_mut()
+            .get_mut()
+            .get_mut()
+            .clear_delay();
+        match self.as_mut().poll_close_with_iat(cx) {
             Poll::Ready(Ok(_)) => {
-                *this.shutdown_complete = true;
+                *self.project().shutdown_complete = true;
                 Poll::Ready(Ok(()))
             }
-            Poll::Ready(Err(e)) => {
-                let error: IoError = e.into();
+            Poll::Ready(Err(error)) => {
                 if error.kind() != std::io::ErrorKind::Interrupted {
-                    *this.terminal_error = Some(StoredIoError::from_error(&error));
+                    *self.project().terminal_error = Some(StoredIoError::from_error(&error));
                 } else {
                     cx.waker().wake_by_ref();
                     return Poll::Pending;

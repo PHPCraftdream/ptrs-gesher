@@ -17,6 +17,8 @@ struct CarrierScript {
     flush_error: Option<std::io::ErrorKind>,
     shutdown_error: Option<std::io::ErrorKind>,
     wire: Vec<u8>,
+    write_sizes: Vec<usize>,
+    write_times: Vec<Instant>,
 }
 
 struct ScriptedCarrier {
@@ -66,6 +68,10 @@ impl AsyncWrite for ScriptedCarrier {
         if let Poll::Ready(Ok(written)) = result {
             let mut script = self.as_ref().get_ref().script.lock().unwrap();
             script.wire.extend_from_slice(&buf[..written]);
+            if written > 0 {
+                script.write_sizes.push(written);
+                script.write_times.push(Instant::now());
+            }
             if count_success && script.successful_writes_before_error > 0 {
                 script.successful_writes_before_error -= 1;
             }
@@ -143,7 +149,10 @@ async fn seed_received_after_handshake_updates_both_distributions() {
         client.s.length_dist.to_string(),
         expected_length.to_string()
     );
-    assert_eq!(client.s.iat_dist.to_string(), expected_iat.to_string());
+    assert_eq!(
+        client.iat_dist_for_test().to_string(),
+        expected_iat.to_string()
+    );
 }
 
 async fn stream_pair(
@@ -196,13 +205,17 @@ async fn scripted_pair(
     );
     let mut client = client.unwrap();
     client.s.stream.set_backpressure_boundary(1);
-    client.s.iat_dist = WeightedDist::new(
+    client.set_iat_dist_for_test(WeightedDist::new(
         drbg::Seed::try_from(&[9u8; SEED_LENGTH][..]).unwrap(),
-        0,
         1,
+        2,
         false,
-    );
-    script.lock().unwrap().wire.clear();
+    ));
+    let mut script_state = script.lock().unwrap();
+    script_state.wire.clear();
+    script_state.write_sizes.clear();
+    script_state.write_times.clear();
+    drop(script_state);
     (client, server.unwrap(), script)
 }
 
@@ -216,7 +229,9 @@ async fn write_error_before_new_prefix_is_reported_for_every_iat_mode() {
     for mode in [IAT::Off, IAT::Enabled, IAT::Paranoid] {
         let (mut client, _server, script) = scripted_pair(mode).await;
         if mode == IAT::Paranoid {
-            client.s.length_dist = fixed_length_distribution();
+            let dist = fixed_length_distribution();
+            client.s.length_dist = dist.clone();
+            client.s.stream.get_mut().length_dist = dist;
         }
         client.write_all(b"already buffered").await.unwrap();
         set_script(&script, |script| {
@@ -478,7 +493,8 @@ async fn wire_padding_matches_reference_lengths_and_authenticates() {
             let km = [0x42; framing::KEY_MATERIAL_LENGTH];
             let mut framed = Framed::new(socket, framing::Obfs4Codec::new(km, km));
             let mut scratch = BytesMut::with_capacity(SEG);
-            O4Stream::pad_burst(&mut framed, tail, target, &mut scratch).unwrap();
+            O4Stream::<tokio::io::DuplexStream>::pad_burst(&mut framed, tail, target, &mut scratch)
+                .unwrap();
             let mut wire = framed.write_buffer().clone();
             let pad = if target >= tail {
                 target - tail
@@ -510,10 +526,10 @@ fn padding_scratch_reuses_its_allocation() {
     let mut framed = Framed::new(socket, framing::Obfs4Codec::new(km, km));
     let mut scratch = BytesMut::with_capacity(SEG);
 
-    O4Stream::pad_burst(&mut framed, 0, SEG / 2, &mut scratch).unwrap();
+    O4Stream::<tokio::io::DuplexStream>::pad_burst(&mut framed, 0, SEG / 2, &mut scratch).unwrap();
     let pointer = scratch.as_ptr();
     let capacity = scratch.capacity();
-    O4Stream::pad_burst(&mut framed, 1, SEG / 2, &mut scratch).unwrap();
+    O4Stream::<tokio::io::DuplexStream>::pad_burst(&mut framed, 1, SEG / 2, &mut scratch).unwrap();
     assert_eq!(scratch.as_ptr(), pointer);
     assert_eq!(scratch.capacity(), capacity);
 }
@@ -601,10 +617,15 @@ async fn iat_enabled_adds_delay() {
     // the delay leaves the timer always cleared, and the assertion fires.
     let mut saw_pending = false;
     for _ in 0..5 {
-        c_stream.write_all(b"test payload data").await.unwrap();
-        c_stream.flush().await.unwrap();
+        c_stream
+            .write_all(&vec![0x55; framing::MAX_MESSAGE_PAYLOAD_LENGTH * 8])
+            .await
+            .unwrap();
         if c_stream.iat_delay_is_pending_for_test() {
             saw_pending = true;
+        }
+        c_stream.flush().await.unwrap();
+        if saw_pending {
             break;
         }
     }
@@ -615,8 +636,7 @@ async fn iat_enabled_adds_delay() {
     );
 }
 
-/// IAT::Paranoid must also introduce delays AND use variable-size
-/// chunks (from length_dist).
+/// IAT::Paranoid must introduce delays between sampled ciphertext targets.
 ///
 /// Negative control: without IAT delay, elapsed would be zero.
 #[tokio::test(start_paused = true)]
@@ -647,10 +667,15 @@ async fn iat_paranoid_adds_delay() {
     // assertions flaky).
     let mut saw_pending = false;
     for _ in 0..5 {
-        c_stream.write_all(b"test payload data here").await.unwrap();
-        c_stream.flush().await.unwrap();
+        c_stream
+            .write_all(&vec![0x66; framing::MAX_MESSAGE_PAYLOAD_LENGTH * 8])
+            .await
+            .unwrap();
         if c_stream.iat_delay_is_pending_for_test() {
             saw_pending = true;
+        }
+        c_stream.flush().await.unwrap();
+        if saw_pending {
             break;
         }
     }
@@ -689,4 +714,73 @@ async fn iat_shutdown_clears_delay() {
     c_stream.write_all(b"data before shutdown").await.unwrap();
     // Shutdown should not hang waiting for the IAT delay.
     c_stream.shutdown().await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn iat_shapes_actual_carrier_writes_and_flush_waits() {
+    use tokio::io::AsyncWriteExt;
+
+    for mode in [IAT::Enabled, IAT::Paranoid] {
+        let (mut client, _server, script) = scripted_pair(mode).await;
+        if mode == IAT::Paranoid {
+            let dist = fixed_length_distribution();
+            client.s.length_dist = dist.clone();
+            client.s.stream.get_mut().length_dist = dist;
+        }
+        client
+            .write_all(&vec![0x5a; framing::MAX_MESSAGE_PAYLOAD_LENGTH * 12])
+            .await
+            .unwrap();
+        let flush_started = Instant::now();
+        client.flush().await.unwrap();
+        assert!(Instant::now() - flush_started >= Duration::from_micros(100));
+
+        let script = script.lock().unwrap();
+        assert!(script.write_sizes.len() > 1);
+        assert!(script
+            .write_sizes
+            .iter()
+            .all(|size| *size <= framing::MAX_SEGMENT_LENGTH));
+        assert!(script
+            .write_times
+            .windows(2)
+            .all(|times| times[1] - times[0] >= Duration::from_micros(100)));
+        if mode == IAT::Paranoid {
+            assert!(script.write_sizes.iter().all(|size| *size <= 65));
+        }
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn iat_partial_carrier_writes_share_one_scheduled_delay() {
+    use tokio::io::AsyncWriteExt;
+
+    for mode in [IAT::Enabled, IAT::Paranoid] {
+        let (mut client, mut server, script) = scripted_pair(mode).await;
+        if mode == IAT::Paranoid {
+            let dist = fixed_length_distribution();
+            client.s.length_dist = dist.clone();
+            client.s.stream.get_mut().length_dist = dist;
+        }
+        set_script(&script, |script| script.partial_write_limit = Some(7));
+        let payload = vec![0x5b; framing::MAX_MESSAGE_PAYLOAD_LENGTH * 8];
+        client.write_all(&payload).await.unwrap();
+        client.flush().await.unwrap();
+
+        let mut received = vec![0; payload.len()];
+        server.read_exact(&mut received).await.unwrap();
+        assert_eq!(received, payload);
+
+        let script = script.lock().unwrap();
+        assert!(script.write_sizes.len() > 10);
+        assert!(script.write_sizes.iter().all(|size| *size <= 7));
+        assert!(script
+            .write_times
+            .windows(2)
+            .any(|times| times[1] == times[0]));
+        assert!(script
+            .write_times
+            .windows(2)
+            .any(|times| times[1] - times[0] >= Duration::from_micros(100)));
+    }
 }
