@@ -74,6 +74,7 @@ where
         self.drbg_seed = Some(state.drbg_seed_value);
         self.seed_override = true;
         self.config_error = None;
+        self.invalidate_effective_configuration();
 
         trace!(
             "node_pubkey: {}, node_id: {}, iat: {}",

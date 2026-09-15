@@ -18,7 +18,13 @@ use crate::{
 };
 use ptrs::args::Args;
 
-use std::{borrow::BorrowMut, marker::PhantomData, path::Path, str::FromStr, sync::Arc};
+use std::{
+    borrow::BorrowMut,
+    marker::PhantomData,
+    path::{Path, PathBuf},
+    str::FromStr,
+    sync::{Arc, Mutex},
+};
 
 use bytes::{Buf, BufMut, Bytes};
 use hex::FromHex;
@@ -52,7 +58,23 @@ pub struct ServerBuilder<T> {
     pub(crate) seed_override: bool,
     statefile_is_file: bool,
     persist_statefile: bool,
+    effective_configuration: Mutex<Option<EffectiveServerConfiguration>>,
     _stream_type: PhantomData<T>,
+}
+
+#[derive(Clone)]
+struct EffectiveServerConfiguration {
+    identity_keys: Obfs4NtorSecretKey,
+    iat_mode: IAT,
+    drbg_seed: drbg::Seed,
+    persist_statefile: bool,
+    statefile_observation: Option<StatefileObservation>,
+}
+
+#[derive(Clone)]
+struct StatefileObservation {
+    path: PathBuf,
+    contents: Option<Vec<u8>>,
 }
 
 impl<T> Default for ServerBuilder<T> {
@@ -71,6 +93,7 @@ impl<T> Default for ServerBuilder<T> {
             seed_override: false,
             statefile_is_file: false,
             persist_statefile: true,
+            effective_configuration: Mutex::new(None),
             _stream_type: PhantomData,
         }
     }
@@ -82,6 +105,7 @@ impl<T> ServerBuilder<T> {
     pub fn node_keys(&mut self, keys: [u8; KEY_LENGTH * 2]) -> &Self {
         if let Err(error) = self.try_node_keys(keys) {
             self.config_error = Some(error.to_string());
+            self.invalidate_effective_configuration();
         }
         self
     }
@@ -99,6 +123,7 @@ impl<T> ServerBuilder<T> {
         self.identity_keys.sk = secret;
         self.identity_keys.pk.pk = pk.into();
         self.config_error = None;
+        self.invalidate_effective_configuration();
         self.identity_override = true;
         Ok(self)
     }
@@ -108,22 +133,32 @@ impl<T> ServerBuilder<T> {
         self.statefile_path = Some(path.into());
         self.statefile_is_file = false;
         self.persist_statefile = true;
+        self.invalidate_effective_configuration();
         self
     }
 
     /// Import and validate a state directory or explicit state file.
     pub fn try_statefile_path(&mut self, path: &str) -> Result<&mut Self> {
+        self.invalidate_effective_configuration();
         let state = Self::read_state_path(path)?;
         let mut args = Args::new();
         state.extend_args(&mut args);
         let parsed = RequiredServerState::try_from(&args)?;
+        let drbg_seed = parsed.drbg_seed_value.clone();
         self.identity_keys = parsed.private_key;
         self.iat_mode = parsed.iat_mode;
-        self.drbg_seed = Some(parsed.drbg_seed_value);
+        self.drbg_seed = Some(drbg_seed.clone());
         self.statefile_path = Some(path.into());
         self.config_error = None;
         self.statefile_is_file = Path::new(path).is_file();
         self.persist_statefile = !self.statefile_is_file;
+        self.remember_effective_configuration(EffectiveServerConfiguration {
+            identity_keys: self.identity_keys.clone(),
+            iat_mode: self.iat_mode,
+            drbg_seed,
+            persist_statefile: false,
+            statefile_observation: None,
+        });
         Ok(self)
     }
 
@@ -131,6 +166,7 @@ impl<T> ServerBuilder<T> {
     pub fn node_id(&mut self, id: [u8; NODE_ID_LENGTH]) -> &Self {
         self.identity_keys.pk.id = id.into();
         self.node_id_override = true;
+        self.invalidate_effective_configuration();
         self
     }
 
@@ -138,6 +174,7 @@ impl<T> ServerBuilder<T> {
     pub fn iat_mode(&mut self, iat: IAT) -> &Self {
         self.iat_mode = iat;
         self.iat_override = true;
+        self.invalidate_effective_configuration();
         self
     }
 
@@ -160,11 +197,24 @@ impl<T> ServerBuilder<T> {
     }
 
     /// Encode the server's public parameters as a bridge-line argument string for clients.
+    /// Returns an empty string when the effective configuration is unavailable.
     pub fn client_params(&self) -> String {
+        self.try_client_params().unwrap_or_default()
+    }
+
+    /// Encode the effective server configuration as client bridge-line arguments.
+    ///
+    /// The first call resolves and caches the effective configuration. Later calls
+    /// reuse it until a relevant setter or explicit state-file import invalidates it.
+    pub fn try_client_params(&self) -> Result<String> {
+        if let Some(error) = &self.config_error {
+            return Err(error.clone().into());
+        }
+        let effective = self.effective_configuration()?;
         let mut params = Args::new();
-        params.add(CERT_ARG, &self.identity_keys.pk.to_string());
-        params.add(IAT_ARG, &self.iat_mode.to_string());
-        params.encode_smethod_args()
+        params.add(CERT_ARG, &effective.identity_keys.pk.to_string());
+        params.add(IAT_ARG, &effective.iat_mode.to_string());
+        Ok(params.encode_smethod_args())
     }
 
     /// Consume this builder and produce a [`Server`] ready to accept connections.
@@ -185,22 +235,82 @@ impl<T> ServerBuilder<T> {
 
     /// Build a server, loading and validating the configured state file.
     pub fn try_build(&self) -> Result<Server> {
-        let mut identity_keys = self.identity_keys.clone();
-        let mut iat_mode = self.iat_mode;
-        let mut drbg_seed = self.drbg_seed.clone();
         if let Some(error) = &self.config_error {
             return Err(error.clone().into());
         }
-        if let Some(path) = &self.statefile_path {
-            let path_ref = Path::new(path);
-            let state_exists = if self.statefile_is_file {
-                path_ref.is_file()
-            } else {
-                path_ref.join(STATE_FILENAME).is_file()
-            };
+        let effective = self.effective_configuration()?;
+        let EffectiveServerConfiguration {
+            identity_keys,
+            iat_mode,
+            drbg_seed,
+            persist_statefile,
+            statefile_observation,
+        } = effective;
+        let server = Server(Arc::new(ServerInner {
+            identity_keys,
+            iat_mode,
+            biased: false,
+            handshake_timeout: self.handshake_timeout.clone(),
+            drbg_seed: Some(drbg_seed),
+            configuration_error: None,
+            replay_filter: ReplayFilter::new(REPLAY_TTL),
+        }));
+        if persist_statefile {
+            let observation = statefile_observation
+                .as_ref()
+                .ok_or_else(|| Error::from("missing state-file persistence target"))?;
+            self.ensure_statefile_unchanged(observation)?;
+            server.write_statefile_to(&observation.path)?;
+            let drbg_seed = server
+                .0
+                .drbg_seed
+                .clone()
+                .ok_or_else(|| Error::from("server DRBG seed is unavailable"))?;
+            self.remember_effective_configuration(EffectiveServerConfiguration {
+                identity_keys: server.0.identity_keys.clone(),
+                iat_mode: server.0.iat_mode,
+                drbg_seed,
+                persist_statefile: false,
+                statefile_observation: None,
+            });
+        }
+        Ok(server)
+    }
+
+    fn effective_configuration(&self) -> Result<EffectiveServerConfiguration> {
+        let mut cached = self
+            .effective_configuration
+            .lock()
+            .map_err(|_| Error::from("effective server configuration cache is poisoned"))?;
+        if let Some(effective) = cached.as_ref() {
+            return Ok(effective.clone());
+        }
+        let effective = self.resolve_effective_configuration()?;
+        *cached = Some(effective.clone());
+        Ok(effective)
+    }
+
+    fn resolve_effective_configuration(&self) -> Result<EffectiveServerConfiguration> {
+        let mut identity_keys = self.identity_keys.clone();
+        let mut iat_mode = self.iat_mode;
+        let mut drbg_seed = self.drbg_seed.clone();
+        let statefile_target = self.statefile_target();
+        let state_exists = statefile_target
+            .as_ref()
+            .is_some_and(|target| target.is_file());
+        let statefile_contents = match statefile_target.as_ref() {
+            Some(target) if state_exists => Some(std::fs::read(target)?),
+            _ => None,
+        };
+        if self.statefile_path.is_some() {
             let needs_state = !self.identity_override || !self.iat_override || !self.seed_override;
             if needs_state && state_exists {
-                let state = Self::read_state_path(path)?;
+                let state: JsonServerState = serde_json::from_slice(
+                    statefile_contents
+                        .as_deref()
+                        .ok_or_else(|| Error::from("missing state-file contents"))?,
+                )
+                .map_err(|error| Error::Other(Box::new(error)))?;
                 let mut args = Args::new();
                 state.extend_args(&mut args);
                 let parsed = RequiredServerState::try_from(&args)?;
@@ -223,26 +333,63 @@ impl<T> ServerBuilder<T> {
             Some(seed) => seed,
             None => drbg::Seed::new()?,
         };
-        let server = Server(Arc::new(ServerInner {
+        let has_manual_overrides = self.identity_override
+            || self.node_id_override
+            || self.iat_override
+            || self.seed_override;
+        let persist_statefile = self.persist_statefile
+            && statefile_target.is_some()
+            && (!state_exists || has_manual_overrides);
+        let statefile_observation = match (persist_statefile, statefile_target) {
+            (true, Some(target)) => Some(StatefileObservation {
+                path: target,
+                contents: statefile_contents,
+            }),
+            _ => None,
+        };
+        Ok(EffectiveServerConfiguration {
             identity_keys,
             iat_mode,
-            biased: false,
-            handshake_timeout: self.handshake_timeout.clone(),
-            drbg_seed: Some(drbg_seed),
-            configuration_error: None,
-            replay_filter: ReplayFilter::new(REPLAY_TTL),
-        }));
-        if self.persist_statefile {
-            if let Some(path) = &self.statefile_path {
-                let target = if self.statefile_is_file {
-                    Path::new(path).to_path_buf()
-                } else {
-                    Path::new(path).join(STATE_FILENAME)
-                };
-                server.write_statefile_to(target)?;
+            drbg_seed,
+            persist_statefile,
+            statefile_observation,
+        })
+    }
+
+    fn statefile_target(&self) -> Option<PathBuf> {
+        self.statefile_path.as_ref().map(|path| {
+            if self.statefile_is_file {
+                Path::new(path).to_path_buf()
+            } else {
+                Path::new(path).join(STATE_FILENAME)
             }
+        })
+    }
+
+    // The comparison closes the ordinary overwrite window; a non-cooperating
+    // writer can still race after it, since replacement is not a CAS operation.
+    fn ensure_statefile_unchanged(&self, observation: &StatefileObservation) -> Result<()> {
+        let current = match std::fs::read(&observation.path) {
+            Ok(contents) => Some(contents),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+            Err(error) => return Err(error.into()),
+        };
+        if current != observation.contents {
+            return Err("state file changed after effective configuration was resolved".into());
         }
-        Ok(server)
+        Ok(())
+    }
+
+    pub(crate) fn invalidate_effective_configuration(&self) {
+        if let Ok(mut effective) = self.effective_configuration.lock() {
+            *effective = None;
+        }
+    }
+
+    fn remember_effective_configuration(&self, configuration: EffectiveServerConfiguration) {
+        if let Ok(mut effective) = self.effective_configuration.lock() {
+            *effective = Some(configuration);
+        }
     }
 
     /// Validate that the provided argument map contains all required server parameters.
@@ -599,6 +746,9 @@ impl Server {
 
 #[cfg(test)]
 mod tests {
+    #[path = "server_state_tests.rs"]
+    mod state_tests;
+
     use crate::dev;
 
     use super::*;
@@ -809,13 +959,6 @@ mod tests {
     }
 
     #[test]
-    fn validate_args_missing_fields() {
-        let args = Args::new();
-        let result = ServerBuilder::<TcpStream>::validate_args(&args);
-        assert!(result.is_err());
-    }
-
-    #[test]
     fn validate_args_valid() {
         let mut args = Args::new();
         args.add(NODE_ID_ARG, "0000000000000000000000000000000000000000");
@@ -848,22 +991,5 @@ mod tests {
             std::path::Path::new(dir),
             "parent directory must equal the input statedir"
         );
-    }
-
-    #[test]
-    fn parse_json_state_invalid_json() {
-        let mut args = Args::new();
-        let result =
-            ServerBuilder::<TcpStream>::server_state_from_json("not json".as_bytes(), &mut args);
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn json_extend_args_partial() {
-        let json_str = r#"{"node-id": "aabb"}"#;
-        let mut args = Args::new();
-        ServerBuilder::<TcpStream>::server_state_from_json(json_str.as_bytes(), &mut args).unwrap();
-        assert_eq!(args.retrieve(NODE_ID_ARG), Some("aabb".into()));
-        assert!(args.retrieve(PRIVATE_KEY_ARG).is_none());
     }
 }
