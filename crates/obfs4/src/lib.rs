@@ -23,6 +23,126 @@ pub use client::{Client, ClientBuilder};
 pub use proto::{Obfs4Stream, IAT};
 pub use server::{Server, ServerBuilder};
 
+pub(crate) mod iat_mode_json {
+    use super::IAT;
+    use serde::{de, Deserializer, Serializer};
+    use std::fmt;
+    use std::str::FromStr;
+
+    pub fn serialize<S>(value: &Option<IAT>, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match value {
+            None => serializer.serialize_none(),
+            Some(mode) => serializer.serialize_u8(match mode {
+                IAT::Off => 0,
+                IAT::Enabled => 1,
+                IAT::Paranoid => 2,
+            }),
+        }
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<IAT>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        struct IatModeVisitor;
+
+        impl<'de> de::Visitor<'de> for IatModeVisitor {
+            type Value = Option<IAT>;
+
+            fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+                formatter.write_str("iat-mode as an integer 0, 1, or 2, or a legacy string")
+            }
+
+            fn visit_none<E>(self) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(None)
+            }
+
+            fn visit_unit<E>(self) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Ok(None)
+            }
+
+            fn visit_str<E>(self, value: &str) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                IAT::from_str(value)
+                    .map(Some)
+                    .map_err(|error| E::custom(error.to_string()))
+            }
+
+            fn visit_string<E>(self, value: String) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                self.visit_str(&value)
+            }
+
+            fn visit_u64<E>(self, value: u64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                match value {
+                    0 => Ok(Some(IAT::Off)),
+                    1 => Ok(Some(IAT::Enabled)),
+                    2 => Ok(Some(IAT::Paranoid)),
+                    _ => Err(E::custom("iat-mode must be one of 0, 1, or 2")),
+                }
+            }
+
+            fn visit_u128<E>(self, value: u128) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if value <= 2 {
+                    self.visit_u64(value as u64)
+                } else {
+                    Err(E::custom("iat-mode must be one of 0, 1, or 2"))
+                }
+            }
+
+            fn visit_i64<E>(self, value: i64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if value < 0 {
+                    Err(E::custom("iat-mode cannot be negative"))
+                } else {
+                    self.visit_u64(value as u64)
+                }
+            }
+
+            fn visit_i128<E>(self, value: i128) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                if value < 0 {
+                    Err(E::custom("iat-mode cannot be negative"))
+                } else {
+                    self.visit_u128(value as u128)
+                }
+            }
+
+            fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E>
+            where
+                E: de::Error,
+            {
+                Err(E::custom("iat-mode must be an integer 0, 1, or 2"))
+            }
+        }
+
+        deserializer.deserialize_any(IatModeVisitor)
+    }
+}
+
 pub(crate) mod constants;
 pub(crate) mod handshake;
 pub(crate) mod sessions;

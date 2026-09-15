@@ -46,7 +46,8 @@ struct JsonClientState {
     #[serde(rename = "public-key", default)]
     public_key: Option<String>,
     #[serde(rename = "iat-mode", default)]
-    iat_mode: Option<String>,
+    #[serde(with = "crate::iat_mode_json")]
+    iat_mode: Option<IAT>,
 }
 
 /// Builder for constructing an obfs4 [`Client`] with connection parameters.
@@ -344,7 +345,7 @@ impl ClientBuilder {
             args.add(PUBLIC_KEY_ARG, &public_key);
         }
         if let Some(iat_mode) = state.iat_mode {
-            args.add(IAT_ARG, &iat_mode);
+            args.add(IAT_ARG, &iat_mode.to_string());
         }
         let mut loaded = ClientBuilder::default();
         loaded.apply_args(&args)?;
@@ -389,7 +390,7 @@ impl ClientBuilder {
             private_key: None,
             node_id: None,
             public_key: None,
-            iat_mode: Some(self.iat_mode.to_string()),
+            iat_mode: Some(self.iat_mode),
         };
         crate::atomic_write_json(target, &state)
     }
@@ -587,10 +588,72 @@ mod test {
         ));
         let _ = std::fs::remove_file(&path);
         builder.write_statefile(&path).unwrap();
+        let encoded: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(encoded["iat-mode"].as_u64(), Some(2));
         let from_state = ClientBuilder::from_statefile(path.to_string_lossy().as_ref()).unwrap();
         assert_eq!(from_state.station_pubkey, builder.station_pubkey);
         assert_eq!(from_state.iat_mode, builder.iat_mode);
         let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn client_imports_numeric_server_state_without_rewriting_it() {
+        let temporary = tempfile::tempdir().unwrap();
+        let state = temporary.path().join("server-state.json");
+        let mut server_builder = crate::ServerBuilder::<tokio::net::TcpStream>::default();
+        server_builder.iat_mode(IAT::Paranoid);
+        let server = server_builder.try_build().unwrap();
+        server.write_statefile_to(&state).unwrap();
+        let original = std::fs::read(&state).unwrap();
+
+        let mut importing = ClientBuilder::default();
+        importing.with_statefile_path(state.to_string_lossy().as_ref());
+        let client = importing.try_build().unwrap();
+
+        assert_eq!(client.iat_mode, IAT::Paranoid);
+        assert_eq!(std::fs::read(&state).unwrap(), original);
+    }
+
+    #[test]
+    fn client_accepts_legacy_string_iat_mode() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("client-state.json");
+        let server = crate::Server::getrandom();
+        let builder = server.client_params();
+        builder.write_statefile(&path).unwrap();
+        let mut state: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        state["iat-mode"] = serde_json::Value::String("2".into());
+        std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+
+        let restored = ClientBuilder::from_statefile(path.to_string_lossy().as_ref()).unwrap();
+        assert_eq!(restored.iat_mode, IAT::Paranoid);
+    }
+
+    #[test]
+    fn client_iat_mode_json_rejects_invalid_values() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join("client-state.json");
+        let server = crate::Server::getrandom();
+        server.client_params().write_statefile(&path).unwrap();
+        let original: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+
+        for value in [
+            serde_json::json!(true),
+            serde_json::json!(3),
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+        ] {
+            let mut state = original.clone();
+            state["iat-mode"] = value;
+            std::fs::write(&path, serde_json::to_vec(&state).unwrap()).unwrap();
+            assert!(
+                ClientBuilder::from_statefile(path.to_string_lossy().as_ref()).is_err(),
+                "{state}"
+            );
+        }
     }
 
     #[test]

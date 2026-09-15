@@ -310,7 +310,8 @@ struct JsonServerState {
     #[serde(rename = "drbg-seed")]
     drbg_seed: Option<String>,
     #[serde(rename = "iat-mode")]
-    iat_mode: Option<String>,
+    #[serde(default, with = "crate::iat_mode_json")]
+    iat_mode: Option<IAT>,
 }
 
 impl JsonServerState {
@@ -328,7 +329,7 @@ impl JsonServerState {
             args.add(SEED_ARG, &seed);
         }
         if let Some(mode) = self.iat_mode {
-            args.add(IAT_ARG, &mode);
+            args.add(IAT_ARG, &mode.to_string());
         }
     }
 }
@@ -544,7 +545,7 @@ impl Server {
                     .ok_or_else(|| Error::from("server DRBG seed is unavailable"))?
                     .to_string(),
             ),
-            iat_mode: Some(self.0.iat_mode.to_string()),
+            iat_mode: Some(self.0.iat_mode),
         };
         crate::atomic_write_json(&target, &state)?;
         Ok(())
@@ -617,6 +618,33 @@ mod tests {
         debug!("{:?}\n{}", args.encode_smethod_args(), test_state);
 
         Ok(())
+    }
+
+    #[test]
+    fn server_import_accepts_go_numeric_iat_mode_fixture() {
+        let temporary = tempfile::tempdir().unwrap();
+        let path = temporary.path().join(STATE_FILENAME);
+        let fixture = r#"{
+            "node-id": "0000000000000000000000000000000000000000",
+            "private-key": "3031323334353637383961626364656666656463626139383736353433323130",
+            "drbg-seed": "0a0b0c0d0e0f0a0b0c0d0e0f0a0b0c0d0e0f0a0b0c0d0e0f",
+            "iat-mode": 2
+        }"#;
+        std::fs::write(&path, fixture).unwrap();
+
+        let server = Server::new_from_statefile_at(&path).unwrap();
+        assert!(server.client_params().as_opts().contains("iat-mode=2"));
+    }
+
+    #[test]
+    fn iat_mode_json_rejects_invalid_values() {
+        for value in ["true", "3", "-1", "1.5"] {
+            let json = format!(r#"{{"iat-mode": {value}}}"#);
+            assert!(
+                serde_json::from_str::<JsonServerState>(&json).is_err(),
+                "{value}"
+            );
+        }
     }
 
     #[test]
@@ -731,6 +759,9 @@ mod tests {
         );
         let explicit_file = directory.join("import.json");
         server.write_statefile_to(&explicit_file).unwrap();
+        let encoded: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&explicit_file).unwrap()).unwrap();
+        assert_eq!(encoded["iat-mode"].as_u64(), Some(0));
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
