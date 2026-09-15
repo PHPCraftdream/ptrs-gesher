@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Update locked `rustls` to 0.23.45 to address
+  [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285.html).
 - **lyrebird**: keep stdin EOF detection active during graceful shutdown and
   cancel it without leaving a blocking reader behind. Join owned connection
   tasks before returning, including forced shutdown and setup failures.
