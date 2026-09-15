@@ -1,4 +1,5 @@
 use super::*;
+use crate::lifecycle::join_connection_tasks;
 
 #[tokio::test(start_paused = true)]
 async fn cancellation_interrupts_a_full_connection_limit() {
@@ -178,4 +179,36 @@ async fn owner_cancels_setup() {
     run.abort();
     assert!(run.await.is_err(), "aborted run should not return normally");
     assert!(accept.is_cancelled());
+}
+
+#[tokio::test]
+async fn reaping_join_error_removes_abort_handle_by_task_id() {
+    let ctx = RunTasks::new();
+    ctx.spawn_connection(std::future::pending::<()>()).await;
+    assert_eq!(ctx.aborts.lock().unwrap().len(), 1);
+
+    ctx.connections.lock().await.abort_all();
+    join_connection_tasks(&ctx).await;
+
+    assert!(ctx.aborts.lock().unwrap().is_empty());
+    assert!(ctx.connections.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn cancellation_race_after_scheduler_lock_releases_registered_task() {
+    let owner = RunOwner::new();
+    let ctx = owner.tasks();
+    let scheduler_lock = ctx.connections.lock().await;
+    let admission = tokio::spawn({
+        let ctx = ctx.clone();
+        async move { ctx.spawn_connection(async {}).await }
+    });
+    tokio::task::yield_now().await;
+
+    drop(owner);
+    drop(scheduler_lock);
+    admission.await.unwrap();
+    join_connection_tasks(&ctx).await;
+
+    assert!(ctx.aborts.lock().unwrap().is_empty());
 }

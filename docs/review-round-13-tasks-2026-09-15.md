@@ -11,7 +11,7 @@
 | PT13-03 | P2 | Закрыта | Builder и server используют общую effective configuration; handshake, сохранность statefile, тесты obfs4 и clippy/fmt прошли |
 | PT13-04 | P2 | После PT13-03 | Override ключевой пары сохраняет node ID из statefile |
 | PT13-05 | P2 | Закрыта | Переключение фильтра внутри активных spans, повторный вход и predicates полей проверены; тесты lyrebird и clippy/fmt прошли |
-| PT13-06 | P3 | Запланирована | Учёт abort handles без O(C) прохода на каждый admission |
+| PT13-06 | P3 | Закрыта | Abort handles индексируются по Task ID и удаляются при join; all-features тесты lyrebird, clippy/fmt прошли |
 
 Версии, release tags и публикация не меняются. Benchmarks и искусственные
 нагрузки не запускаются. Прежний автоматический цикл новых ревью этим

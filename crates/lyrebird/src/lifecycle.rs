@@ -1,4 +1,5 @@
 use std::{
+    collections::HashMap,
     future::Future,
     sync::{Arc, Mutex as StdMutex},
     time::Duration,
@@ -166,7 +167,7 @@ pub(super) struct RunTasks {
     /// Owns every spawned connection task until it is joined.
     pub(super) connections: Arc<Mutex<JoinSet<()>>>,
     /// Abort handles remain available while the scheduler lock is busy.
-    pub(super) aborts: Arc<StdMutex<Vec<tokio::task::AbortHandle>>>,
+    pub(super) aborts: Arc<StdMutex<HashMap<tokio::task::Id, tokio::task::AbortHandle>>>,
 }
 
 /// Owns the cancellation state for one run.
@@ -195,7 +196,7 @@ impl Drop for RunOwner {
         self.tasks.stop_accepting();
         self.tasks.conns.cancel();
         if let Ok(handles) = self.tasks.aborts.lock() {
-            for handle in handles.iter() {
+            for handle in handles.values() {
                 handle.abort();
             }
         }
@@ -215,7 +216,7 @@ impl RunTasks {
             conns: CancellationToken::new(),
             lifecycle: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNS)),
             connections: Arc::new(Mutex::new(JoinSet::new())),
-            aborts: Arc::new(StdMutex::new(Vec::new())),
+            aborts: Arc::new(StdMutex::new(HashMap::new())),
         }
     }
 
@@ -238,16 +239,25 @@ impl RunTasks {
     {
         let mut connections = self.connections.lock().await;
         let abort = connections.spawn(task);
+        let task_id = abort.id();
         if let Ok(mut handles) = self.aborts.lock() {
-            handles.retain(|handle| !handle.is_finished());
-            handles.push(abort.clone());
+            handles.insert(task_id, abort.clone());
             if self.accept.is_cancelled() || self.conns.is_cancelled() {
                 abort.abort();
             }
         } else if self.accept.is_cancelled() || self.conns.is_cancelled() {
             abort.abort();
         }
-        while let Some(result) = connections.try_join_next() {
+        while let Some(result) = connections.try_join_next_with_id() {
+            let task_id = match &result {
+                Ok((task_id, _)) => Some(*task_id),
+                Err(error) => Some(error.id()),
+            };
+            if let Some(task_id) = task_id {
+                if let Ok(mut handles) = self.aborts.lock() {
+                    handles.remove(&task_id);
+                }
+            }
             if let Err(error) = result {
                 warn!("connection task aborted: {error}");
             }
@@ -273,13 +283,19 @@ pub(super) async fn cancel_connections(ctx: &RunTasks) {
 
 pub(super) async fn join_connection_tasks(ctx: &RunTasks) {
     let mut connections = ctx.connections.lock().await;
-    while let Some(result) = connections.join_next().await {
+    while let Some(result) = connections.join_next_with_id().await {
+        let task_id = match &result {
+            Ok((task_id, _)) => Some(*task_id),
+            Err(error) => Some(error.id()),
+        };
+        if let Some(task_id) = task_id {
+            if let Ok(mut handles) = ctx.aborts.lock() {
+                handles.remove(&task_id);
+            }
+        }
         if let Err(error) = result {
             warn!("connection task aborted: {error}");
         }
-    }
-    if let Ok(mut handles) = ctx.aborts.lock() {
-        handles.retain(|handle| !handle.is_finished());
     }
 }
 
