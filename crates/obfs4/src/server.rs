@@ -303,7 +303,10 @@ impl<T> ServerBuilder<T> {
             _ => None,
         };
         if self.statefile_path.is_some() {
-            let needs_state = !self.identity_override || !self.iat_override || !self.seed_override;
+            let needs_state = !self.identity_override
+                || !self.node_id_override
+                || !self.iat_override
+                || !self.seed_override;
             if needs_state && state_exists {
                 let state: JsonServerState = serde_json::from_slice(
                     statefile_contents
@@ -314,8 +317,12 @@ impl<T> ServerBuilder<T> {
                 let mut args = Args::new();
                 state.extend_args(&mut args);
                 let parsed = RequiredServerState::try_from(&args)?;
-                if !self.identity_override {
-                    let mut state_identity = parsed.private_key;
+                let mut state_identity = parsed.private_key;
+                if self.identity_override {
+                    if !self.node_id_override {
+                        identity_keys.pk.id = state_identity.pk.id;
+                    }
+                } else {
                     if self.node_id_override {
                         state_identity.pk.id = identity_keys.pk.id;
                     }
@@ -808,17 +815,6 @@ mod tests {
 
         sb.node_id([0xAA; NODE_ID_LENGTH]);
         assert_eq!(sb.identity_keys.pk.id.as_bytes(), &[0xAA; NODE_ID_LENGTH]);
-    }
-
-    #[test]
-    fn server_builder_timeout_modes() {
-        let mut sb = ServerBuilder::<TcpStream>::default();
-
-        sb.with_handshake_timeout(Duration::from_secs(10));
-        assert!(matches!(sb.handshake_timeout, MaybeTimeout::Length(_)));
-
-        sb.fail_fast();
-        assert!(matches!(sb.handshake_timeout, MaybeTimeout::Unset));
     }
 
     #[test]

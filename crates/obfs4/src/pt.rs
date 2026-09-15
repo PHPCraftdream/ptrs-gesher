@@ -1,4 +1,5 @@
 use crate::{
+    constants::NODE_ID_ARG,
     proto::{MaybeTimeout, Obfs4Stream},
     Error, OBFS4_NAME,
 };
@@ -70,6 +71,7 @@ where
         let state = Self::parse_state(self.statefile_path.as_deref(), opts)?;
         self.identity_keys = state.private_key;
         self.identity_override = true;
+        self.node_id_override = opts.retrieve(NODE_ID_ARG).is_some();
         self.iat_mode(state.iat_mode);
         self.drbg_seed = Some(state.drbg_seed_value);
         self.seed_override = true;

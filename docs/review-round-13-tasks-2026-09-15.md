@@ -9,7 +9,7 @@
 | PT13-01 | P2 | Закрыта | Планировщик ciphertext-порций; 224 теста obfs4 и Rust/Go IAT 0/1/2 в обе стороны прошли |
 | PT13-02 | P2 | Закрыта | Числовой Go iat-mode и старые строковые файлы совместимы; 222 теста obfs4, fmt и clippy прошли |
 | PT13-03 | P2 | Закрыта | Builder и server используют общую effective configuration; handshake, сохранность statefile, тесты obfs4 и clippy/fmt прошли |
-| PT13-04 | P2 | После PT13-03 | Override ключевой пары сохраняет node ID из statefile |
+| PT13-04 | P2 | Закрыта | Keypair и node ID независимы; setters/options, handshake и persistence проверены; весь workspace с all-features, clippy/fmt прошёл |
 | PT13-05 | P2 | Закрыта | Переключение фильтра внутри активных spans, повторный вход и predicates полей проверены; тесты lyrebird и clippy/fmt прошли |
 | PT13-06 | P3 | Закрыта | Abort handles индексируются по Task ID и удаляются при join; all-features тесты lyrebird, clippy/fmt прошли |
 
