@@ -39,6 +39,31 @@ pub use pt::{Obfs4PT, Transport};
 mod error;
 pub use error::{Error, Result};
 
+pub(crate) fn atomic_write_json<T: serde::Serialize>(
+    path: &std::path::Path,
+    value: &T,
+) -> Result<()> {
+    let bytes = serde_json::to_vec_pretty(value).map_err(|e| Error::Other(Box::new(e)))?;
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
+    std::io::Write::write_all(&mut temporary, &bytes)?;
+    temporary.as_file().sync_all()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        temporary
+            .as_file()
+            .set_permissions(std::fs::Permissions::from_mode(0o600))?;
+    }
+    temporary
+        .persist(path)
+        .map_err(|error| Error::IOError(error.error))?;
+    Ok(())
+}
+
 /// The transport name string.
 pub const OBFS4_NAME: &str = "obfs4";
 

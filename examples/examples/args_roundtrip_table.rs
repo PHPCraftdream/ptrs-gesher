@@ -45,7 +45,7 @@ fn main() {
         let encoded = args.encode_smethod_args();
 
         // Parse the re-encoded string.
-        let roundtrip = Args::parse_client_parameters(&encoded).unwrap_or_else(|e| {
+        let roundtrip = Args::parse_smethod_args(&encoded).unwrap_or_else(|e| {
             panic!("roundtrip parse failed for {desc}: {e}");
         });
 

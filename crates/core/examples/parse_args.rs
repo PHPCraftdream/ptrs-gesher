@@ -14,7 +14,7 @@ fn main() {
     println!("Encoded: {encoded}");
 
     // Parse the encoded string again and verify equality.
-    let roundtrip = Args::parse_client_parameters(&encoded).expect("roundtrip parse");
+    let roundtrip = Args::parse_smethod_args(&encoded).expect("roundtrip parse");
     assert_eq!(args, roundtrip, "roundtrip must be equal");
     println!("Roundtrip OK.");
 }

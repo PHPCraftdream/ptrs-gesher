@@ -133,6 +133,16 @@ pub enum FrameError {
     /// An error occured with the I/O processing
     IO(String),
 
+    /// An I/O error with its machine-readable classification preserved.
+    IOWithKind {
+        /// Human-readable error detail.
+        message: String,
+        /// The standard I/O error classification.
+        kind: std::io::ErrorKind,
+        /// The originating OS error number, when one was available.
+        raw_os_error: Option<i32>,
+    },
+
     /// Returned when the decoder requires more data to continue.
     EAgain,
 
@@ -174,6 +184,12 @@ impl std::fmt::Display for FrameError {
             FrameError::IO(e) => {
                 write!(f, "framing: i/o error occured while processing frame: {e}")
             }
+            FrameError::IOWithKind { message, .. } => {
+                write!(
+                    f,
+                    "framing: i/o error occured while processing frame: {message}"
+                )
+            }
             FrameError::EAgain => write!(f, "framing: more data needed to decode"),
             FrameError::TagMismatch => write!(f, "framing: Poly1305 tag mismatch"),
             FrameError::NonceCounterWrapped => write!(f, "framing: Nonce counter wrapped"),
@@ -198,13 +214,27 @@ impl From<crypto_secretbox::Error> for FrameError {
 
 impl From<std::io::Error> for FrameError {
     fn from(value: std::io::Error) -> Self {
-        FrameError::IO(value.to_string())
+        FrameError::IOWithKind {
+            message: value.to_string(),
+            kind: value.kind(),
+            raw_os_error: value.raw_os_error(),
+        }
     }
 }
 
 impl From<FrameError> for std::io::Error {
     fn from(value: FrameError) -> Self {
-        std::io::Error::other(format!("{}", value))
+        match value {
+            FrameError::IOWithKind {
+                message,
+                kind,
+                raw_os_error,
+            } => raw_os_error.map_or_else(
+                || std::io::Error::new(kind, message),
+                std::io::Error::from_raw_os_error,
+            ),
+            value => std::io::Error::other(format!("{value}")),
+        }
     }
 }
 

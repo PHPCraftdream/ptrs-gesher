@@ -13,7 +13,7 @@
 //!   proper one (16 random bytes, base64-encoded) for camouflage.
 
 use std::io;
-use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+use std::net::{IpAddr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -131,15 +131,24 @@ pub(crate) async fn connect_with_timeout_context(
     resolver: &ResolverCache,
     tls: &TlsContext,
 ) -> Result<PrefixStream<WebTunnelStream>, Error> {
-    let deadline = Instant::now() + timeout;
-    tokio::time::timeout_at(deadline, connect_inner(config, resolver, tls, deadline))
-        .await
-        .map_err(|_| {
-            Error::Io(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "WebTunnel handshake timed out",
-            ))
-        })?
+    connect_with_timeout_context_bound(config, timeout, resolver, tls, None, None).await
+}
+
+pub(crate) async fn connect_with_timeout_context_bound(
+    config: &WebTunnelConfig,
+    timeout: Duration,
+    resolver: &ResolverCache,
+    tls: &TlsContext,
+    v4_bind: Option<SocketAddrV4>,
+    v6_bind: Option<SocketAddrV6>,
+) -> Result<PrefixStream<WebTunnelStream>, Error> {
+    let deadline = crate::deadline_for(timeout)?;
+    tokio::time::timeout_at(
+        deadline,
+        connect_inner(config, resolver, tls, deadline, v4_bind, v6_bind),
+    )
+    .await
+    .map_err(|_| crate::timeout_error())?
 }
 
 async fn connect_inner(
@@ -147,15 +156,33 @@ async fn connect_inner(
     resolver: &ResolverCache,
     tls: &TlsContext,
     deadline: Instant,
+    v4_bind: Option<SocketAddrV4>,
+    v6_bind: Option<SocketAddrV6>,
 ) -> Result<PrefixStream<WebTunnelStream>, Error> {
     let prepared = config.prepare()?;
-    let tcp = open_tcp(&prepared, resolver, deadline).await?;
+    let tcp = open_tcp(&prepared, resolver, deadline, v4_bind, v6_bind).await?;
 
     if prepared.use_tls {
         let tls_stream = tls_connect(&prepared, tcp, tls).await?;
-        upgrade_and_return(tls_stream, &prepared).await
+        upgrade_tls_and_return(tls_stream, &prepared).await
     } else {
         upgrade_and_return(tcp, &prepared).await
+    }
+}
+
+pub(crate) async fn upgrade_with_stream<S>(
+    io: S,
+    config: &PreparedConfig,
+    tls: &TlsContext,
+) -> Result<PrefixStream<WebTunnelStream<S>>, Error>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    if config.use_tls {
+        let tls_stream = tls_connect(config, io, tls).await?;
+        upgrade_tls_and_return(tls_stream, config).await
+    } else {
+        upgrade_and_return(io, config).await
     }
 }
 
@@ -174,26 +201,41 @@ async fn open_tcp(
     config: &PreparedConfig,
     resolver_cache: &ResolverCache,
     deadline: Instant,
+    v4_bind: Option<SocketAddrV4>,
+    v6_bind: Option<SocketAddrV6>,
 ) -> Result<TcpStream, Error> {
     let host = &config.host;
     let port = config.port;
 
     // Literal addresses need neither encrypted nor system DNS.
     if let Ok(ip) = host.parse::<IpAddr>() {
-        return connect_first_until(&[SocketAddr::new(ip, port)], deadline, TcpStream::connect)
-            .await
-            .map_err(Error::from);
+        return connect_first_until(&[SocketAddr::new(ip, port)], deadline, |addr| {
+            connect_bound(addr, v4_bind, v6_bind)
+        })
+        .await
+        .map_err(Error::from);
     }
 
     match config.doh_mode {
-        DohMode::Off => connect_system(host, port, deadline).await,
+        DohMode::Off => {
+            connect_system_with(host, port, deadline, |addr| {
+                connect_bound(addr, v4_bind, v6_bind)
+            })
+            .await
+        }
         DohMode::Strict => {
             let resolver = get_resolver(resolver_cache).map_err(Error::from)?;
-            connect_via_doh_strict_until(&resolver, host, port, deadline).await
+            connect_via_doh_strict_until(&resolver, host, port, deadline, |addr| {
+                connect_bound(addr, v4_bind, v6_bind)
+            })
+            .await
         }
         DohMode::Fallback => {
             let resolver = get_resolver(resolver_cache).ok();
-            connect_via_doh_fallback_until(resolver.as_deref(), host, port, deadline).await
+            connect_via_doh_fallback_until(resolver.as_deref(), host, port, deadline, |addr| {
+                connect_bound(addr, v4_bind, v6_bind)
+            })
+            .await
         }
     }
 }
@@ -221,13 +263,46 @@ async fn lookup_system(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
     Ok(addrs)
 }
 
-async fn connect_system(host: &str, port: u16, deadline: Instant) -> Result<TcpStream, Error> {
+async fn connect_system_with<F, Fut>(
+    host: &str,
+    port: u16,
+    deadline: Instant,
+    dial: F,
+) -> Result<TcpStream, Error>
+where
+    F: FnMut(SocketAddr) -> Fut,
+    Fut: std::future::Future<Output = io::Result<TcpStream>>,
+{
     let addrs = lookup_until(deadline, lookup_system(host, port))
         .await
         .map_err(Error::from)?;
-    connect_first_until(&addrs, deadline, TcpStream::connect)
+    connect_first_until(&addrs, deadline, dial)
         .await
         .map_err(Error::from)
+}
+
+async fn connect_bound(
+    addr: SocketAddr,
+    v4_bind: Option<SocketAddrV4>,
+    v6_bind: Option<SocketAddrV6>,
+) -> io::Result<TcpStream> {
+    let socket = match addr {
+        SocketAddr::V4(_) => {
+            let socket = tokio::net::TcpSocket::new_v4()?;
+            if let Some(bind) = v4_bind {
+                socket.bind(SocketAddr::V4(bind))?;
+            }
+            socket
+        }
+        SocketAddr::V6(_) => {
+            let socket = tokio::net::TcpSocket::new_v6()?;
+            if let Some(bind) = v6_bind {
+                socket.bind(SocketAddr::V6(bind))?;
+            }
+            socket
+        }
+    };
+    socket.connect(addr).await
 }
 
 async fn lookup_until<F, T>(deadline: Instant, future: F) -> io::Result<T>
@@ -251,17 +326,22 @@ where
 /// to the system resolver. This is the §F1 invariant the
 /// censorship-resistance use case depends on.
 ///
-async fn connect_via_doh_strict_until(
+async fn connect_via_doh_strict_until<F, Fut>(
     resolver: &DohResolver,
     host: &str,
     port: u16,
     deadline: Instant,
-) -> Result<TcpStream, Error> {
+    dial: F,
+) -> Result<TcpStream, Error>
+where
+    F: FnMut(SocketAddr) -> Fut,
+    Fut: std::future::Future<Output = io::Result<TcpStream>>,
+{
     connect_strict_with(
         || resolver.resolve(host, port),
         || lookup_system(host, port),
         deadline,
-        TcpStream::connect,
+        dial,
     )
     .await
     .map_err(Error::from)
@@ -339,22 +419,28 @@ pub(crate) async fn connect_via_doh_fallback(
         resolver,
         host,
         port,
-        Instant::now() + crate::DEFAULT_HANDSHAKE_TIMEOUT,
+        crate::deadline_for(crate::DEFAULT_HANDSHAKE_TIMEOUT)?,
+        TcpStream::connect,
     )
     .await
 }
 
-async fn connect_via_doh_fallback_until(
+async fn connect_via_doh_fallback_until<F, Fut>(
     resolver: Option<&DohResolver>,
     host: &str,
     port: u16,
     deadline: Instant,
-) -> Result<TcpStream, Error> {
+    dial: F,
+) -> Result<TcpStream, Error>
+where
+    F: FnMut(SocketAddr) -> Fut,
+    Fut: std::future::Future<Output = io::Result<TcpStream>>,
+{
     connect_fallback_with(
         resolver.map(|r| move || r.resolve(host, port)),
         || lookup_system(host, port),
         deadline,
-        TcpStream::connect,
+        dial,
     )
     .await
     .map_err(Error::from)
@@ -419,11 +505,14 @@ where
     }))
 }
 
-async fn tls_connect(
+async fn tls_connect<S>(
     config: &PreparedConfig,
-    tcp: TcpStream,
+    tcp: S,
     tls: &TlsContext,
-) -> Result<tokio_rustls::client::TlsStream<TcpStream>, Error> {
+) -> Result<tokio_rustls::client::TlsStream<S>, Error>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     let server_name = rustls::pki_types::ServerName::try_from(config.sni.clone())
         .map_err(|e| Error::Tls(format!("invalid SNI: {e}")))?;
 
@@ -455,14 +544,10 @@ fn build_tls_config() -> rustls::ClientConfig {
     client_config
 }
 
-/// Send the HTTP Upgrade request, read the 101 response, return the stream
-/// in raw-byte mode. `S` is either `TlsStream<TcpStream>` or `TcpStream`.
-async fn upgrade_and_return<S>(
-    mut stream: S,
-    config: &PreparedConfig,
-) -> Result<PrefixStream<WebTunnelStream>, Error>
+/// Send the HTTP Upgrade request, read the 101 response, return the stream.
+async fn read_upgrade<S>(mut stream: S, config: &PreparedConfig) -> Result<(S, Vec<u8>), Error>
 where
-    S: AsyncReadExt + AsyncWriteExt + Unpin + StreamWrapper + 'static,
+    S: AsyncReadExt + AsyncWriteExt + Unpin + Send + 'static,
 {
     let request = build_upgrade_request_prepared(config);
     stream
@@ -509,9 +594,33 @@ where
             );
         }
 
-        let inner = StreamWrapper::wrap(stream)?;
-        return Ok(PrefixStream::new(inner, leftover));
+        return Ok((stream, leftover));
     }
+}
+
+async fn upgrade_and_return<S>(
+    stream: S,
+    config: &PreparedConfig,
+) -> Result<PrefixStream<WebTunnelStream<S>>, Error>
+where
+    S: AsyncReadExt + AsyncWriteExt + Unpin + Send + 'static,
+{
+    let (stream, leftover) = read_upgrade(stream, config).await?;
+    Ok(PrefixStream::new(WebTunnelStream::Plain(stream), leftover))
+}
+
+async fn upgrade_tls_and_return<S>(
+    stream: tokio_rustls::client::TlsStream<S>,
+    config: &PreparedConfig,
+) -> Result<PrefixStream<WebTunnelStream<S>>, Error>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let (stream, leftover) = read_upgrade(stream, config).await?;
+    Ok(PrefixStream::new(
+        WebTunnelStream::Tls(Box::new(stream)),
+        leftover,
+    ))
 }
 
 /// Incremental framing only; httparse validates the complete header.
@@ -539,24 +648,6 @@ impl HeaderBoundary {
             self.saw_status_line |= !empty;
         }
         None
-    }
-}
-
-/// Trait to convert the inner stream into a `WebTunnelStream`.
-/// Implemented separately for `TlsStream<TcpStream>` and `TcpStream`.
-trait StreamWrapper: Sized {
-    fn wrap(self) -> Result<WebTunnelStream, Error>;
-}
-
-impl StreamWrapper for tokio_rustls::client::TlsStream<TcpStream> {
-    fn wrap(self) -> Result<WebTunnelStream, Error> {
-        Ok(WebTunnelStream::Tls(Box::new(self)))
-    }
-}
-
-impl StreamWrapper for TcpStream {
-    fn wrap(self) -> Result<WebTunnelStream, Error> {
-        Ok(WebTunnelStream::Plain(self))
     }
 }
 

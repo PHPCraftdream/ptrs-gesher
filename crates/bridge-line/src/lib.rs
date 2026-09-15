@@ -10,6 +10,9 @@
 //! * `TRANSPORT` is a pluggable-transport name (e.g. `obfs4`, `snowflake`).
 //!   It is absent for plain bridges. We detect its absence by the first
 //!   non-`Bridge` token containing `:` (i.e. looking like `host:port`).
+//!   Transport names use the torrc identifier grammar
+//!   `[A-Za-z_][A-Za-z0-9_]*`. A transport named `Bridge` is rendered as
+//!   `Bridge Bridge ...` so its name cannot be mistaken for the directive.
 //! * `FINGERPRINT` is 40 ASCII hex characters (RSA identity fingerprint).
 //!   May be omitted for some PTs; we accept its absence.
 //! * Settings are space-separated `key=value` tokens; `value` may not
@@ -172,6 +175,11 @@ impl fmt::Display for BridgeLine {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut sep = "";
         if let Some(t) = &self.transport {
+            // The parser consumes a leading `Bridge` token as the optional
+            // directive. Escape the same token when it is the transport.
+            if t.eq_ignore_ascii_case("bridge") {
+                write!(f, "Bridge ")?;
+            }
             write!(f, "{t}")?;
             sep = " ";
         }
@@ -193,9 +201,9 @@ fn looks_like_address(s: &str) -> bool {
 }
 
 fn is_valid_transport_name(s: &str) -> bool {
-    !s.is_empty()
-        && s.chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    let mut chars = s.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 fn is_hex_fingerprint(s: &str) -> bool {
@@ -244,6 +252,18 @@ mod tests {
         let b: BridgeLine = line.parse().unwrap();
         let again: BridgeLine = b.to_string().parse().unwrap();
         assert_eq!(b, again);
+    }
+
+    #[test]
+    fn bridge_transport_roundtrips_with_explicit_directive() {
+        let line = "Bridge Bridge 1.2.3.4:80 ABCDEF0123456789ABCDEF0123456789ABCDEF01";
+        let bridge: BridgeLine = line.parse().unwrap();
+        assert_eq!(bridge.transport.as_deref(), Some("Bridge"));
+        assert_eq!(
+            bridge.to_string(),
+            "Bridge Bridge 1.2.3.4:80 ABCDEF0123456789ABCDEF0123456789ABCDEF01"
+        );
+        assert_eq!(bridge.to_string().parse::<BridgeLine>().unwrap(), bridge);
     }
 
     #[test]
@@ -345,6 +365,27 @@ mod tests {
     }
 
     #[test]
+    fn transport_must_start_with_letter_or_underscore() {
+        for name in ["1obfs4", "-obfs4", "обfs4"] {
+            let line = format!("{name} 1.2.3.4:80 ABCDEF0123456789ABCDEF0123456789ABCDEF01");
+            assert!(matches!(
+                line.parse::<BridgeLine>(),
+                Err(ParseError::InvalidTransport { .. })
+            ));
+        }
+        assert!(!is_valid_transport_name(""));
+    }
+
+    #[test]
+    fn transport_hyphen_is_rejected() {
+        let line = "obfs-4 1.2.3.4:80 ABCDEF0123456789ABCDEF0123456789ABCDEF01";
+        assert!(matches!(
+            line.parse::<BridgeLine>(),
+            Err(ParseError::InvalidTransport { .. })
+        ));
+    }
+
+    #[test]
     fn webtunnel_transport_parses() {
         let line = "webtunnel 192.0.2.3:1 ABCDEF0123456789ABCDEF0123456789ABCDEF01 url=https://example.com/secret ver=0.0.3";
         let b: BridgeLine = line.parse().unwrap();
@@ -385,7 +426,7 @@ mod proptests {
             Just("obfs4".to_string()),
             Just("webtunnel".to_string()),
             Just("snowflake".to_string()),
-            proptest::string::string_regex("[a-z][a-z0-9_-]{0,15}").unwrap(),
+            proptest::string::string_regex("[a-z][a-z0-9_]{0,15}").unwrap(),
         ]
     }
 

@@ -70,6 +70,28 @@ pub enum Error {
     /// A catch-all error.
     #[error("{0}")]
     Other(String),
+
+    /// The requested operation is not supported by this transport path.
+    #[error("unsupported operation: {0}")]
+    Unsupported(String),
+}
+
+pub(crate) fn timeout_error() -> Error {
+    Error::Io(io::Error::new(
+        io::ErrorKind::TimedOut,
+        "WebTunnel handshake timed out",
+    ))
+}
+
+pub(crate) fn deadline_for(timeout: Duration) -> Result<tokio::time::Instant, Error> {
+    tokio::time::Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| {
+            Error::Io(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "handshake timeout overflows deadline",
+            ))
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -289,10 +311,16 @@ impl PreparedConfig {
 // ---------------------------------------------------------------------------
 
 /// Builder for the WebTunnel client transport.
+///
+/// Configured bind addresses apply to [`WebTunnelClient::connect_url`].
+/// Carrier-based `establish` and `wrap` reject them instead of rebinding the
+/// supplied stream.
 #[derive(Clone, Debug)]
 pub struct WebTunnelBuilder {
     config: Option<WebTunnelConfig>,
     timeout: Duration,
+    v4_bind: Option<SocketAddrV4>,
+    v6_bind: Option<SocketAddrV6>,
     tls: TlsContext,
     resolver: ResolverCache,
 }
@@ -348,6 +376,8 @@ impl Default for WebTunnelBuilder {
         Self {
             config: None,
             timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+            v4_bind: None,
+            v6_bind: None,
             tls: tls_context(),
             resolver: resolver_cache(),
         }
@@ -379,6 +409,8 @@ where
         WebTunnelClient {
             config: self.config.clone(),
             timeout: self.timeout,
+            v4_bind: self.v4_bind,
+            v6_bind: self.v6_bind,
             tls: Arc::clone(&self.tls),
             resolver: Arc::clone(&self.resolver),
         }
@@ -390,7 +422,9 @@ where
     }
 
     fn statefile_location(&mut self, _path: &str) -> Result<&mut Self, Self::Error> {
-        Ok(self)
+        Err(Error::Unsupported(
+            "WebTunnel has no persistent client state".into(),
+        ))
     }
 
     fn timeout(&mut self, timeout: Option<Duration>) -> Result<&mut Self, Self::Error> {
@@ -398,11 +432,13 @@ where
         Ok(self)
     }
 
-    fn v4_bind_addr(&mut self, _addr: SocketAddrV4) -> Result<&mut Self, Self::Error> {
+    fn v4_bind_addr(&mut self, addr: SocketAddrV4) -> Result<&mut Self, Self::Error> {
+        self.v4_bind = Some(addr);
         Ok(self)
     }
 
-    fn v6_bind_addr(&mut self, _addr: SocketAddrV6) -> Result<&mut Self, Self::Error> {
+    fn v6_bind_addr(&mut self, addr: SocketAddrV6) -> Result<&mut Self, Self::Error> {
+        self.v6_bind = Some(addr);
         Ok(self)
     }
 }
@@ -419,8 +455,41 @@ where
 pub struct WebTunnelClient {
     config: Option<WebTunnelConfig>,
     timeout: Duration,
+    v4_bind: Option<SocketAddrV4>,
+    v6_bind: Option<SocketAddrV6>,
     tls: TlsContext,
     resolver: ResolverCache,
+}
+
+fn reject_bound_carrier(
+    v4_bind: Option<SocketAddrV4>,
+    v6_bind: Option<SocketAddrV6>,
+) -> Result<(), Error> {
+    if v4_bind.is_some() || v6_bind.is_some() {
+        return Err(Error::Unsupported(
+            "bind addresses apply only to direct URL connections".into(),
+        ));
+    }
+    Ok(())
+}
+
+impl WebTunnelClient {
+    /// Connect directly to the configured `url=` endpoint.
+    ///
+    /// This explicit API owns URL dialing. The [`ptrs::ClientTransport`]
+    /// methods use the supplied carrier and never create a second connection.
+    pub async fn connect_url(self) -> Result<PrefixStream<WebTunnelStream>, Error> {
+        let config = self.config.ok_or(Error::MissingUrl)?;
+        handshake::connect_with_timeout_context_bound(
+            &config,
+            self.timeout,
+            &self.resolver,
+            &self.tls,
+            self.v4_bind,
+            self.v6_bind,
+        )
+        .await
+    }
 }
 
 impl<InRW, InErr> ptrs::ClientTransport<InRW, InErr> for WebTunnelClient
@@ -428,43 +497,39 @@ where
     InRW: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
     InErr: std::error::Error + Send + Sync + 'static,
 {
-    type OutRW = PrefixStream<WebTunnelStream>;
+    type OutRW = PrefixStream<WebTunnelStream<InRW>>;
     type OutErr = Error;
     type Builder = WebTunnelBuilder;
 
     fn establish(self, input: Pin<F<InRW, InErr>>) -> Pin<F<Self::OutRW, Self::OutErr>> {
-        // Drop `input` WITHOUT awaiting it. The future, if awaited,
-        // would open a TCP connection to the SOCKS5-provided address
-        // (the cosmetic `bridge.addr`) — which for webtunnel is wrong
-        // and may even be unreachable. The real target lives in `url=`
-        // and we dial it directly inside `handshake::connect`.
-        drop(input);
         Box::pin(async move {
             let config = self.config.ok_or(Error::MissingUrl)?;
-            handshake::connect_with_timeout_context(
-                &config,
-                self.timeout,
-                &self.resolver,
-                &self.tls,
-            )
+            let prepared = config.prepare()?;
+            let deadline = deadline_for(self.timeout)?;
+            reject_bound_carrier(self.v4_bind, self.v6_bind)?;
+            tokio::time::timeout_at(deadline, async move {
+                let io = input.await.map_err(|error| {
+                    Error::Io(io::Error::other(format!("carrier dial failed: {error}")))
+                })?;
+                handshake::upgrade_with_stream(io, &prepared, &self.tls).await
+            })
             .await
+            .map_err(|_| timeout_error())?
         })
     }
 
     fn wrap(self, io: InRW) -> Pin<F<Self::OutRW, Self::OutErr>> {
-        // Same reasoning as `establish`: the pre-connected socket
-        // points at the wrong address for webtunnel, so we close it
-        // and open a fresh TLS connection to the URL host.
-        drop(io);
         Box::pin(async move {
             let config = self.config.ok_or(Error::MissingUrl)?;
-            handshake::connect_with_timeout_context(
-                &config,
-                self.timeout,
-                &self.resolver,
-                &self.tls,
+            let prepared = config.prepare()?;
+            let deadline = deadline_for(self.timeout)?;
+            reject_bound_carrier(self.v4_bind, self.v6_bind)?;
+            tokio::time::timeout_at(
+                deadline,
+                handshake::upgrade_with_stream(io, &prepared, &self.tls),
             )
             .await
+            .map_err(|_| timeout_error())?
         })
     }
 
@@ -475,14 +540,17 @@ where
 
 /// The result of a successful webtunnel handshake: a TLS stream
 /// (or plain TCP for `http://` URLs) that carries raw bytes.
-pub enum WebTunnelStream {
+pub enum WebTunnelStream<S = tokio::net::TcpStream> {
     /// A TLS-encrypted stream.
-    Tls(Box<tokio_rustls::client::TlsStream<tokio::net::TcpStream>>),
+    Tls(Box<tokio_rustls::client::TlsStream<S>>),
     /// A plain TCP stream (used for `http://` URLs).
-    Plain(tokio::net::TcpStream),
+    Plain(S),
 }
 
-impl AsyncRead for WebTunnelStream {
+impl<S> AsyncRead for WebTunnelStream<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     fn poll_read(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
@@ -495,7 +563,10 @@ impl AsyncRead for WebTunnelStream {
     }
 }
 
-impl AsyncWrite for WebTunnelStream {
+impl<S> AsyncWrite for WebTunnelStream<S>
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
     fn poll_write(
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,

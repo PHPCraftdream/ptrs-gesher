@@ -27,6 +27,30 @@ use std::{
 
 use super::framing::{FrameError, Messages};
 
+#[derive(Clone, Debug)]
+struct StoredIoError {
+    message: String,
+    kind: std::io::ErrorKind,
+    raw_os_error: Option<i32>,
+}
+
+impl StoredIoError {
+    fn from_error(error: &IoError) -> Self {
+        Self {
+            message: error.to_string(),
+            kind: error.kind(),
+            raw_os_error: error.raw_os_error(),
+        }
+    }
+
+    fn into_error(self) -> IoError {
+        self.raw_os_error.map_or_else(
+            || IoError::new(self.kind, self.message),
+            IoError::from_raw_os_error,
+        )
+    }
+}
+
 /// IAT (inter-arrival time) traffic shaping mode for obfs4 connections.
 #[allow(dead_code, unused)]
 #[non_exhaustive]
@@ -73,12 +97,27 @@ impl std::fmt::Display for IAT {
 }
 
 impl MaybeTimeout {
-    pub(crate) fn deadline(&self, default: Duration) -> Option<Instant> {
+    pub(crate) fn deadline(&self, default: Duration) -> std::io::Result<Option<Instant>> {
         match self {
-            MaybeTimeout::Default_ => Some(Instant::now() + default),
-            MaybeTimeout::Fixed(i) => Some(*i),
-            MaybeTimeout::Length(d) => Some(Instant::now() + *d),
-            MaybeTimeout::Unset => None,
+            MaybeTimeout::Default_ => {
+                Instant::now()
+                    .checked_add(default)
+                    .map(Some)
+                    .ok_or_else(|| {
+                        IoError::new(
+                            std::io::ErrorKind::InvalidInput,
+                            "handshake timeout overflows the monotonic clock",
+                        )
+                    })
+            }
+            MaybeTimeout::Fixed(i) => Ok(Some(*i)),
+            MaybeTimeout::Length(d) => Instant::now().checked_add(*d).map(Some).ok_or_else(|| {
+                IoError::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "handshake timeout overflows the monotonic clock",
+                )
+            }),
+            MaybeTimeout::Unset => Ok(None),
         }
     }
 }
@@ -156,6 +195,13 @@ where
 
     /// Reusable plaintext/wire staging for padding added after backpressure.
     padding_scratch: BytesMut,
+
+    /// A non-retryable carrier error observed after a prefix was accepted.
+    /// It is reported by the next operation without replaying that prefix.
+    terminal_error: Option<StoredIoError>,
+
+    /// Whether the carrier has completed its close operation.
+    shutdown_complete: bool,
 }
 
 impl<T> O4Stream<T>
@@ -213,6 +259,8 @@ where
             iat_sleep: Box::pin(tokio::time::sleep(Duration::ZERO)),
             iat_delay_pending: false,
             padding_scratch: BytesMut::with_capacity(framing::MAX_SEGMENT_LENGTH),
+            terminal_error: None,
+            shutdown_complete: false,
         };
         let mut buffered = std::mem::take(transport.stream.read_buffer_mut());
         while let Some(message) = transport.stream.codec_mut().decode(&mut buffered)? {
@@ -313,6 +361,15 @@ where
         if buf.is_empty() {
             return Poll::Ready(Ok(0));
         }
+        if self.as_ref().get_ref().shutdown_complete {
+            return Poll::Ready(Err(IoError::new(
+                std::io::ErrorKind::NotConnected,
+                "obfs4 stream is already shut down",
+            )));
+        }
+        if let Some(error) = self.as_ref().get_ref().terminal_error.as_ref().cloned() {
+            return Poll::Ready(Err(error.into_error()));
+        }
         // ── IAT delay gate ──────────────────────────────────────────────
         // If a previous write armed an inter-arrival delay, wait for it
         // to expire before sending the next batch. This shapes the write
@@ -341,7 +398,16 @@ where
         // determine if the stream is ready to send an event?
         match futures::Sink::<framing::PayloadFrame<'_>>::poll_ready(this.stream.as_mut(), cx) {
             Poll::Pending => return Poll::Pending,
-            Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
+            Poll::Ready(Err(e)) => {
+                let error: IoError = e.into();
+                if error.kind() != std::io::ErrorKind::Interrupted {
+                    *this.terminal_error = Some(StoredIoError::from_error(&error));
+                } else {
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                return Poll::Ready(Err(error));
+            }
             Poll::Ready(Ok(())) => {}
         }
 
@@ -366,10 +432,25 @@ where
         while msg_len - len_sent > chunk_size {
             let payload = &buf[len_sent..len_sent + chunk_size];
             burst_len += framing::FRAME_OVERHEAD + framing::MESSAGE_OVERHEAD + payload.len();
-            futures::Sink::<framing::PayloadFrame<'_>>::start_send(
+            if let Err(e) = futures::Sink::<framing::PayloadFrame<'_>>::start_send(
                 this.stream.as_mut(),
                 framing::PayloadFrame::new(payload),
-            )?;
+            ) {
+                let error: IoError = e.into();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    if len_sent == 0 {
+                        cx.waker().wake_by_ref();
+                        return Poll::Pending;
+                    }
+                    return Poll::Ready(Ok(len_sent));
+                }
+                *this.terminal_error = Some(StoredIoError::from_error(&error));
+                return Poll::Ready(if len_sent == 0 {
+                    Err(error)
+                } else {
+                    Ok(len_sent)
+                });
+            }
 
             len_sent += chunk_size;
 
@@ -377,12 +458,16 @@ where
             match futures::Sink::<framing::PayloadFrame<'_>>::poll_ready(this.stream.as_mut(), cx) {
                 Poll::Pending => {
                     let target = this.length_dist.sample().max(0) as usize;
-                    Self::pad_burst(
+                    if let Err(e) = Self::pad_burst(
                         this.stream.as_mut().get_mut(),
                         burst_len,
                         target,
                         this.padding_scratch,
-                    )?;
+                    ) {
+                        let error: IoError = e.into();
+                        *this.terminal_error = Some(StoredIoError::from_error(&error));
+                        return Poll::Ready(Ok(len_sent));
+                    }
                     if iat_mode != IAT::Off {
                         let delay =
                             Duration::from_micros(this.iat_dist.sample().max(0) as u64 * 100);
@@ -391,7 +476,30 @@ where
                     }
                     return Poll::Ready(Ok(len_sent));
                 }
-                Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
+                Poll::Ready(Err(e)) => {
+                    let error: IoError = e.into();
+                    if error.kind() == std::io::ErrorKind::Interrupted {
+                        let target = this.length_dist.sample().max(0) as usize;
+                        if let Err(padding_error) = Self::pad_burst(
+                            this.stream.as_mut().get_mut(),
+                            burst_len,
+                            target,
+                            this.padding_scratch,
+                        ) {
+                            let padding_error: IoError = padding_error.into();
+                            *this.terminal_error = Some(StoredIoError::from_error(&padding_error));
+                        }
+                        if iat_mode != IAT::Off {
+                            let delay =
+                                Duration::from_micros(this.iat_dist.sample().max(0) as u64 * 100);
+                            this.iat_sleep.as_mut().reset(Instant::now() + delay);
+                            *this.iat_delay_pending = true;
+                        }
+                        return Poll::Ready(Ok(len_sent));
+                    }
+                    *this.terminal_error = Some(StoredIoError::from_error(&error));
+                    return Poll::Ready(Ok(len_sent));
+                }
                 Poll::Ready(Ok(())) => {}
             }
         }
@@ -399,17 +507,36 @@ where
         // Length padding remains enabled independently of IAT delays.
         let payload = &buf[len_sent..];
         burst_len += framing::FRAME_OVERHEAD + framing::MESSAGE_OVERHEAD + payload.len();
-        futures::Sink::<framing::PayloadFrame<'_>>::start_send(
+        if let Err(e) = futures::Sink::<framing::PayloadFrame<'_>>::start_send(
             this.stream.as_mut(),
             framing::PayloadFrame::new(payload),
-        )?;
+        ) {
+            let error: IoError = e.into();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                if len_sent == 0 {
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                return Poll::Ready(Ok(len_sent));
+            }
+            *this.terminal_error = Some(StoredIoError::from_error(&error));
+            return Poll::Ready(if len_sent == 0 {
+                Err(error)
+            } else {
+                Ok(len_sent)
+            });
+        }
         let target = this.length_dist.sample().max(0) as usize;
-        Self::pad_burst(
+        if let Err(e) = Self::pad_burst(
             this.stream.as_mut().get_mut(),
             burst_len,
             target,
             this.padding_scratch,
-        )?;
+        ) {
+            let error: IoError = e.into();
+            *this.terminal_error = Some(StoredIoError::from_error(&error));
+            return Poll::Ready(Ok(msg_len));
+        }
 
         // ── Arm the IAT delay for the *next* write ──────────────────────
         if iat_mode != IAT::Off {
@@ -425,22 +552,55 @@ where
 
     fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<StdResult<(), IoError>> {
         trace!("{} flushing", self.session.id());
+        if self.as_ref().get_ref().shutdown_complete {
+            return Poll::Ready(Ok(()));
+        }
+        if let Some(error) = self.as_ref().get_ref().terminal_error.as_ref().cloned() {
+            return Poll::Ready(Err(error.into_error()));
+        }
         let mut this = self.project();
         match futures::Sink::<&[u8]>::poll_flush(this.stream.as_mut(), cx) {
             Poll::Ready(Ok(_)) => Poll::Ready(Ok(())),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(e.into())),
+            Poll::Ready(Err(e)) => {
+                let error: IoError = e.into();
+                if error.kind() != std::io::ErrorKind::Interrupted {
+                    *this.terminal_error = Some(StoredIoError::from_error(&error));
+                } else {
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                Poll::Ready(Err(error))
+            }
             Poll::Pending => Poll::Pending,
         }
     }
 
     fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<StdResult<(), IoError>> {
         trace!("{} shutting down", self.session.id());
+        if self.as_ref().get_ref().shutdown_complete {
+            return Poll::Ready(Ok(()));
+        }
+        if let Some(error) = self.as_ref().get_ref().terminal_error.as_ref().cloned() {
+            return Poll::Ready(Err(error.into_error()));
+        }
         // On shutdown, skip any pending IAT delay — we want to close promptly.
         let mut this = self.project();
         *this.iat_delay_pending = false;
         match futures::Sink::<&[u8]>::poll_close(this.stream.as_mut(), cx) {
-            Poll::Ready(Ok(_)) => Poll::Ready(Ok(())),
-            Poll::Ready(Err(e)) => Poll::Ready(Err(e.into())),
+            Poll::Ready(Ok(_)) => {
+                *this.shutdown_complete = true;
+                Poll::Ready(Ok(()))
+            }
+            Poll::Ready(Err(e)) => {
+                let error: IoError = e.into();
+                if error.kind() != std::io::ErrorKind::Interrupted {
+                    *this.terminal_error = Some(StoredIoError::from_error(&error));
+                } else {
+                    cx.waker().wake_by_ref();
+                    return Poll::Pending;
+                }
+                Poll::Ready(Err(error))
+            }
             Poll::Pending => Poll::Pending,
         }
     }

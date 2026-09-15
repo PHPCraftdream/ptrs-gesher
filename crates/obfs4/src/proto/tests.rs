@@ -1,5 +1,99 @@
 use super::*;
-use std::str::FromStr;
+use std::{
+    pin::Pin,
+    str::FromStr,
+    sync::{Arc, Mutex},
+    task::{Context, Poll},
+};
+
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, ReadBuf};
+
+#[derive(Default)]
+struct CarrierScript {
+    fail_writes: bool,
+    successful_writes_before_error: usize,
+    partial_write_limit: Option<usize>,
+    interrupted_once: bool,
+    flush_error: Option<std::io::ErrorKind>,
+    shutdown_error: Option<std::io::ErrorKind>,
+    wire: Vec<u8>,
+}
+
+struct ScriptedCarrier {
+    inner: tokio::io::DuplexStream,
+    script: Arc<Mutex<CarrierScript>>,
+}
+
+impl AsyncRead for ScriptedCarrier {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_read(cx, buf)
+    }
+}
+
+impl AsyncWrite for ScriptedCarrier {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let (limit, count_success) = {
+            let mut script = self.as_ref().get_ref().script.lock().unwrap();
+            if script.interrupted_once {
+                script.interrupted_once = false;
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::Interrupted,
+                    "scripted interruption",
+                )));
+            }
+            if script.fail_writes && script.successful_writes_before_error == 0 {
+                return Poll::Ready(Err(std::io::Error::new(
+                    std::io::ErrorKind::ConnectionReset,
+                    "scripted write failure",
+                )));
+            }
+            (
+                script
+                    .partial_write_limit
+                    .map_or(buf.len(), |limit| limit.min(buf.len())),
+                script.fail_writes,
+            )
+        };
+        let result = Pin::new(&mut self.as_mut().get_mut().inner).poll_write(cx, &buf[..limit]);
+        if let Poll::Ready(Ok(written)) = result {
+            let mut script = self.as_ref().get_ref().script.lock().unwrap();
+            script.wire.extend_from_slice(&buf[..written]);
+            if count_success && script.successful_writes_before_error > 0 {
+                script.successful_writes_before_error -= 1;
+            }
+        }
+        result
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        if let Some(kind) = self.as_ref().get_ref().script.lock().unwrap().flush_error {
+            return Poll::Ready(Err(std::io::Error::new(kind, "scripted flush failure")));
+        }
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        if let Some(kind) = self
+            .as_ref()
+            .get_ref()
+            .script
+            .lock()
+            .unwrap()
+            .shutdown_error
+        {
+            return Poll::Ready(Err(std::io::Error::new(kind, "scripted shutdown failure")));
+        }
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+}
 
 #[tokio::test]
 async fn empty_read_finishes_without_waiting_for_network_data() {
@@ -77,6 +171,161 @@ fn fixed_length_distribution() -> WeightedDist {
     )
 }
 
+async fn scripted_pair(
+    mode: IAT,
+) -> (
+    Obfs4Stream<ScriptedCarrier>,
+    Obfs4Stream<tokio::io::DuplexStream>,
+    Arc<Mutex<CarrierScript>>,
+) {
+    let server = crate::server::Server::getrandom();
+    let client = crate::sessions::new_client_session(server.0.identity_keys.pk, mode);
+    let (client_io, server_io) = tokio::io::duplex(128 * 1024);
+    let script = Arc::new(Mutex::new(CarrierScript::default()));
+    let carrier = ScriptedCarrier {
+        inner: client_io,
+        script: Arc::clone(&script),
+    };
+    let (client, server) = tokio::join!(
+        client.handshake(
+            carrier,
+            Some(Instant::now() + Duration::from_secs(30)),
+            None
+        ),
+        server.wrap(server_io),
+    );
+    let mut client = client.unwrap();
+    client.s.stream.set_backpressure_boundary(1);
+    client.s.iat_dist = WeightedDist::new(
+        drbg::Seed::try_from(&[9u8; SEED_LENGTH][..]).unwrap(),
+        0,
+        1,
+        false,
+    );
+    script.lock().unwrap().wire.clear();
+    (client, server.unwrap(), script)
+}
+
+fn set_script(script: &Arc<Mutex<CarrierScript>>, update: impl FnOnce(&mut CarrierScript)) {
+    let mut script = script.lock().unwrap();
+    update(&mut script);
+}
+
+#[tokio::test]
+async fn write_error_before_new_prefix_is_reported_for_every_iat_mode() {
+    for mode in [IAT::Off, IAT::Enabled, IAT::Paranoid] {
+        let (mut client, _server, script) = scripted_pair(mode).await;
+        if mode == IAT::Paranoid {
+            client.s.length_dist = fixed_length_distribution();
+        }
+        client.write_all(b"already buffered").await.unwrap();
+        set_script(&script, |script| {
+            script.fail_writes = true;
+            script.successful_writes_before_error = 0;
+        });
+        let error = client.write(b"new prefix").await.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+    }
+}
+
+#[tokio::test]
+async fn write_errors_are_deferred_after_a_prefix_for_every_iat_mode() {
+    for mode in [IAT::Off, IAT::Enabled, IAT::Paranoid] {
+        let (mut client, _server, script) = scripted_pair(mode).await;
+        if mode == IAT::Paranoid {
+            client.s.length_dist = fixed_length_distribution();
+        }
+        set_script(&script, |script| {
+            script.fail_writes = true;
+            script.successful_writes_before_error = 1;
+            script.partial_write_limit = Some(7);
+        });
+        let payload = vec![0x5a; framing::MAX_MESSAGE_PAYLOAD_LENGTH * 2];
+        let accepted = client.write(&payload).await.unwrap();
+        assert!(accepted > 0 && accepted < payload.len());
+        let wire_len = script.lock().unwrap().wire.len();
+        let error = client.write(&payload[accepted..]).await.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::ConnectionReset);
+        assert_eq!(script.lock().unwrap().wire.len(), wire_len);
+    }
+}
+
+#[tokio::test]
+async fn interrupted_carrier_write_retries_without_duplicate_plaintext() {
+    for mode in [IAT::Off, IAT::Enabled, IAT::Paranoid] {
+        let (mut client, mut server, script) = scripted_pair(mode).await;
+        if mode == IAT::Paranoid {
+            client.s.length_dist = fixed_length_distribution();
+        }
+        set_script(&script, |script| script.interrupted_once = true);
+        let payload = vec![0x37; framing::MAX_MESSAGE_PAYLOAD_LENGTH * 2];
+        let accepted = client.write(&payload).await.unwrap();
+        assert!(accepted > 0 && accepted < payload.len());
+        client.write_all(&payload[accepted..]).await.unwrap();
+        client.flush().await.unwrap();
+        let mut received = vec![0; payload.len()];
+        server.read_exact(&mut received).await.unwrap();
+        assert_eq!(received, payload);
+    }
+}
+
+#[tokio::test]
+async fn flush_and_shutdown_errors_are_terminal_and_shutdown_is_idempotent() {
+    let (mut client, _server, script) = scripted_pair(IAT::Off).await;
+    client.write_all(b"buffered").await.unwrap();
+    set_script(&script, |script| {
+        script.flush_error = Some(std::io::ErrorKind::BrokenPipe);
+    });
+    let first = client.flush().await.unwrap_err();
+    let second = client.flush().await.unwrap_err();
+    assert_eq!(first.kind(), std::io::ErrorKind::BrokenPipe);
+    assert_eq!(second.kind(), first.kind());
+    assert_eq!(client.shutdown().await.unwrap_err().kind(), first.kind());
+    assert_eq!(
+        client.write(b"after error").await.unwrap_err().kind(),
+        first.kind()
+    );
+
+    let (mut client, _server, script) = scripted_pair(IAT::Off).await;
+    set_script(&script, |script| {
+        script.shutdown_error = Some(std::io::ErrorKind::ConnectionAborted);
+    });
+    let first = client.shutdown().await.unwrap_err();
+    let second = client.shutdown().await.unwrap_err();
+    assert_eq!(first.kind(), std::io::ErrorKind::ConnectionAborted);
+    assert_eq!(second.kind(), first.kind());
+}
+
+#[tokio::test]
+async fn writes_after_successful_shutdown_are_rejected() {
+    let (mut client, _server, _script) = scripted_pair(IAT::Off).await;
+    client.shutdown().await.unwrap();
+    assert_eq!(client.flush().await.unwrap(), ());
+    assert_eq!(
+        client.write(b"after shutdown").await.unwrap_err().kind(),
+        std::io::ErrorKind::NotConnected
+    );
+}
+
+#[test]
+fn frame_io_error_roundtrip_preserves_kind_and_os_code() {
+    let source = std::io::Error::from_raw_os_error(111);
+    let kind = source.kind();
+    let raw = source.raw_os_error();
+    let frame_error: FrameError = source.into();
+    let restored: std::io::Error = frame_error.into();
+    assert_eq!(restored.kind(), kind);
+    assert_eq!(restored.raw_os_error(), raw);
+}
+
+#[test]
+fn oversized_timeout_is_rejected_before_a_deadline_is_created() {
+    let error = MaybeTimeout::Length(Duration::MAX)
+        .deadline(Duration::ZERO)
+        .unwrap_err();
+    assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+}
+
 #[tokio::test(start_paused = true)]
 async fn wire_padding_remains_enabled_when_iat_delays_are_off() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -127,7 +376,7 @@ fn iat_from_str_invalid() {
 async fn default_deadline_uses_the_role_timeout() {
     let timeout = Duration::from_secs(17);
     assert_eq!(
-        MaybeTimeout::Default_.deadline(timeout),
+        MaybeTimeout::Default_.deadline(timeout).unwrap(),
         Some(Instant::now() + timeout)
     );
 }
@@ -137,13 +386,17 @@ async fn relative_deadline_starts_when_used() {
     let dur = Duration::from_secs(42);
     let policy = MaybeTimeout::Length(dur);
     tokio::time::advance(Duration::from_secs(5)).await;
-    assert_eq!(policy.deadline(Duration::ZERO), Some(Instant::now() + dur));
+    assert_eq!(
+        policy.deadline(Duration::ZERO).unwrap(),
+        Some(Instant::now() + dur)
+    );
 }
 
 #[test]
 fn maybe_timeout_unset_returns_none() {
     assert!(MaybeTimeout::Unset
         .deadline(CLIENT_HANDSHAKE_TIMEOUT)
+        .unwrap()
         .is_none());
 }
 
@@ -151,7 +404,7 @@ fn maybe_timeout_unset_returns_none() {
 fn fixed_past_deadline_remains_expired() {
     let past = Instant::now() - Duration::from_secs(10);
     assert_eq!(
-        MaybeTimeout::Fixed(past).deadline(Duration::ZERO),
+        MaybeTimeout::Fixed(past).deadline(Duration::ZERO).unwrap(),
         Some(past)
     );
 }
@@ -160,7 +413,9 @@ fn fixed_past_deadline_remains_expired() {
 fn fixed_future_deadline_is_preserved() {
     let future = Instant::now() + Duration::from_secs(60);
     assert_eq!(
-        MaybeTimeout::Fixed(future).deadline(Duration::ZERO),
+        MaybeTimeout::Fixed(future)
+            .deadline(Duration::ZERO)
+            .unwrap(),
         Some(future)
     );
 }

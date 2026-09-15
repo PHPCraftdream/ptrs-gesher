@@ -1,5 +1,8 @@
 # Восстановление исправлений по истории сессии
 
+> Историческая инвентаризация ниже описывает состояние до исправлений.
+> [Результаты нового прохода](#результаты-нового-прохода) приведены в конце.
+
 Дата: 2026-09-15. Проверен текущий HEAD `ead69a35829e1113f4f72ec3928ccab95a0ec214`.
 Источник старого состояния — сохранившиеся сообщения, diff и результаты ревью
 в рабочей сессии 7–11 сентября. Старые Git-объекты не используются как источник:
@@ -185,3 +188,56 @@ feature matrix, release checks и packaging. Старые положительн
 
 Этот список можно использовать как вход для отдельных задач. Автоматические
 исполнители не запускаются; завершёнными пункты здесь не объявляются.
+
+## Результаты нового прохода
+
+По отдельному поручению пользователя исправления реализованы поверх `63826aa`
+семью агентами `hl` в отдельных worktree. Изменения проверены при интеграции;
+обнаруженные ошибки реализации и тестов исправлены в этом же проходе.
+Все созданные worktree удалены. Версии, теги и опубликованные пакеты не менялись;
+коммитов и push в рамках этого поручения не выполнялось.
+
+| Пункты | Результат |
+|---|---|
+| R01 | `wrap`/`establish` используют supplied carrier; managed WebTunnel вызывает `connect_url`. Проверены TLS ClientHello, Upgrade, payload, dial error, timeout и отсутствие poll при ошибке конфигурации. |
+| R02 | Принятый префикс возвращается до отложенной ошибки; сохраняются ErrorKind и OS code. Проверены все IAT-режимы, частичная запись, Interrupted, отсутствие дублирования, terminal flush/shutdown и запись после shutdown. Borrowed payload и scratch reuse сохранены. |
+| R03 | Владелец run отменяет accept/connections; отдельные abort handles закрывают гонку регистрации при отмене. Проверены занятый scheduler lock, освобождение permit и EOF сокета. |
+| R04 | SOCKS и SMETHOD имеют отдельные parse/encode API. Примеры, property tests и SOCKS-вызовы Lyrebird переведены на соответствующий формат. |
+| R05 | Реализованы параметры клиента, Display, state import и транзакционный `try_get_args`. Старый `get_args` сохраняет сигнатуру и откладывает ошибку до handshake. Добавлены `try_build`; неподдерживаемые legacy API сообщают ошибку. |
+| R06 | Проверяются private/public пары. Заданный length seed передаётся сессиям; IAT seed выводится через SHA-256. Ошибка RNG не подменяется нулевым seed. |
+| R07 | WebTunnel применяет bind по семейству адреса при URL dial и отклоняет bind для supplied carrier. Unsupported bind obfs4 и persistent state WebTunnel возвращают ошибки. |
+| R08 | Deadline создаётся через checked_add; Duration::MAX отклоняется до dial/session. Fixed/Length/Default/fail_fast сохранены. |
+| R09 | Собственный dispatcher определяется по точному владению. Перенастраиваются файл и фильтр, включая известные callsite и активные spans; foreign logger/subscriber и log max level сохраняются. Проверены failed reopen, disable/re-enable, смена destination и field directives. |
+| R10–R11 | Исправлены грамматика PT-name, roundtrip транспорта Bridge и преобразование готового seed без RNG. |
+| PT12-01 | Явный default proxy port распознаётся по исходному authority; отсутствующий/пустой порт отклоняется. Есть IPv4, IPv6 и userinfo проверки. |
+| PT12-02 | State setters действительно загружают/сохраняют состояние. Ручные поля объединяются с состоянием по отдельности. Клиентский файл отделён от серверского; импорт серверского файла не переписывает приватную идентичность. Запись использует уникальный tempfile и atomic replacement, Unix mode 0600. |
+| R12 | Добавлены конечный Rust/Go interop runner и локальные release gates; примечания по API собраны в [VALIDATION.md](VALIDATION.md). В feature matrix обнаружена и исправлена отсутствующая `required-features` у примера umbrella. |
+
+Подтверждённые проверки этого прохода:
+
+- Windows: workspace tests со всеми features; после последних изменений повторно
+  проверены Lyrebird и затронутые WebTunnel тесты; clippy всех targets/features
+  с `-D warnings`, rustdoc с `-D warnings`, doctests и fmt.
+- Linux: workspace tests со всеми features в debug и release. Единственное
+  начальное падение logging subprocess из-за наследованного `RUST_LOG=off`
+  исправлено; повторный Lyrebird и полный release-набор прошли. Проверки нового
+  stdin watcher и защиты от TCP self-connect сохранены.
+  После финальных изменений повторно прошёл release-набор библиотечных тестов.
+- Rust/Go obfs4: IAT 0/1/2 в обоих направлениях, по 4 KiB request/reply,
+  проверка malformed reply и завершения обоих процессов — Windows и Linux.
+  Linux Go helper предварительно собран установленным Go с GOOS=linux;
+  runner явно сообщает пропуск своей стадии Go build.
+- MSRV Rust 1.89: workspace со всеми features; отдельные сборки каждой feature
+  и каждого пакета без default features.
+- `cargo-semver-checks`: все шесть библиотек относительно `63826aa` прошли;
+  несовместимость публичного API проверкой не обнаружена. Изменённые поведенческие
+  контракты документированы отдельно.
+- `cargo deny check`: advisories, bans, licenses и sources прошли.
+- `cargo package --workspace --exclude ptrs-gesher-examples --locked --allow-dirty`:
+  все шесть архивов созданы и проверены сборкой, включая зависимости между ними.
+- Лимит 1000 строк соблюдён; owner/cancellation tests вынесены в
+  `crates/lyrebird/src/lifecycle_tests.rs` и ограничены временем ожидания.
+
+Проверки выполнены локально. Внешний CI этого незакоммиченного состояния не
+запускался. Выбор версии и способа следующего выпуска остаётся отдельным действием;
+trusted publishing и registry credentials не перенастраивались.

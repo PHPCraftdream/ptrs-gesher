@@ -3,10 +3,35 @@ use super::*;
 use std::{
     ffi::OsString,
     io::{self, Write},
+    process::{Command, Stdio},
     sync::{Arc, Mutex},
 };
 
 static LOGGING_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+fn emit_owned_event(message: &'static str) {
+    tracing::info!(target: "owned_logging", "{message}");
+}
+
+fn emit_owned_log(message: &'static str) {
+    log::info!(target: "owned_logging", "{message}");
+}
+
+fn emit_owned_debug(message: &'static str) {
+    tracing::debug!(target: "owned_logging", "{message}");
+}
+
+fn emit_owned_trace(message: &'static str) {
+    tracing::trace!(target: "owned_logging", "{message}");
+}
+
+fn emit_owned_new_trace(message: &'static str) {
+    tracing::trace!(target: "owned_logging", "new={message}");
+}
+
+fn owned_span(role: &str) -> tracing::Span {
+    tracing::info_span!(target: "owned_logging", "owned_span", role)
+}
 
 #[derive(Clone)]
 struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
@@ -108,12 +133,15 @@ fn logging_guard_preserves_host_and_does_not_truncate_file() {
     std::fs::create_dir_all(&statedir).expect("create logging test directory");
     let log_path = statedir.join("obfs4proxy.log");
     std::fs::write(&log_path, b"sentinel\n").expect("seed log file");
+    let unrelated_state_dir = statedir.join("unrelated-missing-directory");
 
     let guard = init_logging_recvr(
         true,
         false,
         "ERROR",
-        statedir.to_str().expect("state directory is UTF-8"),
+        unrelated_state_dir
+            .to_str()
+            .expect("state directory is UTF-8"),
     )
     .expect("host subscriber should be preserved");
     tracing::error!("host-event");
@@ -147,4 +175,240 @@ fn logging_guard_preserves_host_and_does_not_truncate_file() {
     assert!(incompatible.is_err(), "incompatible safelog mode must fail");
     drop(safe_guard);
     std::fs::remove_dir_all(statedir).expect("remove logging test directory");
+}
+
+#[test]
+fn owned_logging_reconfigures_transactionally_in_subprocess() {
+    const CHILD: &str = "LYREBIRD_OWNED_LOGGING_TEST_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        let statedir =
+            std::env::temp_dir().join(format!("lyrebird-owned-logging-{}", std::process::id()));
+        std::fs::create_dir_all(&statedir).expect("create logging directory");
+        let reconfigured_dir = statedir.join("reconfigured");
+        std::fs::create_dir_all(&reconfigured_dir).expect("create reconfigured directory");
+        std::env::set_var(
+            "RUST_LOG",
+            "owned_logging=info,owned_logging[owned_span{role=allowed}]=trace",
+        );
+        let guard = init_logging_recvr(
+            true,
+            false,
+            "ERROR",
+            statedir.to_str().expect("UTF-8 temp path"),
+        )
+        .expect("install owned subscriber");
+        let allowed = owned_span("allowed");
+        let _allowed_guard = allowed.enter();
+        emit_owned_debug("first-file-event");
+        emit_owned_debug("field-event-allowed");
+        emit_owned_trace("field-trace-allowed");
+        emit_owned_log("first-log-event");
+        drop(_allowed_guard);
+        let denied = owned_span("denied");
+        let _denied_guard = denied.enter();
+        emit_owned_debug("field-event-denied");
+        emit_owned_trace("field-trace-denied");
+        drop(_denied_guard);
+
+        std::env::remove_var("RUST_LOG");
+        let missing_dir = statedir.join("missing");
+        assert!(init_logging_recvr(
+            true,
+            false,
+            "INFO",
+            missing_dir.to_str().expect("UTF-8 temp path"),
+        )
+        .is_err());
+        emit_owned_event("event-after-failed-reconfigure");
+
+        let active = owned_span("allowed");
+        let active_guard = active.enter();
+        emit_owned_debug("same-span-before-reconfigure");
+        let migrated = init_logging_recvr(
+            true,
+            false,
+            "ERROR",
+            reconfigured_dir.to_str().expect("UTF-8 temp path"),
+        )
+        .expect("change destination with active span");
+        emit_owned_debug("same-span-after-reconfigure");
+        emit_owned_new_trace("new-callsite-inside-old-span");
+        drop(migrated);
+        drop(active_guard);
+
+        let no_file = init_logging_recvr(
+            false,
+            false,
+            "ERROR",
+            reconfigured_dir.to_str().expect("UTF-8 temp path"),
+        )
+        .expect("disable file logging");
+        emit_owned_event("event-after-file-disabled");
+        emit_owned_log("event-after-file-disabled-log");
+        drop(no_file);
+        std::env::set_var(
+            "RUST_LOG",
+            "owned_logging=info,owned_logging[owned_span{role=allowed}]=trace",
+        );
+        let reenabled = init_logging_recvr(
+            true,
+            false,
+            "DEBUG",
+            reconfigured_dir.to_str().expect("UTF-8 temp path"),
+        )
+        .expect("re-enable file logging");
+        emit_owned_event("event-after-file-reenabled");
+        emit_owned_log("event-after-file-reenabled-log");
+        owned_span("allowed").in_scope(|| emit_owned_trace("new-span-after-reconfigure"));
+        owned_span("denied").in_scope(|| emit_owned_trace("denied-span-after-reconfigure"));
+        drop(reenabled);
+        drop(guard);
+
+        let output =
+            std::fs::read_to_string(statedir.join("obfs4proxy.log")).expect("read owned log");
+        let reconfigured_output = std::fs::read_to_string(reconfigured_dir.join("obfs4proxy.log"))
+            .expect("read reconfigured log");
+        assert!(output.contains("first-file-event"));
+        assert!(output.contains("field-event-allowed"));
+        assert!(!output.contains("field-event-denied"));
+        assert!(output.contains("field-trace-allowed"));
+        assert!(!output.contains("field-trace-denied"));
+        assert!(output.contains("first-log-event"));
+        assert!(output.contains("event-after-failed-reconfigure"));
+        assert!(!output.contains("same-span-after-reconfigure"));
+        assert!(reconfigured_output.contains("same-span-after-reconfigure"));
+        assert!(reconfigured_output.contains("new-callsite-inside-old-span"));
+        assert!(reconfigured_output.contains("event-after-file-reenabled"));
+        assert!(reconfigured_output.contains("event-after-file-reenabled-log"));
+        assert!(reconfigured_output.contains("new-span-after-reconfigure"));
+        assert!(!reconfigured_output.contains("denied-span-after-reconfigure"));
+        assert!(!reconfigured_output.contains("event-after-file-disabled"));
+        assert!(!reconfigured_output.contains("event-after-file-disabled-log"));
+        println!("LYREBIRD_OWNED_LOGGING_CHILD_RAN");
+        let _ = std::fs::remove_dir_all(statedir);
+        return;
+    }
+
+    let output = Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            "logging_tests::owned_logging_reconfigures_transactionally_in_subprocess",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run logging subprocess");
+    assert!(
+        output.status.success(),
+        "owned logging subprocess failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("LYREBIRD_OWNED_LOGGING_CHILD_RAN"));
+}
+
+#[test]
+fn owned_logging_bridges_log_events_in_subprocess() {
+    const CHILD: &str = "LYREBIRD_LOG_BRIDGE_TEST_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        std::env::remove_var("RUST_LOG");
+        let statedir =
+            std::env::temp_dir().join(format!("lyrebird-log-bridge-{}", std::process::id()));
+        std::fs::create_dir_all(&statedir).expect("create logging directory");
+        let guard = init_logging_recvr(
+            true,
+            false,
+            "INFO",
+            statedir.to_str().expect("UTF-8 temp path"),
+        )
+        .expect("install owned subscriber");
+        log::info!(target: "owned_logging", "standalone-log-event");
+        drop(guard);
+        let output =
+            std::fs::read_to_string(statedir.join("obfs4proxy.log")).expect("read owned log");
+        assert!(output.contains("standalone-log-event"));
+        println!("LYREBIRD_LOG_BRIDGE_CHILD_RAN");
+        let _ = std::fs::remove_dir_all(statedir);
+        return;
+    }
+
+    let output = Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            "logging_tests::owned_logging_bridges_log_events_in_subprocess",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run log bridge subprocess");
+    assert!(
+        output.status.success(),
+        "log bridge subprocess failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("LYREBIRD_LOG_BRIDGE_CHILD_RAN"));
+}
+
+#[test]
+fn external_log_logger_is_preserved_in_subprocess() {
+    const CHILD: &str = "LYREBIRD_EXTERNAL_LOGGER_TEST_CHILD";
+    if std::env::var_os(CHILD).is_some() {
+        std::env::remove_var("RUST_LOG");
+        struct NoopLogger;
+        impl log::Log for NoopLogger {
+            fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+                false
+            }
+
+            fn log(&self, _: &log::Record<'_>) {}
+
+            fn flush(&self) {}
+        }
+        static LOGGER: NoopLogger = NoopLogger;
+        log::set_logger(&LOGGER).expect("install external logger");
+        log::set_max_level(log::LevelFilter::Warn);
+        let before = log::max_level();
+        let statedir =
+            std::env::temp_dir().join(format!("lyrebird-external-logger-{}", std::process::id()));
+        std::fs::create_dir_all(&statedir).expect("create logging directory");
+        let guard = init_logging_recvr(
+            false,
+            false,
+            "DEBUG",
+            statedir.to_str().expect("UTF-8 temp path"),
+        )
+        .expect("preserve external logger");
+        assert_eq!(log::max_level(), before);
+        let reconfigured = init_logging_recvr(
+            false,
+            false,
+            "TRACE",
+            statedir.to_str().expect("UTF-8 temp path"),
+        )
+        .expect("reconfigure with external logger");
+        assert_eq!(log::max_level(), before);
+        drop(reconfigured);
+        drop(guard);
+        let _ = std::fs::remove_dir_all(statedir);
+        println!("LYREBIRD_EXTERNAL_LOGGER_CHILD_RAN");
+        return;
+    }
+
+    let output = Command::new(std::env::current_exe().expect("test executable"))
+        .args([
+            "--exact",
+            "logging_tests::external_log_logger_is_preserved_in_subprocess",
+            "--nocapture",
+        ])
+        .env(CHILD, "1")
+        .stdin(Stdio::null())
+        .output()
+        .expect("run external logger subprocess");
+    assert!(
+        output.status.success(),
+        "external logger subprocess failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("LYREBIRD_EXTERNAL_LOGGER_CHILD_RAN"));
 }

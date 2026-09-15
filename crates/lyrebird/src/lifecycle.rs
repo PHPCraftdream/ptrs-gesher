@@ -1,4 +1,8 @@
-use std::{future::Future, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    sync::{Arc, Mutex as StdMutex},
+    time::Duration,
+};
 
 use anyhow::Result;
 use tokio::{
@@ -161,6 +165,47 @@ pub(super) struct RunTasks {
     pub(super) lifecycle: Arc<Semaphore>,
     /// Owns every spawned connection task until it is joined.
     pub(super) connections: Arc<Mutex<JoinSet<()>>>,
+    /// Abort handles remain available while the scheduler lock is busy.
+    pub(super) aborts: Arc<StdMutex<Vec<tokio::task::AbortHandle>>>,
+}
+
+/// Owns the cancellation state for one run.
+///
+/// `RunTasks` is deliberately clonable because accept loops and connection
+/// bodies need handles, but ownership of their cleanup stays in this guard.
+/// This is also the synchronous fallback for a caller that drops `run()`.
+pub(super) struct RunOwner {
+    tasks: RunTasks,
+}
+
+impl RunOwner {
+    pub(super) fn new() -> Self {
+        Self {
+            tasks: RunTasks::new(),
+        }
+    }
+
+    pub(super) fn tasks(&self) -> RunTasks {
+        self.tasks.clone()
+    }
+}
+
+impl Drop for RunOwner {
+    fn drop(&mut self) {
+        self.tasks.stop_accepting();
+        self.tasks.conns.cancel();
+        if let Ok(handles) = self.tasks.aborts.lock() {
+            for handle in handles.iter() {
+                handle.abort();
+            }
+        }
+        // A dropped run cannot await the scheduler. Request immediate abort
+        // when the scheduler lock is available; the token remains the
+        // fallback if registration is briefly holding the lock.
+        if let Ok(mut connections) = self.tasks.connections.try_lock() {
+            connections.abort_all();
+        }
+    }
 }
 
 impl RunTasks {
@@ -170,6 +215,7 @@ impl RunTasks {
             conns: CancellationToken::new(),
             lifecycle: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNS)),
             connections: Arc::new(Mutex::new(JoinSet::new())),
+            aborts: Arc::new(StdMutex::new(Vec::new())),
         }
     }
 
@@ -191,7 +237,16 @@ impl RunTasks {
         F: Future<Output = ()> + Send + 'static,
     {
         let mut connections = self.connections.lock().await;
-        connections.spawn(task);
+        let abort = connections.spawn(task);
+        if let Ok(mut handles) = self.aborts.lock() {
+            handles.retain(|handle| !handle.is_finished());
+            handles.push(abort.clone());
+            if self.accept.is_cancelled() || self.conns.is_cancelled() {
+                abort.abort();
+            }
+        } else if self.accept.is_cancelled() || self.conns.is_cancelled() {
+            abort.abort();
+        }
         while let Some(result) = connections.try_join_next() {
             if let Err(error) = result {
                 warn!("connection task aborted: {error}");
@@ -222,6 +277,9 @@ pub(super) async fn join_connection_tasks(ctx: &RunTasks) {
         if let Err(error) = result {
             warn!("connection task aborted: {error}");
         }
+    }
+    if let Ok(mut handles) = ctx.aborts.lock() {
+        handles.retain(|handle| !handle.is_finished());
     }
 }
 

@@ -5,7 +5,7 @@ use bridge_line::BridgeLine;
 use proptest::prelude::*;
 
 fn arb_transport() -> impl Strategy<Value = Option<String>> {
-    prop_oneof![Just(None), "[a-z][a-z0-9_-]{0,15}".prop_map(Some),]
+    prop_oneof![Just(None), "[a-z][a-z0-9_]{0,15}".prop_map(Some),]
 }
 
 fn arb_socket_addr() -> impl Strategy<Value = SocketAddr> {

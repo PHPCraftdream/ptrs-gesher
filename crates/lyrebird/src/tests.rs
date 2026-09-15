@@ -1,82 +1,5 @@
 use super::*;
 
-#[tokio::test(start_paused = true)]
-async fn cancellation_interrupts_a_full_connection_limit() {
-    use futures::FutureExt;
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(1));
-    let _occupied = semaphore.acquire().await.unwrap();
-    let cancel = CancellationToken::new();
-    let permit = connection_permit(semaphore.clone(), &cancel);
-    tokio::pin!(permit);
-    assert!(permit.as_mut().now_or_never().is_none());
-    cancel.cancel();
-    let outcome = tokio::time::timeout(std::time::Duration::from_secs(1), permit).await;
-    assert!(matches!(outcome, Ok(None)));
-}
-
-#[tokio::test(start_paused = true)]
-async fn forced_shutdown_aborts_and_joins_pending_connection() {
-    struct DropMarker(Arc<std::sync::atomic::AtomicBool>);
-
-    impl Drop for DropMarker {
-        fn drop(&mut self) {
-            self.0.store(true, std::sync::atomic::Ordering::Release);
-        }
-    }
-
-    let ctx = RunTasks::new();
-    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let dropped_by_task = Arc::clone(&dropped);
-    let permit = ctx
-        .lifecycle
-        .clone()
-        .acquire_owned()
-        .await
-        .expect("test lifecycle permit");
-    ctx.spawn_connection(async move {
-        let _permit = permit;
-        let _marker = DropMarker(dropped_by_task);
-        std::future::pending::<()>().await;
-    })
-    .await;
-
-    let started = tokio::time::Instant::now();
-    tokio::time::timeout(std::time::Duration::from_secs(6), cancel_connections(&ctx))
-        .await
-        .expect("forced shutdown must abort a pending connection");
-
-    assert!(started.elapsed() >= std::time::Duration::from_secs(5));
-    assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
-    assert!(ctx.connections.lock().await.is_empty());
-}
-
-#[tokio::test]
-async fn setup_error_drops_pending_stdin_future() {
-    struct DropMarker(Arc<std::sync::atomic::AtomicBool>);
-
-    impl Drop for DropMarker {
-        fn drop(&mut self) {
-            self.0.store(true, std::sync::atomic::Ordering::Release);
-        }
-    }
-
-    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let marker = DropMarker(Arc::clone(&dropped));
-    let stdin_wait = async move {
-        let _marker = marker;
-        std::future::pending::<std::io::Result<()>>().await
-    };
-    let setup = async { Err::<JoinSet<Result<()>>, _>(anyhow!("injected setup failure")) };
-
-    let result = run_with_setup(RunTasks::new(), stdin_wait, setup, || {
-        std::future::pending::<Shutdown>()
-    })
-    .await;
-
-    assert_eq!(result.unwrap_err().to_string(), "injected setup failure");
-    assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
-}
-
 #[test]
 fn arg_string_uname_only_when_passwd_is_nul() {
     let creds = Some(("cert=AAA;iat-mode=0".to_string(), "\0".to_string()));
@@ -125,6 +48,26 @@ async fn pt_args_auth_accepts_no_creds() {
     let auth = PtArgsAuth;
     let got = auth.authenticate(None).await;
     assert_eq!(got, Some((String::new(), String::new())));
+}
+
+#[tokio::test]
+async fn webtunnel_managed_path_ignores_socks_target() {
+    let client = <webtunnel::WebTunnelBuilder as ptrs::ClientBuilder<TcpStream>>::build(
+        &webtunnel::WebTunnelBuilder::default(),
+    );
+    let result = client
+        .managed_connect(
+            TargetAddr::Domain("invalid.example".into(), 443),
+            "127.0.0.1:1".parse().unwrap(),
+        )
+        .await;
+    let error = match result {
+        Ok(_) => panic!("unconfigured WebTunnel must fail before dialing"),
+        Err(error) => error,
+    };
+    assert!(error
+        .to_string()
+        .contains("missing required parameter: url"));
 }
 
 // -- dial_bridge socket options ----------------------------------------
@@ -230,7 +173,11 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite};
 /// type, so we pin `InRW = DuplexStream` here (an in-memory stand-in for
 /// the OR-port `TcpStream`).
 fn obfs4_client_from_args(arg_string: &str) -> obfs4::Client {
-    let args = ptrs::args::Args::from_str(arg_string).expect("parse bridge-line args");
+    let smethod_args =
+        ptrs::args::Args::parse_smethod_args(arg_string).expect("parse SMETHOD bridge-line args");
+    let socks_args = smethod_args.encode_client_parameters();
+    let args = ptrs::args::Args::parse_client_parameters(&socks_args)
+        .expect("parse SOCKS bridge-line args");
     let mut builder = obfs4::ClientBuilder::default();
     <obfs4::ClientBuilder as ptrs::ClientBuilder<DuplexStream>>::options(&mut builder, &args)
         .expect("apply obfs4 args to builder");
@@ -416,6 +363,9 @@ where
     // TcpStream (lifecycle tests below) drive the same protocol.
     S: AsyncRead + AsyncWrite + Unpin,
 {
+    let socks_args = ptrs::args::Args::parse_smethod_args(arg_string)
+        .expect("parse SMETHOD bridge-line args")
+        .encode_client_parameters();
     // greeting: VER=5, 1 method, user/pass (0x02)
     parent.write_all(&[0x05, 0x01, 0x02]).await.unwrap();
     parent.flush().await.unwrap();
@@ -425,7 +375,7 @@ where
 
     // RFC 1929 user/pass: pack the arg string into UNAME, PASSWD = single
     // NUL (the `arg_string_from_creds` "uname only" form).
-    let uname = arg_string.as_bytes();
+    let uname = socks_args.as_bytes();
     assert!(
         uname.len() <= 255,
         "this test packs the arg string into one SOCKS field"
@@ -710,7 +660,20 @@ fn assert_no_connection_tasks(ctx: &RunTasks) {
 /// the socket is closed — the "ports are closed after run() returns"
 /// property, asserted through the actual connect outcome.
 async fn assert_port_closed(addr: SocketAddr) {
-    match tokio::time::timeout(TEST_STEP, TcpStream::connect(addr)).await {
+    assert!(addr.is_ipv4(), "test helper expects an IPv4 listener");
+    let reservation = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("reserve source port");
+    let source = reservation.local_addr().expect("source address");
+    assert_ne!(
+        source.port(),
+        addr.port(),
+        "source and target ports must differ to avoid Linux self-connect"
+    );
+    drop(reservation);
+    let socket = tokio::net::TcpSocket::new_v4().expect("create source socket");
+    socket.bind(source).expect("bind reserved source port");
+    match tokio::time::timeout(TEST_STEP, socket.connect(addr)).await {
         Err(_) => panic!("connect to {addr} timed out — port looks open"),
         Ok(Ok(_)) => panic!("connect to {addr} succeeded — port is still open"),
         Ok(Err(_)) => {} // refused: the listener socket is gone

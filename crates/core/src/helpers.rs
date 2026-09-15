@@ -203,7 +203,7 @@ pub(crate) fn get_proxy_url() -> Result<Option<Url>, Error> {
     let uri = Url::parse(&url_str)
         .map_err(|e| to_io_other(format!("failed to parse proxy config \"{url_str}\": {e}")))?;
 
-    validate_proxy_url(&uri)?;
+    validate_proxy_url_with_authority(&uri, authority_explicit_port(&url_str))?;
 
     Ok(Some(uri))
 }
@@ -241,8 +241,14 @@ pub(crate) fn get_proxy_url() -> Result<Option<Url>, Error> {
 ///       length, the "PLEN" field must be set to "1" and the "PASSWD"
 ///       field must contain a single NUL character.
 /// ```
+#[cfg(test)]
 #[allow(clippy::collapsible_if)]
 pub(crate) fn validate_proxy_url(spec: &Url) -> Result<(), Error> {
+    validate_proxy_url_with_authority(spec, spec.port())
+}
+
+#[allow(clippy::collapsible_if)]
+fn validate_proxy_url_with_authority(spec: &Url, authority_port: Option<u16>) -> Result<(), Error> {
     const SCHEMES: [&str; 3] = ["socks5", "socks4a", "http"];
     if !SCHEMES.contains(&spec.scheme()) {
         return Err(to_io_other(format!(
@@ -267,7 +273,8 @@ pub(crate) fn validate_proxy_url(spec: &Url) -> Result<(), Error> {
             return Err(to_io_other("proxy URI has a fragment defined"));
         }
     }
-    if spec.port().is_none() {
+    let port = spec.port_or_known_default();
+    if authority_port.is_none() || port != authority_port {
         return Err(to_io_other("proxy URI lacks a port"));
     }
 
@@ -311,11 +318,43 @@ pub(crate) fn validate_proxy_url(spec: &Url) -> Result<(), Error> {
     // not sure how better to combine host port.
     let mut sockaddr_string = String::from(spec.host_str().unwrap());
     sockaddr_string.push(':');
-    sockaddr_string.push_str(&format!("{}", spec.port().unwrap()));
+    sockaddr_string.push_str(&format!("{}", port.expect("checked above")));
     let _ = resolve_addr(&sockaddr_string)
         .map_err(|e| to_io_other(format!("proxy URI has invalid host: {e}")))?;
 
     Ok(())
+}
+
+/// Url normalizes an explicit HTTP `:80` away. Keep the original authority
+/// available so validation can distinguish it from an omitted port.
+fn authority_explicit_port(raw: &str) -> Option<u16> {
+    let scheme_end = raw.find("://")?;
+    let after_scheme = &raw[scheme_end + 3..];
+    let authority_end = after_scheme
+        .find(|character: char| {
+            character == '/'
+                || character == '?'
+                || character == '#'
+                || character == '\\'
+                || character.is_whitespace()
+        })
+        .unwrap_or(after_scheme.len());
+    let authority = &after_scheme[..authority_end];
+    let host = authority
+        .rsplit_once('@')
+        .map_or(authority, |(_, host)| host);
+
+    let port = if let Some(host) = host.strip_prefix('[') {
+        let close = host.find(']')?;
+        host.get(close + 1..)?.strip_prefix(':')?
+    } else {
+        let colon = host.rfind(':')?;
+        host.get(colon + 1..)?
+    };
+    if port.is_empty() || !port.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    port.parse().ok()
 }
 
 // ================================================================ //

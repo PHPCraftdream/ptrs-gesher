@@ -149,11 +149,23 @@ impl Args {
     /// Second, all of the escaped are concatenated together."
     ///
     /// Example: `shared-secret=rahasia;secrets-file=/tmp/blob`
+    ///
+    /// Semicolons delimit pairs; commas remain part of values.
     pub fn parse_client_parameters(params: &str) -> Result<Self, Error> {
-        Self::parse(params)
+        Self::parse_delimited(params, ';', "client params")
     }
 
-    fn parse(params: &str) -> Result<Self, Error> {
+    /// Parse the comma-separated arguments carried by an SMETHOD `ARGS:` field.
+    ///
+    /// The optional `ARGS:` prefix is accepted for convenience. Commas delimit
+    /// pairs in this format; semicolons and other punctuation remain part of a
+    /// value unless escaped according to the PT specification.
+    pub fn parse_smethod_args(params: &str) -> Result<Self, Error> {
+        let params = params.strip_prefix("ARGS:").unwrap_or(params);
+        Self::parse_delimited(params, ',', "SMETHOD args")
+    }
+
+    fn parse_delimited(params: &str, delimiter: char, description: &str) -> Result<Self, Error> {
         let mut args = Args::new();
         if params.is_empty() {
             return Ok(args);
@@ -162,12 +174,12 @@ impl Args {
         let mut remaining = params;
         loop {
             // Read the key.
-            let (offset, key) = index_unescaped(remaining, &['=', ',', ';'])?;
+            let (offset, key) = index_unescaped(remaining, &['=', delimiter])?;
 
             // End of string or no equals sign?
             if offset >= remaining.len() || !remaining[offset..].starts_with('=') {
                 return Err(Error::ParseError(format!(
-                    "parsing client params found no equals sign in {}",
+                    "parsing {description} found no equals sign in {}",
                     &remaining[..offset]
                 )));
             }
@@ -176,11 +188,11 @@ impl Args {
             remaining = &remaining[offset + 1..];
 
             // Read the value.
-            let (offset, value) = index_unescaped(remaining, &[',', ';'])?;
+            let (offset, value) = index_unescaped(remaining, &[delimiter])?;
 
             if key.is_empty() {
                 return Err(Error::ParseError(format!(
-                    "parsing client params encountered empty key in ={}",
+                    "parsing {description} encountered empty key in ={}",
                     &remaining[..offset]
                 )));
             }
@@ -204,7 +216,21 @@ impl Args {
     /// added.
     ///
     /// "Equal signs and commas [and backslashes] MUST be escaped with a backslash."
+    /// Use [`parse_smethod_args`](Self::parse_smethod_args) to decode this
+    /// representation.
     pub fn encode_smethod_args(&self) -> String {
+        self.encode_delimited(',', &['=', ','])
+    }
+
+    /// Encode a name–value mapping for SOCKS authentication parameters.
+    ///
+    /// Pairs are separated by semicolons and the output is sorted by key. The
+    /// returned string does not include a protocol-specific prefix.
+    pub fn encode_client_parameters(&self) -> String {
+        self.encode_delimited(';', &['=', ';'])
+    }
+
+    fn encode_delimited(&self, delimiter: char, escaped: &[char]) -> String {
         if self.is_empty() {
             return String::new();
         }
@@ -230,12 +256,12 @@ impl Args {
         for (key, values) in entries {
             for value in values {
                 if !first {
-                    encoded.push(',');
+                    encoded.push(delimiter);
                 }
                 first = false;
-                push_backslash_escaped(&mut encoded, key, &['=', ',']);
+                push_backslash_escaped(&mut encoded, key, escaped);
                 encoded.push('=');
-                push_backslash_escaped(&mut encoded, value, &['=', ',']);
+                push_backslash_escaped(&mut encoded, value, escaped);
             }
         }
         encoded
@@ -445,7 +471,7 @@ impl Opts {
 impl std::str::FromStr for Args {
     type Err = Error;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        Self::parse(s)
+        Self::parse_client_parameters(s)
     }
 }
 

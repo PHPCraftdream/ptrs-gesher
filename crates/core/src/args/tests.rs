@@ -147,6 +147,10 @@ fn test_parse_client_parameters() {
             "rocks=20;height=5.6",
             hashmap!("rocks" => vec!["20"], "height" => vec!["5.6"]),
         ),
+        (
+            "url=https://example/x?a=1,2",
+            hashmap!("url" => vec!["https://example/x?a=1,2"]),
+        ),
     ];
 
     for input in bad_cases {
@@ -177,6 +181,38 @@ fn test_parse_client_parameters() {
             Err(err) => panic!("{} unexpectedly returned an error: {}", input, err),
         }
     }
+}
+
+#[test]
+fn smethod_args_use_comma_separator_only() {
+    let input = r#"ARGS:url=https://example/x?a=1\,2;part,iat-mode=0"#;
+    let parsed = Args::parse_smethod_args(input).expect("SMETHOD args should parse");
+    assert_eq!(
+        parsed.retrieve("url").as_deref(),
+        Some("https://example/x?a=1,2;part")
+    );
+    assert_eq!(parsed.retrieve("iat-mode").as_deref(), Some("0"));
+
+    let encoded = parsed.encode_smethod_args();
+    assert_eq!(
+        Args::parse_smethod_args(&encoded).expect("encoded SMETHOD args should parse"),
+        parsed
+    );
+}
+
+#[test]
+fn client_parameters_roundtrip_with_smethod_punctuation() {
+    let input = r#"url=https://example/x?a=1,2\;part\;two"#;
+    let parsed = Args::parse_client_parameters(input).expect("client params should parse");
+    assert_eq!(
+        parsed.retrieve("url").as_deref(),
+        Some("https://example/x?a=1,2;part;two")
+    );
+    let encoded = parsed.encode_client_parameters();
+    assert_eq!(
+        Args::parse_client_parameters(&encoded).expect("encoded client params should parse"),
+        parsed
+    );
 }
 
 #[test]
@@ -405,10 +441,13 @@ fn test_encode_smethod_args() {
             input, encoded, expected
         );
 
-        let mut smethod = String::from("ARGS:");
-        smethod.push_str(&encoded);
-        let m = parse_smethod_args(&smethod).unwrap();
+        let m = parse_smethod_args(format!("ARGS:{encoded}")).unwrap();
         assert!(!m.is_empty(), "{:?} -> {}", input_map, encoded);
+        if input_map.contains_key("") {
+            assert!(Args::parse_smethod_args(&encoded).is_err());
+        } else {
+            assert_eq!(Args::parse_smethod_args(&encoded).unwrap(), input);
+        }
         // println!("{} → {:?}", encoded, m);
     }
 }

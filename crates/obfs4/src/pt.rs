@@ -1,7 +1,5 @@
 use crate::{
-    constants::*,
-    handshake::Obfs4NtorPublicKey,
-    proto::{MaybeTimeout, Obfs4Stream, IAT},
+    proto::{MaybeTimeout, Obfs4Stream},
     Error, OBFS4_NAME,
 };
 use ptrs::{args::Args, FutureResult as F};
@@ -10,11 +8,9 @@ use std::{
     marker::PhantomData,
     net::{SocketAddrV4, SocketAddrV6},
     pin::Pin,
-    str::FromStr,
     time::Duration,
 };
 
-use hex::FromHex;
 use ptrs::trace;
 use tokio::{
     io::{AsyncRead, AsyncWrite},
@@ -71,12 +67,13 @@ where
     }
 
     fn options(&mut self, opts: &Args) -> Result<&mut Self, Self::Error> {
-        // TODO: pass on opts
-
-        let state = Self::parse_state(None::<&str>, opts)?;
+        let state = Self::parse_state(self.statefile_path.as_deref(), opts)?;
         self.identity_keys = state.private_key;
+        self.identity_override = true;
         self.iat_mode(state.iat_mode);
-        // self.drbg = state.drbg_seed; // TODO apply seed from args to server
+        self.drbg_seed = Some(state.drbg_seed_value);
+        self.seed_override = true;
+        self.config_error = None;
 
         trace!(
             "node_pubkey: {}, node_id: {}, iat: {}",
@@ -92,6 +89,7 @@ where
     }
 
     fn statefile_location(&mut self, _path: &str) -> Result<&mut Self, Self::Error> {
+        self.statefile_path(_path);
         Ok(self)
     }
 
@@ -101,11 +99,11 @@ where
     }
 
     fn v4_bind_addr(&mut self, _addr: SocketAddrV4) -> Result<&mut Self, Self::Error> {
-        Ok(self)
+        Err(Error::NotSupported)
     }
 
     fn v6_bind_addr(&mut self, _addr: SocketAddrV6) -> Result<&mut Self, Self::Error> {
-        Ok(self)
+        Err(Error::NotSupported)
     }
 }
 
@@ -132,60 +130,25 @@ where
     /// Pluggable transport attempts to parse and validate options from a string,
     /// typically using ['parse_smethod_args'].
     fn options(&mut self, opts: &Args) -> Result<&mut Self, Self::Error> {
-        let server_materials = match opts.retrieve(CERT_ARG) {
-            Some(cert_strs) => {
-                // The "new" (version >= 0.0.3) bridge lines use a unified "cert" argument
-                // for the Node ID and Public Key.
-                if cert_strs.is_empty() {
-                    return Err(format!("missing argument '{NODE_ID_ARG}'").into());
-                }
-                trace!("cert string: {}", &cert_strs);
-                let ntor_pk = Obfs4NtorPublicKey::from_str(&cert_strs)?;
-                let pk: [u8; NODE_PUBKEY_LENGTH] = *ntor_pk.pk.as_bytes();
-                let id: [u8; NODE_ID_LENGTH] = ntor_pk.id.as_bytes().try_into().unwrap();
-                (pk, id)
+        if opts.is_empty() {
+            if let Some(path) = self.statefile_path.clone() {
+                self.load_statefile(std::path::Path::new(&path))?;
+                return Ok(self);
             }
-            None => {
-                // The "old" style (version <= 0.0.2) bridge lines use separate Node ID
-                // and Public Key arguments in Base16 encoding and are a UX disaster.
-                let node_id_strs = opts
-                    .retrieve(NODE_ID_ARG)
-                    .ok_or(format!("missing argument '{NODE_ID_ARG}'"))?;
-                let id = <[u8; NODE_ID_LENGTH]>::from_hex(node_id_strs)
-                    .map_err(|e| format!("malformed node id: {e}"))?;
-
-                let public_key_strs = opts
-                    .retrieve(PUBLIC_KEY_ARG)
-                    .ok_or(format!("missing argument '{PUBLIC_KEY_ARG}'"))?;
-
-                let pk = <[u8; 32]>::from_hex(public_key_strs)
-                    .map_err(|e| format!("malformed public key: {e}"))?;
-                // Obfs4NtorPublicKey::new(pk, node_id)
-                (pk, id)
-            }
-        };
-
-        // IAT config is common across the two bridge line formats.
-        let iat_strs = opts
-            .retrieve(IAT_ARG)
-            .ok_or(format!("missing argument '{IAT_ARG}'"))?;
-        let iat_mode = IAT::from_str(&iat_strs)?;
-
-        self.with_node_pubkey(server_materials.0)
-            .with_node_id(server_materials.1)
-            .with_iat_mode(iat_mode);
+        }
+        self.apply_args(opts)?;
         trace!(
             "node_pubkey: {}, node_id: {}, iat: {}",
             hex::encode(self.station_pubkey),
             hex::encode(self.station_id),
-            iat_mode
+            self.iat_mode
         );
-
         Ok(self)
     }
 
     /// A path where the launched PT can store state.
     fn statefile_location(&mut self, _path: &str) -> Result<&mut Self, Self::Error> {
+        self.with_statefile_directory(_path);
         Ok(self)
     }
 
@@ -200,14 +163,14 @@ where
     ///
     /// Leaving this out will mean the PT uses a sane default.
     fn v4_bind_addr(&mut self, _addr: SocketAddrV4) -> Result<&mut Self, Self::Error> {
-        Ok(self)
+        Err(Error::NotSupported)
     }
 
     /// An IPv6 address to bind outgoing connections to (if specified).
     ///
     /// Leaving this out will mean the PT uses a sane default.
     fn v6_bind_addr(&mut self, _addr: SocketAddrV6) -> Result<&mut Self, Self::Error> {
-        Ok(self)
+        Err(Error::NotSupported)
     }
 }
 
@@ -256,6 +219,7 @@ where
 #[cfg(test)]
 mod test {
     use super::*;
+    use crate::{constants::*, proto::IAT};
 
     #[test]
     fn client_options_with_cert_parses_pubkey_and_iat() {
@@ -371,5 +335,25 @@ mod test {
 
         let st_name = <crate::Server as ptrs::ServerTransport<TcpStream>>::method_name();
         assert_eq!(st_name, Obfs4PT::NAME);
+    }
+
+    #[test]
+    fn bind_addresses_are_explicitly_unsupported() {
+        let mut client = crate::ClientBuilder::default();
+        assert!(
+            <crate::ClientBuilder as ptrs::ClientBuilder<TcpStream>>::v4_bind_addr(
+                &mut client,
+                "127.0.0.1:0".parse().unwrap(),
+            )
+            .is_err()
+        );
+        let mut server = crate::ServerBuilder::<TcpStream>::default();
+        assert!(
+            <crate::ServerBuilder<TcpStream> as ptrs::ServerBuilder<TcpStream>>::v6_bind_addr(
+                &mut server,
+                "[::1]:0".parse().unwrap(),
+            )
+            .is_err()
+        );
     }
 }

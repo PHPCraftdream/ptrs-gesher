@@ -211,6 +211,7 @@ fn validate_url() -> Result<(), Error> {
         "socks4a://:admin@1.2.3.4:8080",     // no username, but password defined
         "http://admin:admin@example.com",
         "socks5://1.2.3.4", // no port
+        "http://1.2.3.4",   // omitted default port is still invalid
         "socks5://[1:2::3:4]",
         "socks5://admin:admin@1.2.3.4",
         "socks4a://1.2.3.4",
@@ -261,6 +262,32 @@ fn validate_url() -> Result<(), Error> {
         assert!(
             res.is_ok(),
             "\"{trial}\" unexpectedly failed to validate: {res:?}"
+        );
+    }
+
+    for trial in [
+        "http://127.0.0.1:80",
+        "http://user:secret@127.0.0.1:80",
+        "http://[::1]:80",
+    ] {
+        env::set_var(constants::PROXY, trial);
+        assert!(
+            get_proxy_url()?.is_some(),
+            "explicit default port should be accepted: {trial}"
+        );
+    }
+
+    for trial in [
+        "http://127.0.0.1:",
+        "http://user:secret@127.0.0.1:",
+        "http://[::1]:",
+        "http://127.0.0.1\\path:80",
+        "http://127.0.0.1 path:80",
+    ] {
+        env::set_var(constants::PROXY, trial);
+        assert!(
+            get_proxy_url().is_err(),
+            "empty proxy port should be rejected: {trial}"
         );
     }
 

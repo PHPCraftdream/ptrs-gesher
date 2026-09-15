@@ -1,6 +1,7 @@
 use super::*;
 use base64::Engine;
 use ptrs::ClientBuilder;
+use std::future::Future;
 use std::sync::Arc;
 use tokio::net::TcpStream;
 
@@ -51,7 +52,6 @@ fn release_invalid_servername_cannot_inject_an_http_header() {
 
 #[tokio::test]
 async fn release_builder_timeout_closes_a_stalled_upgrade_socket() {
-    use ptrs::ClientTransport;
     use tokio::io::AsyncReadExt;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/path", listener.local_addr().unwrap());
@@ -67,10 +67,7 @@ async fn release_builder_timeout_closes_a_stalled_upgrade_socket() {
     )
     .unwrap();
     let client = <WebTunnelBuilder as ClientBuilder<TcpStream>>::build(&builder);
-    let mut connection = <WebTunnelClient as ClientTransport<TcpStream, io::Error>>::establish(
-        client,
-        Box::pin(std::future::pending()),
-    );
+    let mut connection = Box::pin(client.connect_url());
     let (mut peer, _) = tokio::select! {
         _ = &mut connection => panic!("handshake ended before TCP accept"),
         accepted = listener.accept() => accepted.unwrap(),
@@ -296,6 +293,15 @@ fn builder_method_name() {
 }
 
 #[test]
+fn persistent_state_setter_reports_unsupported() {
+    let mut builder = WebTunnelBuilder::default();
+    assert!(matches!(
+        <WebTunnelBuilder as ClientBuilder<TcpStream>>::statefile_location(&mut builder, "state"),
+        Err(Error::Unsupported(_))
+    ));
+}
+
+#[test]
 fn builder_rejects_missing_url() {
     let mut builder = WebTunnelBuilder::default();
     let args = Args::new();
@@ -324,6 +330,341 @@ async fn build_without_options_fails_gracefully_on_wrap() {
         .await;
 
     assert!(matches!(result, Err(Error::MissingUrl)));
+}
+
+#[tokio::test]
+async fn wrap_uses_supplied_carrier_for_upgrade_and_payload() {
+    use ptrs::ClientTransport;
+
+    let mut builder = WebTunnelBuilder::default();
+    <WebTunnelBuilder as ClientBuilder<tokio::io::DuplexStream>>::options(
+        &mut builder,
+        &make_args(&[("url", "http://example.invalid/path")]),
+    )
+    .unwrap();
+    let client = <WebTunnelBuilder as ClientBuilder<tokio::io::DuplexStream>>::build(&builder);
+    let (mut server, carrier) = tokio::io::duplex(4096);
+    let server_task = tokio::spawn(async move {
+        let mut request = Vec::new();
+        let mut byte = [0u8; 1];
+        while !request.ends_with(b"\r\n\r\n") {
+            server.read_exact(&mut byte).await.unwrap();
+            request.push(byte[0]);
+        }
+        assert!(request.starts_with(b"GET /path HTTP/1.1\r\n"));
+        server
+            .write_all(b"HTTP/1.1 101 Switching Protocols\r\n\r\nreply")
+            .await
+            .unwrap();
+        let mut payload = [0u8; 7];
+        server.read_exact(&mut payload).await.unwrap();
+        assert_eq!(&payload, b"request");
+    });
+
+    let mut stream = tokio::time::timeout(
+        Duration::from_secs(2),
+        <WebTunnelClient as ClientTransport<tokio::io::DuplexStream, io::Error>>::wrap(
+            client, carrier,
+        ),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let mut reply = [0u8; 5];
+    tokio::time::timeout(Duration::from_secs(2), stream.read_exact(&mut reply))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(&reply, b"reply");
+    stream.write_all(b"request").await.unwrap();
+    stream.flush().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(2), server_task)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
+async fn establish_awaits_supplied_dial_after_validation() {
+    use ptrs::ClientTransport;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let polls = Arc::new(AtomicUsize::new(0));
+    let dial_polls = Arc::clone(&polls);
+    let builder = WebTunnelBuilder::default();
+    let client = <WebTunnelBuilder as ClientBuilder<tokio::io::DuplexStream>>::build(&builder);
+    let dial = Box::pin(async move {
+        dial_polls.fetch_add(1, Ordering::SeqCst);
+        Err::<tokio::io::DuplexStream, io::Error>(io::Error::other("dial should not run"))
+    });
+    let result =
+        <WebTunnelClient as ClientTransport<tokio::io::DuplexStream, io::Error>>::establish(
+            client, dial,
+        )
+        .await;
+    assert!(matches!(result, Err(Error::MissingUrl)));
+    assert_eq!(polls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn establish_uses_supplied_dial_and_preserves_failure() {
+    use ptrs::ClientTransport;
+
+    let mut builder = WebTunnelBuilder::default();
+    <WebTunnelBuilder as ClientBuilder<tokio::io::DuplexStream>>::options(
+        &mut builder,
+        &make_args(&[("url", "http://example.invalid/path")]),
+    )
+    .unwrap();
+    let client = <WebTunnelBuilder as ClientBuilder<tokio::io::DuplexStream>>::build(&builder);
+    let dial = Box::pin(async {
+        Err::<tokio::io::DuplexStream, io::Error>(io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            "carrier refused",
+        ))
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        <WebTunnelClient as ClientTransport<tokio::io::DuplexStream, io::Error>>::establish(
+            client, dial,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(result, Err(Error::Io(error)) if error.to_string().contains("carrier refused"))
+    );
+}
+
+#[tokio::test(start_paused = true)]
+async fn establish_pending_dial_is_bounded_by_transport_timeout() {
+    use ptrs::ClientTransport;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let mut builder = WebTunnelBuilder::default();
+    <WebTunnelBuilder as ClientBuilder<tokio::io::DuplexStream>>::options(
+        &mut builder,
+        &make_args(&[("url", "http://example.invalid/path")]),
+    )
+    .unwrap();
+    <WebTunnelBuilder as ClientBuilder<tokio::io::DuplexStream>>::timeout(
+        &mut builder,
+        Some(Duration::from_secs(3)),
+    )
+    .unwrap();
+    let client = <WebTunnelBuilder as ClientBuilder<tokio::io::DuplexStream>>::build(&builder);
+    let polls = Arc::new(AtomicUsize::new(0));
+    let dial_polls = Arc::clone(&polls);
+    let dial = Box::pin(std::future::poll_fn(
+        move |_| -> std::task::Poll<Result<tokio::io::DuplexStream, io::Error>> {
+            dial_polls.fetch_add(1, Ordering::SeqCst);
+            std::task::Poll::Pending
+        },
+    ));
+    let result = tokio::time::timeout(
+        Duration::from_secs(10),
+        <WebTunnelClient as ClientTransport<tokio::io::DuplexStream, io::Error>>::establish(
+            client, dial,
+        ),
+    )
+    .await;
+    assert!(matches!(result, Ok(Err(Error::Io(error))) if error.kind() == io::ErrorKind::TimedOut));
+    assert!(polls.load(Ordering::SeqCst) > 0);
+}
+
+#[tokio::test]
+async fn supplied_carrier_rejects_configured_bind_before_dial_poll() {
+    use ptrs::ClientTransport;
+    use std::net::{Ipv4Addr, SocketAddrV4};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    let mut builder = WebTunnelBuilder::default();
+    <WebTunnelBuilder as ClientBuilder<tokio::io::DuplexStream>>::options(
+        &mut builder,
+        &make_args(&[("url", "http://example.invalid/path")]),
+    )
+    .unwrap();
+    <WebTunnelBuilder as ClientBuilder<tokio::io::DuplexStream>>::v4_bind_addr(
+        &mut builder,
+        SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
+    )
+    .unwrap();
+    let client = <WebTunnelBuilder as ClientBuilder<tokio::io::DuplexStream>>::build(&builder);
+    let polls = Arc::new(AtomicUsize::new(0));
+    let dial_polls = Arc::clone(&polls);
+    let dial = Box::pin(async move {
+        dial_polls.fetch_add(1, Ordering::SeqCst);
+        Err::<tokio::io::DuplexStream, io::Error>(io::Error::other("dial should not run"))
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        <WebTunnelClient as ClientTransport<tokio::io::DuplexStream, io::Error>>::establish(
+            client, dial,
+        ),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(result, Err(Error::Unsupported(_))));
+    assert_eq!(polls.load(Ordering::SeqCst), 0);
+}
+
+#[tokio::test]
+async fn handshake_timeout_overflow_is_rejected_before_connect() {
+    let mut builder = WebTunnelBuilder::default();
+    <WebTunnelBuilder as ClientBuilder<TcpStream>>::options(
+        &mut builder,
+        &make_args(&[("url", "http://127.0.0.1:1/path")]),
+    )
+    .unwrap();
+    <WebTunnelBuilder as ClientBuilder<TcpStream>>::timeout(&mut builder, Some(Duration::MAX))
+        .unwrap();
+    let client = <WebTunnelBuilder as ClientBuilder<TcpStream>>::build(&builder);
+    let result = client.connect_url().await;
+    assert!(matches!(result, Err(Error::Io(error)) if error.kind() == io::ErrorKind::InvalidInput));
+}
+
+#[tokio::test]
+async fn supplied_dial_is_not_polled_when_deadline_overflows() {
+    let mut builder = WebTunnelBuilder::default();
+    <WebTunnelBuilder as ClientBuilder<tokio::io::DuplexStream>>::options(
+        &mut builder,
+        &make_args(&[("url", "https://example.invalid/path")]),
+    )
+    .unwrap();
+    builder.timeout = Duration::MAX;
+    let client = <WebTunnelBuilder as ClientBuilder<tokio::io::DuplexStream>>::build(&builder);
+    let dial = Box::pin(std::future::poll_fn(
+        |_| -> std::task::Poll<io::Result<tokio::io::DuplexStream>> {
+            panic!("invalid timeout must be rejected before polling the carrier")
+        },
+    ));
+    let result =
+        <WebTunnelClient as ptrs::ClientTransport<_, io::Error>>::establish(client, dial).await;
+    assert!(matches!(result, Err(Error::Io(error)) if error.kind() == io::ErrorKind::InvalidInput));
+}
+
+#[tokio::test]
+async fn tls_client_hello_uses_supplied_carrier() {
+    let mut builder = WebTunnelBuilder::default();
+    <WebTunnelBuilder as ClientBuilder<tokio::io::DuplexStream>>::options(
+        &mut builder,
+        &make_args(&[("url", "https://example.invalid/path")]),
+    )
+    .unwrap();
+    let client = <WebTunnelBuilder as ClientBuilder<tokio::io::DuplexStream>>::build(&builder);
+    let (carrier, mut peer) = tokio::io::duplex(16_384);
+    let handshake = <WebTunnelClient as ptrs::ClientTransport<_, io::Error>>::wrap(client, carrier);
+    let peer = async move {
+        let mut header = [0; 5];
+        peer.read_exact(&mut header).await.unwrap();
+        assert_eq!(&header[..2], &[22, 3], "expected a TLS handshake record");
+    };
+    let (result, ()) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(handshake, peer)
+    })
+    .await
+    .unwrap();
+    assert!(matches!(result, Err(Error::Tls(_))));
+}
+
+#[tokio::test]
+async fn url_connect_applies_v4_bind_to_tcp_socket() {
+    use ptrs::ClientBuilder;
+    use std::net::{Ipv4Addr, SocketAddrV4};
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/path", listener.local_addr().unwrap());
+    let mut builder = WebTunnelBuilder::default();
+    <WebTunnelBuilder as ClientBuilder<TcpStream>>::options(
+        &mut builder,
+        &make_args(&[("url", &url), ("doh-mode", "off")]),
+    )
+    .unwrap();
+    <WebTunnelBuilder as ClientBuilder<TcpStream>>::v4_bind_addr(
+        &mut builder,
+        SocketAddrV4::new(Ipv4Addr::LOCALHOST, 0),
+    )
+    .unwrap();
+    let client = <WebTunnelBuilder as ClientBuilder<TcpStream>>::build(&builder);
+    let server = tokio::spawn(async move {
+        let (mut stream, peer) = listener.accept().await.unwrap();
+        assert_eq!(peer.ip(), Ipv4Addr::LOCALHOST);
+        assert_ne!(peer.port(), 0);
+        let mut request = Vec::new();
+        let mut byte = [0u8; 1];
+        while !request.ends_with(b"\r\n\r\n") {
+            stream.read_exact(&mut byte).await.unwrap();
+            request.push(byte[0]);
+        }
+        stream
+            .write_all(b"HTTP/1.1 101 Switching Protocols\r\n\r\n")
+            .await
+            .unwrap();
+    });
+    client.connect_url().await.unwrap();
+    server.await.unwrap();
+}
+
+#[tokio::test]
+async fn url_connect_v4_bind_reports_occupied_source_port() {
+    use ptrs::ClientBuilder;
+    use std::net::{Ipv4Addr, SocketAddrV4};
+
+    let occupied = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let occupied_addr = occupied.local_addr().unwrap();
+    let url = format!("http://{occupied_addr}/path");
+    let mut builder = WebTunnelBuilder::default();
+    <WebTunnelBuilder as ClientBuilder<TcpStream>>::options(
+        &mut builder,
+        &make_args(&[("url", &url), ("doh-mode", "off")]),
+    )
+    .unwrap();
+    <WebTunnelBuilder as ClientBuilder<TcpStream>>::v4_bind_addr(
+        &mut builder,
+        SocketAddrV4::new(Ipv4Addr::LOCALHOST, occupied_addr.port()),
+    )
+    .unwrap();
+    <WebTunnelBuilder as ClientBuilder<TcpStream>>::timeout(
+        &mut builder,
+        Some(Duration::from_secs(2)),
+    )
+    .unwrap();
+    let result = <WebTunnelBuilder as ClientBuilder<TcpStream>>::build(&builder)
+        .connect_url()
+        .await;
+    assert!(matches!(result, Err(Error::Io(error)) if error.kind() == io::ErrorKind::AddrInUse));
+}
+
+#[tokio::test]
+async fn url_connect_v6_bind_reports_occupied_source_port() {
+    use ptrs::ClientBuilder;
+    use std::net::{Ipv6Addr, SocketAddrV6};
+
+    let Ok(occupied) = tokio::net::TcpListener::bind("[::1]:0").await else {
+        return;
+    };
+    let occupied_addr = occupied.local_addr().unwrap();
+    let url = format!("http://[::1]:{}/path", occupied_addr.port());
+    let mut builder = WebTunnelBuilder::default();
+    <WebTunnelBuilder as ClientBuilder<TcpStream>>::options(
+        &mut builder,
+        &make_args(&[("url", &url), ("doh-mode", "off")]),
+    )
+    .unwrap();
+    <WebTunnelBuilder as ClientBuilder<TcpStream>>::v6_bind_addr(
+        &mut builder,
+        SocketAddrV6::new(Ipv6Addr::LOCALHOST, occupied_addr.port(), 0, 0),
+    )
+    .unwrap();
+    <WebTunnelBuilder as ClientBuilder<TcpStream>>::timeout(
+        &mut builder,
+        Some(Duration::from_secs(2)),
+    )
+    .unwrap();
+    let result = <WebTunnelBuilder as ClientBuilder<TcpStream>>::build(&builder)
+        .connect_url()
+        .await;
+    assert!(matches!(result, Err(Error::Io(error)) if error.kind() == io::ErrorKind::AddrInUse));
 }
 
 #[test]

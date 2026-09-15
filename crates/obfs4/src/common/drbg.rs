@@ -125,17 +125,14 @@ impl FromStr for Seed {
 impl TryFrom<&[u8]> for Seed {
     type Error = Error;
     fn try_from(arr: &[u8]) -> Result<Self> {
-        let mut seed = Seed::new()?;
         if arr.len() != SEED_LENGTH {
             let e = format!("incorrect drbg seed length {}!={SEED_LENGTH}", arr.len());
             return Err(Error::Other(e.into()));
         }
 
-        seed.0 = arr
-            .try_into()
-            .map_err(|e| Error::Other(format!("{e}").into()))?;
-
-        Ok(seed)
+        let mut seed = [0_u8; SEED_LENGTH];
+        seed.copy_from_slice(arr);
+        Ok(Self(seed))
     }
 }
 
@@ -378,6 +375,13 @@ mod test {
         assert!(Seed::try_from(short.as_slice()).is_err());
         let long = vec![0u8; SEED_LENGTH + 1];
         assert!(Seed::try_from(long.as_slice()).is_err());
+    }
+
+    #[test]
+    fn seed_try_from_copies_all_bytes_without_generating_random_data() {
+        let input: Vec<u8> = (0..SEED_LENGTH).map(|n| n as u8).collect();
+        let seed = Seed::try_from(input.as_slice()).unwrap();
+        assert_eq!(seed.as_bytes(), input.as_slice());
     }
 
     #[test]

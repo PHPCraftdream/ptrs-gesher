@@ -18,13 +18,14 @@ use crate::{
 };
 use ptrs::args::Args;
 
-use std::{borrow::BorrowMut, marker::PhantomData, str::FromStr, sync::Arc};
+use std::{borrow::BorrowMut, marker::PhantomData, path::Path, str::FromStr, sync::Arc};
 
 use bytes::{Buf, BufMut, Bytes};
 use hex::FromHex;
 use hmac::{Hmac, Mac};
 use ptrs::{debug, info};
 use rand::prelude::*;
+use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::{Duration, Instant};
@@ -43,7 +44,14 @@ pub struct ServerBuilder<T> {
     pub(crate) statefile_path: Option<String>,
     pub(crate) identity_keys: Obfs4NtorSecretKey,
     pub(crate) handshake_timeout: MaybeTimeout,
-    // pub(crate) drbg: Drbg, // TODO: build in DRBG
+    pub(crate) drbg_seed: Option<drbg::Seed>,
+    pub(crate) config_error: Option<String>,
+    pub(crate) identity_override: bool,
+    pub(crate) node_id_override: bool,
+    pub(crate) iat_override: bool,
+    pub(crate) seed_override: bool,
+    statefile_is_file: bool,
+    persist_statefile: bool,
     _stream_type: PhantomData<T>,
 }
 
@@ -55,6 +63,14 @@ impl<T> Default for ServerBuilder<T> {
             statefile_path: None,
             identity_keys,
             handshake_timeout: MaybeTimeout::Default_,
+            drbg_seed: None,
+            config_error: None,
+            identity_override: false,
+            node_id_override: false,
+            iat_override: false,
+            seed_override: false,
+            statefile_is_file: false,
+            persist_statefile: true,
             _stream_type: PhantomData,
         }
     }
@@ -64,28 +80,64 @@ impl<T> ServerBuilder<T> {
     /// 64 byte combined representation of an x25519 public key, private key
     /// combination.
     pub fn node_keys(&mut self, keys: [u8; KEY_LENGTH * 2]) -> &Self {
-        let sk: [u8; KEY_LENGTH] = keys[..KEY_LENGTH].try_into().unwrap();
-        let pk: [u8; KEY_LENGTH] = keys[KEY_LENGTH..].try_into().unwrap();
-        self.identity_keys.sk = sk.into();
-        self.identity_keys.pk.pk = (&self.identity_keys.sk).into();
+        if let Err(error) = self.try_node_keys(keys) {
+            self.config_error = Some(error.to_string());
+        }
         self
     }
 
-    /// Set the directory path where the server's state file will be stored.
+    /// Set the combined private/public node key after validating that the pair
+    /// corresponds. The builder is unchanged when validation fails.
+    pub fn try_node_keys(&mut self, keys: [u8; KEY_LENGTH * 2]) -> Result<&mut Self> {
+        let sk: [u8; KEY_LENGTH] = keys[..KEY_LENGTH].try_into()?;
+        let pk: [u8; KEY_LENGTH] = keys[KEY_LENGTH..].try_into()?;
+        let secret = StaticSecret::from(sk);
+        let derived = PublicKey::from(&secret);
+        if derived.as_bytes() != &pk {
+            return Err("node private/public keys do not correspond".into());
+        }
+        self.identity_keys.sk = secret;
+        self.identity_keys.pk.pk = pk.into();
+        self.config_error = None;
+        self.identity_override = true;
+        Ok(self)
+    }
+
+    /// Set the directory where `obfs4_state.json` is loaded or persisted.
     pub fn statefile_path(&mut self, path: &str) -> &Self {
         self.statefile_path = Some(path.into());
+        self.statefile_is_file = false;
+        self.persist_statefile = true;
         self
+    }
+
+    /// Import and validate a state directory or explicit state file.
+    pub fn try_statefile_path(&mut self, path: &str) -> Result<&mut Self> {
+        let state = Self::read_state_path(path)?;
+        let mut args = Args::new();
+        state.extend_args(&mut args);
+        let parsed = RequiredServerState::try_from(&args)?;
+        self.identity_keys = parsed.private_key;
+        self.iat_mode = parsed.iat_mode;
+        self.drbg_seed = Some(parsed.drbg_seed_value);
+        self.statefile_path = Some(path.into());
+        self.config_error = None;
+        self.statefile_is_file = Path::new(path).is_file();
+        self.persist_statefile = !self.statefile_is_file;
+        Ok(self)
     }
 
     /// Set the server's 20-byte node ID (RSA identity fingerprint).
     pub fn node_id(&mut self, id: [u8; NODE_ID_LENGTH]) -> &Self {
         self.identity_keys.pk.id = id.into();
+        self.node_id_override = true;
         self
     }
 
     /// Set the IAT (inter-arrival time) obfuscation mode for this server.
     pub fn iat_mode(&mut self, iat: IAT) -> &Self {
         self.iat_mode = iat;
+        self.iat_override = true;
         self
     }
 
@@ -117,15 +169,80 @@ impl<T> ServerBuilder<T> {
 
     /// Consume this builder and produce a [`Server`] ready to accept connections.
     pub fn build(&self) -> Server {
-        Server(Arc::new(ServerInner {
-            identity_keys: self.identity_keys.clone(),
-            iat_mode: self.iat_mode,
+        match self.try_build() {
+            Ok(server) => server,
+            Err(error) => Server(Arc::new(ServerInner {
+                identity_keys: self.identity_keys.clone(),
+                iat_mode: self.iat_mode,
+                biased: false,
+                handshake_timeout: self.handshake_timeout.clone(),
+                drbg_seed: None,
+                configuration_error: Some(error.to_string()),
+                replay_filter: ReplayFilter::new(REPLAY_TTL),
+            })),
+        }
+    }
+
+    /// Build a server, loading and validating the configured state file.
+    pub fn try_build(&self) -> Result<Server> {
+        let mut identity_keys = self.identity_keys.clone();
+        let mut iat_mode = self.iat_mode;
+        let mut drbg_seed = self.drbg_seed.clone();
+        if let Some(error) = &self.config_error {
+            return Err(error.clone().into());
+        }
+        if let Some(path) = &self.statefile_path {
+            let path_ref = Path::new(path);
+            let state_exists = if self.statefile_is_file {
+                path_ref.is_file()
+            } else {
+                path_ref.join(STATE_FILENAME).is_file()
+            };
+            let needs_state = !self.identity_override || !self.iat_override || !self.seed_override;
+            if needs_state && state_exists {
+                let state = Self::read_state_path(path)?;
+                let mut args = Args::new();
+                state.extend_args(&mut args);
+                let parsed = RequiredServerState::try_from(&args)?;
+                if !self.identity_override {
+                    let mut state_identity = parsed.private_key;
+                    if self.node_id_override {
+                        state_identity.pk.id = identity_keys.pk.id;
+                    }
+                    identity_keys = state_identity;
+                }
+                if !self.iat_override {
+                    iat_mode = parsed.iat_mode;
+                }
+                if !self.seed_override {
+                    drbg_seed = Some(parsed.drbg_seed_value);
+                }
+            }
+        }
+        let drbg_seed = match drbg_seed {
+            Some(seed) => seed,
+            None => drbg::Seed::new()?,
+        };
+        let server = Server(Arc::new(ServerInner {
+            identity_keys,
+            iat_mode,
             biased: false,
             handshake_timeout: self.handshake_timeout.clone(),
-
-            // metrics: Arc::new(std::sync::Mutex::new(ServerMetrics {})),
+            drbg_seed: Some(drbg_seed),
+            configuration_error: None,
             replay_filter: ReplayFilter::new(REPLAY_TTL),
-        }))
+        }));
+        if self.persist_statefile {
+            if let Some(path) = &self.statefile_path {
+                let target = if self.statefile_is_file {
+                    Path::new(path).to_path_buf()
+                } else {
+                    Path::new(path).join(STATE_FILENAME)
+                };
+                server.write_statefile_to(target)?;
+            }
+        }
+        Ok(server)
     }
 
     /// Validate that the provided argument map contains all required server parameters.
@@ -157,15 +274,20 @@ impl<T> ServerBuilder<T> {
     }
 
     fn server_state_from_file(statedir: impl AsRef<str>, args: &mut Args) -> Result<()> {
-        let file_path = std::path::Path::new(statedir.as_ref()).join(STATE_FILENAME);
+        let state = Self::read_state_path(statedir)?;
+        state.extend_args(args);
+        Ok(())
+    }
 
-        // NOTE: This uses blocking I/O (std::fs::read) rather than tokio::fs::read
-        // because this function is called from the sync `ServerBuilder::options()`
-        // trait method. This is acceptable: it runs once at server init, not on
-        // the hot path, and the file is small (< 1 KiB).
-        let state_str = std::fs::read(&file_path)?;
-
-        Self::server_state_from_json(&state_str[..], args)
+    fn read_state_path(path: impl AsRef<str>) -> Result<JsonServerState> {
+        let path = Path::new(path.as_ref());
+        let file_path = if path.is_dir() {
+            path.join(STATE_FILENAME)
+        } else {
+            path.to_path_buf()
+        };
+        let state_str = std::fs::read(file_path)?;
+        serde_json::from_slice(&state_str).map_err(|e| Error::Other(Box::new(e)))
     }
 
     fn server_state_from_json(state_rdr: impl std::io::Read, args: &mut Args) -> Result<()> {
@@ -213,7 +335,7 @@ impl JsonServerState {
 
 pub(crate) struct RequiredServerState {
     pub(crate) private_key: Obfs4NtorSecretKey,
-    pub(crate) drbg_seed: drbg::Drbg,
+    pub(crate) drbg_seed_value: drbg::Seed,
     pub(crate) iat_mode: IAT,
 }
 
@@ -228,7 +350,7 @@ impl TryFrom<&Args> for RequiredServerState {
         let drbg_seed_str = value
             .retrieve(SEED_ARG)
             .ok_or("missing argument {SEED_ARG}")?;
-        let drbg_seed = drbg::Seed::from_hex(drbg_seed_str)?;
+        let drbg_seed_value = drbg::Seed::from_hex(drbg_seed_str)?;
 
         let node_id_str = value
             .retrieve(NODE_ID_ARG)
@@ -241,11 +363,17 @@ impl TryFrom<&Args> for RequiredServerState {
         };
 
         let secret_key = StaticSecret::from(sk);
+        if let Some(public_key) = value.retrieve(PUBLIC_KEY_ARG) {
+            let public_key = <[u8; KEY_LENGTH]>::from_hex(public_key)?;
+            if PublicKey::from(&secret_key).as_bytes() != &public_key {
+                return Err("node private/public keys do not correspond".into());
+            }
+        }
         let private_key = Obfs4NtorSecretKey::new(secret_key, RsaIdentity::from(node_id));
 
         Ok(RequiredServerState {
             private_key,
-            drbg_seed: drbg::Drbg::new(Some(drbg_seed))?,
+            drbg_seed_value,
             iat_mode,
         })
     }
@@ -265,6 +393,8 @@ pub(crate) struct ServerInner {
     pub(crate) iat_mode: IAT,
     pub(crate) biased: bool,
     pub(crate) identity_keys: Obfs4NtorSecretKey,
+    pub(crate) drbg_seed: Option<drbg::Seed>,
+    pub(crate) configuration_error: Option<String>,
 
     pub(crate) replay_filter: ReplayFilter,
     // pub(crate) metrics: Metrics,
@@ -285,11 +415,17 @@ impl Server {
     }
 
     pub(crate) fn new_from_key(identity_keys: Obfs4NtorSecretKey) -> Self {
+        let (drbg_seed, configuration_error) = match drbg::Seed::new() {
+            Ok(seed) => (Some(seed), None),
+            Err(error) => (None, Some(error.to_string())),
+        };
         Self(Arc::new(ServerInner {
             handshake_timeout: MaybeTimeout::Default_,
             identity_keys,
             iat_mode: IAT::Off,
             biased: false,
+            drbg_seed,
+            configuration_error,
 
             // metrics: Arc::new(std::sync::Mutex::new(ServerMetrics {})),
             replay_filter: ReplayFilter::new(REPLAY_TTL),
@@ -332,7 +468,13 @@ impl Server {
     where
         T: AsyncRead + AsyncWrite + Unpin,
     {
-        let deadline = self.0.handshake_timeout.deadline(SERVER_HANDSHAKE_TIMEOUT);
+        if let Some(error) = self.0.configuration_error.clone() {
+            return Err(error.into());
+        }
+        let deadline = self
+            .0
+            .handshake_timeout
+            .deadline(SERVER_HANDSHAKE_TIMEOUT)?;
         if deadline.is_some_and(|deadline| deadline <= Instant::now()) {
             return Err(Error::HandshakeTimeout);
         }
@@ -348,17 +490,64 @@ impl Server {
 
     /// Apply dynamic transport arguments to this server's configuration.
     pub fn set_args(&mut self, args: &dyn std::any::Any) -> Result<&Self> {
+        let args = args.downcast_ref::<Args>().ok_or(Error::NotSupported)?;
+        let parsed = RequiredServerState::try_from(args)?;
+        let inner = Arc::get_mut(&mut self.0).ok_or(Error::NotSupported)?;
+        inner.identity_keys = parsed.private_key;
+        inner.iat_mode = parsed.iat_mode;
+        inner.drbg_seed = Some(parsed.drbg_seed_value);
+        inner.configuration_error = None;
         Ok(self)
     }
 
     /// Load a server from a persistent state file (not yet implemented).
     pub fn new_from_statefile() -> Result<Self> {
-        Err(Error::NotImplemented)
+        Err(Error::NotSupported)
     }
 
     /// Persist the server's state to the given file (not yet implemented).
     pub fn write_statefile(f: std::fs::File) -> Result<()> {
-        Err(Error::NotImplemented)
+        drop(f);
+        Err(Error::NotSupported)
+    }
+
+    /// Load a server from a state directory or explicit state file.
+    ///
+    /// An explicit file is imported read-only and is never rewritten.
+    pub fn new_from_statefile_at(path: impl AsRef<Path>) -> Result<Self> {
+        let mut builder = ServerBuilder::<tokio::net::TcpStream>::default();
+        builder.try_statefile_path(path.as_ref().to_string_lossy().as_ref())?;
+        builder.try_build()
+    }
+
+    /// Persist this server's identity and deterministic traffic seed.
+    pub fn write_statefile_to(&self, path: impl AsRef<Path>) -> Result<()> {
+        let path = path.as_ref();
+        let target = if path.is_dir() {
+            path.join(STATE_FILENAME)
+        } else {
+            path.to_path_buf()
+        };
+        let parent = target
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let state = JsonServerState {
+            node_id: Some(hex::encode(self.0.identity_keys.pk.id.as_bytes())),
+            private_key: Some(hex::encode(self.0.identity_keys.sk.to_bytes())),
+            public_key: Some(hex::encode(self.0.identity_keys.pk.pk.as_bytes())),
+            drbg_seed: Some(
+                self.0
+                    .drbg_seed
+                    .as_ref()
+                    .ok_or_else(|| Error::from("server DRBG seed is unavailable"))?
+                    .to_string(),
+            ),
+            iat_mode: Some(self.0.iat_mode.to_string()),
+        };
+        crate::atomic_write_json(&target, &state)?;
+        Ok(())
     }
 
     /// Return a [`ClientBuilder`] pre-configured with this server's public parameters.
@@ -369,6 +558,12 @@ impl Server {
             iat_mode: self.0.iat_mode,
             statefile_path: None,
             handshake_timeout: MaybeTimeout::Default_,
+            node_pubkey_override: true,
+            node_id_override: true,
+            iat_override: true,
+            statefile_required: false,
+            statefile_read_only: false,
+            persist_statefile: false,
         }
     }
 
@@ -377,6 +572,14 @@ impl Server {
     ) -> Result<sessions::ServerSession<sessions::Initialized>> {
         let mut session_id = [0u8; SESSION_ID_LEN];
         rand::thread_rng().fill_bytes(&mut session_id);
+        let len_seed = self
+            .0
+            .drbg_seed
+            .clone()
+            .ok_or_else(|| Error::from("server DRBG seed is unavailable"))?;
+        let mut hasher = Sha256::new();
+        hasher.update(len_seed.as_bytes());
+        let iat_seed = drbg::Seed::try_from(&hasher.finalize()[..drbg::SEED_LENGTH])?;
         Ok(sessions::ServerSession {
             // fixed by server
             identity_keys: self.0.identity_keys.clone(),
@@ -385,8 +588,8 @@ impl Server {
 
             // generated per session
             session_id,
-            len_seed: drbg::Seed::new().unwrap(),
-            iat_seed: drbg::Seed::new().unwrap(),
+            len_seed,
+            iat_seed,
 
             _state: sessions::Initialized {},
         })
@@ -466,6 +669,112 @@ mod tests {
     fn server_new_from_statefile_not_implemented() {
         let result = Server::new_from_statefile();
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn node_keys_reject_mismatched_public_key_without_mutation() {
+        let mut builder = ServerBuilder::<TcpStream>::default();
+        let before = builder.identity_keys.clone();
+        let mut keys = [0_u8; KEY_LENGTH * 2];
+        keys[..KEY_LENGTH].copy_from_slice(&[0x42; KEY_LENGTH]);
+        keys[KEY_LENGTH..].copy_from_slice(&[0x24; KEY_LENGTH]);
+        assert!(builder.try_node_keys(keys).is_err());
+        assert_eq!(
+            builder.identity_keys.pk.pk.as_bytes(),
+            before.pk.pk.as_bytes()
+        );
+        assert_eq!(
+            builder.identity_keys.pk.id.as_bytes(),
+            before.pk.id.as_bytes()
+        );
+    }
+
+    #[test]
+    fn configured_seed_drives_new_sessions() {
+        let args = Args::parse_client_parameters(crate::dev::SERVER_ARGS).unwrap();
+        let expected = drbg::Seed::from_hex(args.retrieve(SEED_ARG).unwrap()).unwrap();
+        let mut builder = ServerBuilder::<TcpStream>::default();
+        <crate::ServerBuilder<TcpStream> as ptrs::ServerBuilder<TcpStream>>::options(
+            &mut builder,
+            &args,
+        )
+        .unwrap();
+        let server = builder.try_build().unwrap();
+        let session = server.new_server_session().unwrap();
+        assert_eq!(session.len_seed.as_bytes(), expected.as_bytes());
+        let mut hasher = Sha256::new();
+        hasher.update(expected.as_bytes());
+        let expected_iat = drbg::Seed::try_from(&hasher.finalize()[..drbg::SEED_LENGTH]).unwrap();
+        assert_eq!(session.iat_seed.as_bytes(), expected_iat.as_bytes());
+    }
+
+    #[test]
+    fn statefile_persists_identity_and_seed() {
+        let directory = std::env::temp_dir().join(format!(
+            "ptrs-gesher-obfs4-server-state-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut builder = ServerBuilder::<TcpStream>::default();
+        builder.statefile_path(directory.to_string_lossy().as_ref());
+        let server = builder.try_build().unwrap();
+        let repeated = builder.try_build().unwrap();
+        let restored = Server::new_from_statefile_at(&directory).unwrap();
+        assert_eq!(
+            server.client_params().as_opts(),
+            restored.client_params().as_opts()
+        );
+        assert_eq!(
+            repeated.client_params().as_opts(),
+            restored.client_params().as_opts()
+        );
+        let explicit_file = directory.join("import.json");
+        server.write_statefile_to(&explicit_file).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(&explicit_file)
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+            assert_eq!(mode, 0o600);
+        }
+        let imported = Server::new_from_statefile_at(&explicit_file).unwrap();
+        assert_eq!(
+            imported.client_params().as_opts(),
+            server.client_params().as_opts()
+        );
+        let _ = std::fs::remove_dir_all(directory);
+    }
+
+    #[test]
+    fn manual_server_values_take_precedence_over_statefile() {
+        let directory = std::env::temp_dir().join(format!(
+            "ptrs-gesher-obfs4-server-precedence-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&directory);
+        std::fs::create_dir_all(&directory).unwrap();
+        let mut initial = ServerBuilder::<TcpStream>::default();
+        initial.statefile_path(directory.to_string_lossy().as_ref());
+        initial.try_build().unwrap();
+
+        let mut builder = ServerBuilder::<TcpStream>::default();
+        builder.statefile_path(directory.to_string_lossy().as_ref());
+        builder.node_id([0xAB; NODE_ID_LENGTH]);
+        let server = builder.try_build().unwrap();
+        assert_eq!(
+            server.0.identity_keys.pk.id.as_bytes(),
+            &[0xAB; NODE_ID_LENGTH]
+        );
+        let persisted = Server::new_from_statefile_at(&directory).unwrap();
+        assert_eq!(
+            server.new_server_session().unwrap().len_seed.as_bytes(),
+            persisted.new_server_session().unwrap().len_seed.as_bytes()
+        );
+        let _ = std::fs::remove_dir_all(directory);
     }
 
     #[test]

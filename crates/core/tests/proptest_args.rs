@@ -27,7 +27,7 @@ proptest! {
             args.add(k, v);
         }
         let encoded = args.encode_smethod_args();
-        let decoded = Args::parse_client_parameters(&encoded)
+        let decoded = Args::parse_smethod_args(&encoded)
             .unwrap_or_else(|e| panic!("failed to parse encoded args {encoded:?}: {e}"));
 
         for (k, v) in &unique_kvs {

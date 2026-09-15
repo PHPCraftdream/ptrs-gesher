@@ -98,7 +98,13 @@ use tokio_util::sync::CancellationToken;
 use tracing::Level;
 use tracing_subscriber::prelude::*;
 
-use std::{future::Future, net::SocketAddr, pin::Pin, str::FromStr, sync::Arc};
+use std::{
+    future::Future,
+    net::SocketAddr,
+    pin::Pin,
+    str::FromStr,
+    sync::{Arc, Mutex, OnceLock, RwLock},
+};
 
 /// Client Socks address to listen on.
 const CLIENT_SOCKS_ADDR: &str = "127.0.0.1:0";
@@ -128,6 +134,51 @@ struct Args {
     unsafe_logging: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LoggingMode {
+    Safe,
+    Unsafe,
+}
+
+struct OwnedSubscriber {
+    inner: Arc<RwLock<LogConfig>>,
+    callsites: Arc<Mutex<Vec<&'static tracing::Metadata<'static>>>>,
+}
+
+struct LoggingState {
+    subscriber: Option<OwnedSubscriber>,
+    active_guards: usize,
+    mode: Option<LoggingMode>,
+}
+
+static LOGGING_STATE: OnceLock<Mutex<LoggingState>> = OnceLock::new();
+
+fn logging_state() -> &'static Mutex<LoggingState> {
+    LOGGING_STATE.get_or_init(|| {
+        Mutex::new(LoggingState {
+            subscriber: None,
+            active_guards: 0,
+            mode: None,
+        })
+    })
+}
+
+struct LoggingGuard {
+    guard: Option<Guard>,
+}
+
+impl Drop for LoggingGuard {
+    fn drop(&mut self) {
+        self.guard.take();
+        if let Ok(mut state) = logging_state().lock() {
+            state.active_guards = state.active_guards.saturating_sub(1);
+            if state.active_guards == 0 {
+                state.mode = None;
+            }
+        }
+    }
+}
+
 /// initialize the logging receiver(s) for things to be logged into using the
 /// tracing / tracing_subscriber libraries
 // TODO: GeoIP. Json for file log writer.
@@ -136,7 +187,7 @@ fn init_logging_recvr(
     should_scrub: bool,
     level_str: &str,
     statedir: &str,
-) -> Result<Guard> {
+) -> Result<LoggingGuard> {
     // The PT protocol owns stdout for the parent ↔ PT control channel.
     // Logs go to stderr; the file layer below (when enabled) writes
     // separately into the state directory.
@@ -146,15 +197,40 @@ fn init_logging_recvr(
     // launched via the busybox dispatch, so consistent formatting
     // matters more than the pretty multi-line output.
     let level = Level::from_str(level_str).context("invalid log level")?;
+    let mode = if should_scrub {
+        LoggingMode::Safe
+    } else {
+        LoggingMode::Unsafe
+    };
     let safelog_guard = if should_scrub {
         safelog::enforce_safe_logging().context("enabling safe logging")?
     } else {
         safelog::disable_safe_logging().context("disabling safe logging")?
     };
-    if has_logging_subscriber() {
-        return Ok(safelog_guard);
+    let state = logging_state()
+        .lock()
+        .map_err(|_| anyhow!("logging state lock poisoned"))?;
+    if state.active_guards > 0 && state.mode != Some(mode) {
+        drop(safelog_guard);
+        return Err(anyhow!(
+            "cannot change safelog policy while a run is active"
+        ));
     }
-
+    drop(state);
+    if foreign_subscriber_installed() {
+        let mut state = logging_state()
+            .lock()
+            .map_err(|_| anyhow!("logging state lock poisoned"))?;
+        state.active_guards += 1;
+        state.mode = Some(mode);
+        drop(state);
+        return Ok(LoggingGuard {
+            guard: Some(safelog_guard),
+        });
+    }
+    let mut state = logging_state()
+        .lock()
+        .map_err(|_| anyhow!("logging state lock poisoned"))?;
     let filter = default_log_filter(level);
     // Honor the https://no-color.org convention: any (even empty) NO_COLOR
     // disables ANSI. We're normally launched as a PT child by the parent
@@ -165,8 +241,7 @@ fn init_logging_recvr(
     let ansi = std::env::var_os("NO_COLOR").is_none();
     let console_layer = tracing_subscriber::fmt::layer()
         .with_ansi(ansi)
-        .with_writer(std::io::stderr)
-        .with_filter(filter.clone());
+        .with_writer(std::io::stderr);
 
     let log_layers = if enable {
         let file = std::fs::OpenOptions::new()
@@ -174,27 +249,87 @@ fn init_logging_recvr(
             .append(true)
             .open(format!("{statedir}/obfs4proxy.log"))?;
 
-        let state_dir_layer = tracing_subscriber::fmt::layer()
-            .with_writer(file)
-            .with_filter(filter);
+        let state_dir_layer = tracing_subscriber::fmt::layer().with_writer(file);
 
-        console_layer.and_then(state_dir_layer).boxed()
+        LogConfig {
+            filter: Arc::new(filter),
+            sink: Arc::new(console_layer.and_then(state_dir_layer).boxed()),
+        }
     } else {
-        console_layer.boxed()
+        LogConfig {
+            filter: Arc::new(filter),
+            sink: Arc::new(console_layer.boxed()),
+        }
     };
 
-    let result = tracing_subscriber::registry().with(log_layers).try_init();
-    if let Err(error) = result {
-        // try_init reports conflicts with an existing subscriber or log
-        // logger, including an explicitly installed NoSubscriber.
-        tracing::debug!("preserving process-owned logging: {error}");
+    if let Some(owned) = &state.subscriber {
+        let callsites = owned
+            .callsites
+            .lock()
+            .map_err(|_| anyhow!("logging callsite lock poisoned"))?;
+        for metadata in callsites.iter() {
+            let _ = <tracing_subscriber::EnvFilter as tracing_subscriber::Layer<
+                tracing_subscriber::Registry,
+            >>::register_callsite(&*log_layers.filter, metadata);
+        }
+        match owned.inner.write() {
+            Ok(mut current) => *current = log_layers,
+            Err(_) => {
+                drop(safelog_guard);
+                return Err(anyhow!("reloading logging configuration: lock poisoned"));
+            }
+        }
+        drop(callsites);
+    } else {
+        let inner = Arc::new(RwLock::new(log_layers));
+        let subscriber = OwnedDispatcher::new(Arc::clone(&inner));
+        let callsites = Arc::clone(&subscriber.callsites);
+        if let Err(error) = tracing::subscriber::set_global_default(subscriber) {
+            tracing::debug!("preserving process-owned logging: {error}");
+        } else {
+            state.subscriber = Some(OwnedSubscriber { inner, callsites });
+            let _ = tracing_log::LogTracer::builder()
+                .with_max_level(log::LevelFilter::Trace)
+                .init();
+        }
     }
-
-    Ok(safelog_guard)
+    state.active_guards += 1;
+    state.mode = Some(mode);
+    drop(state);
+    Ok(LoggingGuard {
+        guard: Some(safelog_guard),
+    })
 }
 
+#[cfg(test)]
 fn has_logging_subscriber() -> bool {
-    tracing::dispatcher::get_default(|dispatch| !dispatch.is::<tracing::subscriber::NoSubscriber>())
+    logging_state()
+        .lock()
+        .map(|state| state.subscriber.is_some())
+        .unwrap_or(false)
+}
+
+fn foreign_subscriber_installed() -> bool {
+    let owned_inner = logging_state().lock().ok().and_then(|state| {
+        state
+            .subscriber
+            .as_ref()
+            .map(|owned| Arc::clone(&owned.inner))
+    });
+    let own_is_active = owned_inner.is_some();
+    tracing::dispatcher::get_default(|dispatch| {
+        if dispatch.is::<OwnedDispatcher>() {
+            if let Some(owned) = dispatch.downcast_ref::<OwnedDispatcher>() {
+                return owned_inner
+                    .as_ref()
+                    .is_none_or(|inner| !Arc::ptr_eq(inner, &owned.inner));
+            }
+        }
+        if own_is_active {
+            return true;
+        }
+        !dispatch.is::<tracing::subscriber::NoSubscriber>()
+    })
 }
 
 fn default_log_filter(level: Level) -> tracing_subscriber::EnvFilter {
@@ -332,7 +467,8 @@ async fn run_managed(statedir: &str) -> Result<()> {
     // Everything this run() invocation owns hangs off `ctx`: the shutdown
     // tokens for the two teardown phases and the lifecycle permit pool
     // every connection task holds a permit from.
-    let ctx = RunTasks::new();
+    let owner = RunOwner::new();
+    let ctx = owner.tasks();
 
     // PT-spec §3.4 ("Feature #15435"): when the parent process sets
     // `TOR_PT_EXIT_ON_STDIN_CLOSE=1` it signals "stop" by closing our
@@ -480,7 +616,7 @@ async fn client_accept_loop<C>(
 ) -> Result<()>
 where
     // the provided client builder should build the C ClientTransport.
-    C: ptrs::ClientTransport<TcpStream, std::io::Error> + Send + 'static,
+    C: ManagedClient,
 {
     let pt_name = C::method_name();
     loop {
@@ -536,6 +672,49 @@ where
     Ok(())
 }
 
+trait ManagedClient: ptrs::ClientTransport<TcpStream, std::io::Error> + Send + 'static {
+    type ManagedOut: AsyncRead + AsyncWrite + Send + Unpin + 'static;
+
+    fn managed_connect(
+        self,
+        target_addr: TargetAddr,
+        client_addr: SocketAddr,
+    ) -> Pin<Box<dyn Future<Output = Result<Self::ManagedOut>> + Send>>;
+}
+
+impl ManagedClient for obfs4::Client {
+    type ManagedOut = <Self as ptrs::ClientTransport<TcpStream, std::io::Error>>::OutRW;
+
+    fn managed_connect(
+        self,
+        target_addr: TargetAddr,
+        client_addr: SocketAddr,
+    ) -> Pin<Box<dyn Future<Output = Result<Self::ManagedOut>> + Send>> {
+        Box::pin(async move {
+            let remote_addr = resolve_target_addr(&target_addr).context("no remote address")?;
+            let remote: Pin<ptrs::FutureResult<TcpStream, std::io::Error>> =
+                Box::pin(dial_bridge(remote_addr));
+            establish_pt_conn(self, remote, client_addr).await
+        })
+    }
+}
+
+impl ManagedClient for webtunnel::WebTunnelClient {
+    type ManagedOut = <Self as ptrs::ClientTransport<TcpStream, std::io::Error>>::OutRW;
+
+    fn managed_connect(
+        self,
+        _target_addr: TargetAddr,
+        _client_addr: SocketAddr,
+    ) -> Pin<Box<dyn Future<Output = Result<Self::ManagedOut>> + Send>> {
+        Box::pin(async move {
+            self.connect_url()
+                .await
+                .map_err(|error| anyhow!("WebTunnel URL connection failed: {error}"))
+        })
+    }
+}
+
 /// This function assumes that the provided connection / socket manages reconstruction
 /// and reliability before passing to this layer.
 async fn client_handle_connection<In, C, B>(
@@ -547,7 +726,7 @@ where
     // the provided T must be usable as a connection in an async context
     In: AsyncRead + AsyncWrite + Send + Unpin,
     // the provided client builder should build the C ClientTransport.
-    C: ptrs::ClientTransport<TcpStream, std::io::Error> + Send,
+    C: ManagedClient,
     B: ptrs::ClientBuilder<TcpStream, ClientPT = C>,
 {
     // PT-spec §3.5 requires the parent to negotiate USERNAME/PASSWORD
@@ -577,6 +756,7 @@ where
         .target_addr()
         .ok_or(BridgeLineParseError)
         .context("missing remote address in request")?;
+    let target_addr = target_addr.clone();
 
     // Reconstruct the PT-spec argument string from SOCKS5 user/pass and
     // hand it to the transport's `options(&Args)` so the obfs4
@@ -590,19 +770,11 @@ where
     <B as ptrs::ClientBuilder<TcpStream>>::options(&mut builder, &args)
         .map_err(|e| anyhow::anyhow!("applying PT args to builder: {e}"))?;
 
-    let remote_addr = resolve_target_addr(target_addr).context("no remote address")?;
-
-    // The outgoing OR-port dial. Boxing it as a `FutureResult` is the seam
-    // exercised by tests: `establish_pt_conn` only ever sees a pinned
-    // future yielding the underlying socket, so an in-memory
-    // `tokio::io::duplex()` half can stand in for the real `TcpStream`.
-    let remote: Pin<ptrs::FutureResult<TcpStream, std::io::Error>> =
-        Box::pin(dial_bridge(remote_addr));
-
-    // build the pluggable transport client and then dial, completing the
-    // connection and handshake when the future is await-ed.
+    // Build the client and let the transport choose its connection path.
+    // WebTunnel owns URL dialing; its SOCKS target is only a PT-spec carrier
+    // placeholder and must never become a direct dial target.
     let pt_client = builder.build();
-    let mut pt_conn = establish_pt_conn(pt_client, remote, client_addr).await?;
+    let mut pt_conn = C::managed_connect(pt_client, target_addr, client_addr).await?;
 
     // The obfs4 tunnel to the bridge is up, so report CONNECT success to
     // the PT parent (arti/tor). Because we disabled `execute_command`,
@@ -672,13 +844,16 @@ where
     }
 }
 
+mod logging_layer;
+use logging_layer::{LogConfig, OwnedDispatcher};
+
 mod lifecycle;
-use lifecycle::RunTasks;
 #[cfg(test)]
 use lifecycle::{
     cancel_connections, drain_connections, drive, join_accept_loops, run_with_setup, Shutdown,
     MAX_CONCURRENT_CONNS,
 };
+use lifecycle::{RunOwner, RunTasks};
 
 mod server;
 mod stdin_watch;
@@ -743,3 +918,6 @@ mod pt_proto;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod lifecycle_tests;
