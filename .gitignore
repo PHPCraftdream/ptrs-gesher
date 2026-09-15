@@ -7,3 +7,5 @@
 
 # stray agent diagnostic dumps
 /audit_*.txt
+
+/worktrees/
