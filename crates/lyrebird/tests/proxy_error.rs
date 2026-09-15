@@ -1,37 +1,45 @@
-//! End-to-end control-channel tests for the PT-spec §3.3.2 upstream-proxy
-//! (`TOR_PT_PROXY`) contract: the real `lyrebird` binary must answer a
-//! configured `TOR_PT_PROXY` with `PROXY-ERROR` and terminate BEFORE any
-//! `CMETHOD*` line or transport initialization, and must never claim
-//! `PROXY DONE` — there is no upstream proxy dialer, so continuing would
-//! mean silently dialing the bridge directly and bypassing the configured
-//! route.
+//! End-to-end tests for the PT-spec §3.3.2 `TOR_PT_PROXY` contract.
 
-use std::io::{BufRead, BufReader};
-use std::process::{Child, Command, Stdio};
-use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
+use std::ffi::OsString;
+use std::io;
+use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-/// Kill the child on drop so a failing assertion cannot leak a running PT
-/// process (with live listeners) past the test.
-struct ChildGuard(Child);
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader, Lines};
+use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
+static NEXT_STATE_ID: AtomicU64 = AtomicU64::new(0);
+
+/// Own the subprocess and all handles needed to tear it down.
+struct ChildGuard {
+    child: Child,
+    // Keep this alive while `Child::wait` runs; taking it out of `Child`
+    // prevents wait from closing the parent's write end.
+    _stdin: Option<ChildStdin>,
+    stdout: Option<Lines<BufReader<ChildStdout>>>,
+    stderr: Option<tokio::process::ChildStderr>,
+}
+
+impl ChildGuard {
+    fn stdout(&mut self) -> Lines<BufReader<ChildStdout>> {
+        self.stdout.take().expect("piped stdout")
+    }
+
+    fn stderr(&mut self) -> tokio::process::ChildStderr {
+        self.stderr.take().expect("piped stderr")
+    }
+
+    async fn kill_and_wait(&mut self) -> std::process::ExitStatus {
+        let _ = self.child.kill().await;
+        self.child.wait().await.expect("wait for killed lyrebird")
     }
 }
 
-/// Spawn the lyrebird binary as a managed PT client with the given extra
-/// `TOR_PT_*` environment, forwarding each line of its stdout (the PT
-/// control channel) to the returned receiver.
-fn spawn_pt(extra_env: &[(&str, &str)]) -> (ChildGuard, Receiver<String>) {
-    let thread_id = std::thread::current()
-        .name()
-        .unwrap_or("t")
-        .replace([' ', '/'], "_");
+fn spawn_pt(proxy: Option<OsString>) -> ChildGuard {
+    let state_id = NEXT_STATE_ID.fetch_add(1, Ordering::Relaxed);
     let statedir = std::env::temp_dir().join(format!(
-        "lyrebird-proxy-error-test-{}-{thread_id}",
+        "lyrebird-proxy-error-test-{}-{state_id}",
         std::process::id()
     ));
 
@@ -41,118 +49,184 @@ fn spawn_pt(extra_env: &[(&str, &str)]) -> (ChildGuard, Receiver<String>) {
         .env("TOR_PT_STATE_LOCATION", statedir)
         .env("TOR_PT_MANAGED_TRANSPORT_VER", "1")
         .env("TOR_PT_CLIENT_TRANSPORTS", "obfs4")
-        // Scrub anything the surrounding environment might set that could
-        // change the protocol flow under test.
         .env_remove("TOR_PT_PROXY")
         .env_remove("TOR_PT_SERVER_TRANSPORTS")
-        .env_remove("TOR_PT_EXIT_ON_STDIN_CLOSE")
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .stdout(Stdio::piped());
-    for (key, value) in extra_env {
-        cmd.env(key, value);
+        // Keep stdin open: proxy rejection must still terminate while the
+        // lifecycle watcher is enabled.
+        .env("TOR_PT_EXIT_ON_STDIN_CLOSE", "1")
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdout(Stdio::piped())
+        .kill_on_drop(true);
+    if let Some(proxy) = proxy {
+        cmd.env("TOR_PT_PROXY", proxy);
     }
 
     let mut child = cmd.spawn().expect("spawn lyrebird binary");
-    let stdout = child.stdout.take().expect("piped stdout");
-    let (tx, rx) = channel();
-    std::thread::spawn(move || {
-        let reader = BufReader::new(stdout);
-        for line in reader.lines().map_while(Result::ok) {
-            if tx.send(line).is_err() {
-                break;
-            }
-        }
-    });
-    (ChildGuard(child), rx)
+    let stdin = child.stdin.take();
+    let stdout = child
+        .stdout
+        .take()
+        .map(|stdout| BufReader::new(stdout).lines());
+    let stderr = child.stderr.take();
+    ChildGuard {
+        child,
+        _stdin: stdin,
+        stdout,
+        stderr,
+    }
 }
 
-/// Receive the next control-channel line, failing with context on timeout
-/// or premature EOF.
-fn next_line(rx: &Receiver<String>, what: &str) -> String {
-    rx.recv_timeout(Duration::from_secs(30))
-        .unwrap_or_else(|e| panic!("expected {what} on the control channel: {e:?}"))
+async fn read_stdout(mut reader: Lines<BufReader<ChildStdout>>) -> io::Result<Vec<String>> {
+    let mut lines = Vec::new();
+    while let Some(line) = reader.next_line().await? {
+        lines.push(line);
+    }
+    Ok(lines)
 }
 
-#[test]
-fn configured_proxy_is_rejected_with_proxy_error_before_transports() {
-    let (_child, rx) = spawn_pt(&[("TOR_PT_PROXY", "socks5://user:pass@127.0.0.1:9050")]);
-
-    // Spec order (§3.3.1/§3.3.2 and Appendix A): VERSION first, then the
-    // upstream-proxy verdict, and nothing else.
-    assert_eq!(next_line(&rx, "VERSION"), "VERSION 1");
-    let proxy_line = next_line(&rx, "PROXY-ERROR");
-    assert!(
-        proxy_line.starts_with("PROXY-ERROR "),
-        "a configured TOR_PT_PROXY must be answered with PROXY-ERROR, got: {proxy_line}"
-    );
-    assert!(
-        proxy_line.contains("127.0.0.1:9050"),
-        "the PROXY-ERROR reason must name the refused proxy URI, got: {proxy_line}"
-    );
-
-    // "PT proxies MUST terminate immediately after outputting a
-    // PROXY-ERROR message" (§3.3.2): stdout reaches EOF with no further
-    // lines — in particular no CMETHOD / CMETHODS DONE, so no transport
-    // was ever initialized and no direct bridge dial can happen.
-    let after = rx.recv_timeout(Duration::from_secs(30));
-    assert!(
-        matches!(after, Err(RecvTimeoutError::Disconnected)),
-        "the PT must terminate right after PROXY-ERROR; got {after:?}"
-    );
+async fn read_stderr(mut reader: tokio::process::ChildStderr) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).await?;
+    Ok(bytes)
 }
 
-#[test]
-fn without_proxy_transports_are_still_configured() {
-    let (mut child, rx) = spawn_pt(&[]);
-
-    // Without TOR_PT_PROXY the fail-closed path must not trigger: the
-    // normal obfs4 setup flow (VERSION -> CMETHOD -> CMETHODS DONE) runs.
-    assert_eq!(next_line(&rx, "VERSION"), "VERSION 1");
-    let cmethod = next_line(&rx, "CMETHOD obfs4");
-    assert!(
-        cmethod.starts_with("CMETHOD obfs4 socks5 127.0.0.1:"),
-        "obfs4 must still be offered without TOR_PT_PROXY, got: {cmethod}"
-    );
-    assert_eq!(next_line(&rx, "CMETHODS DONE"), "CMETHODS DONE");
-
-    // No PROXY line at all may appear without TOR_PT_PROXY.
-    let extra = rx.recv_timeout(Duration::from_secs(1));
-    assert!(
-        matches!(extra, Err(RecvTimeoutError::Timeout)),
-        "unexpected extra control-channel output without TOR_PT_PROXY: {extra:?}"
-    );
-
-    // And the PT keeps serving: the transport is up, not exited.
-    std::thread::sleep(Duration::from_millis(500));
-    assert!(
-        matches!(child.0.try_wait(), Ok(None)),
-        "without TOR_PT_PROXY the PT must stay up serving the transport"
-    );
+async fn next_line(reader: &mut Lines<BufReader<ChildStdout>>, what: &str) -> String {
+    tokio::time::timeout(Duration::from_secs(5), reader.next_line())
+        .await
+        .unwrap_or_else(|e| panic!("expected {what} on the control channel: {e}"))
+        .unwrap_or_else(|e| panic!("reading {what} from the control channel: {e}"))
+        .unwrap_or_else(|| panic!("control channel closed before {what}"))
 }
 
-#[test]
-fn malformed_proxy_is_rejected_with_proxy_error_before_transports() {
-    let (_child, rx) = spawn_pt(&[("TOR_PT_PROXY", "not a proxy uri at all")]);
+fn assert_no_proxy_data(text: &str, proxy_data: &[&str]) {
+    assert!(text.is_ascii(), "control output must be ASCII: {text:?}");
+    assert!(!text.contains('\r') && !text.contains('\n'));
+    for secret in proxy_data {
+        assert!(!text.contains(secret), "proxy data leaked in {text:?}");
+    }
+}
 
-    // Even a TOR_PT_PROXY the URI parser would reject must get the
-    // control-channel verdict: a bare process exit would leave the parent
-    // without an attributable reason (and is exactly the regression this
-    // guards against, since the verdict is produced before the core
-    // reader ever validates the value).
-    assert_eq!(next_line(&rx, "VERSION"), "VERSION 1");
-    let proxy_line = next_line(&rx, "PROXY-ERROR");
-    assert!(
-        proxy_line.starts_with("PROXY-ERROR "),
-        "a malformed TOR_PT_PROXY must also be answered with PROXY-ERROR, got: {proxy_line}"
-    );
+fn assert_stderr_no_proxy_data(bytes: &[u8], proxy_data: &[&str]) {
+    let text = String::from_utf8_lossy(bytes);
+    assert!(!text.contains('\r'));
+    for secret in proxy_data {
+        assert!(
+            !text.contains(secret),
+            "proxy data leaked in stderr: {text:?}"
+        );
+    }
+}
 
-    // Same §3.3.2 termination rule: EOF right after the verdict, with no
-    // CMETHOD* lines (no transport was initialized, so no direct bridge
-    // dial is possible).
-    let after = rx.recv_timeout(Duration::from_secs(30));
+async fn assert_rejected(process: &mut ChildGuard, proxy_data: &[&str]) {
+    let stdout = process.stdout();
+    let stderr = process.stderr();
+    let joined = tokio::time::timeout(Duration::from_secs(5), async {
+        let status = process.child.wait();
+        let stdout = read_stdout(stdout);
+        let stderr = read_stderr(stderr);
+        tokio::join!(status, stdout, stderr)
+    })
+    .await
+    .expect("proxy rejection must terminate while stdin remains open");
+
+    let status = joined.0.expect("wait for proxy rejection");
     assert!(
-        matches!(after, Err(RecvTimeoutError::Disconnected)),
-        "the PT must terminate right after PROXY-ERROR; got {after:?}"
+        !status.success(),
+        "proxy rejection must return an error status"
     );
+    let stdout = joined.1.expect("read proxy control channel");
+    assert_eq!(
+        stdout,
+        [
+            "VERSION 1".to_string(),
+            "PROXY-ERROR upstream proxy dialing is not supported by this transport".to_string(),
+        ]
+    );
+    assert_no_proxy_data(&stdout[1], proxy_data);
+    let stderr = joined.2.expect("read proxy stderr");
+    assert_stderr_no_proxy_data(&stderr, proxy_data);
+}
+
+async fn assert_transport_configured(process: &mut ChildGuard) {
+    let mut stdout = process.stdout();
+    assert_eq!(next_line(&mut stdout, "VERSION").await, "VERSION 1");
+    let cmethod = next_line(&mut stdout, "CMETHOD obfs4").await;
+    assert!(cmethod.starts_with("CMETHOD obfs4 socks5 127.0.0.1:"));
+    assert_eq!(
+        next_line(&mut stdout, "CMETHODS DONE").await,
+        "CMETHODS DONE"
+    );
+    let extra = tokio::time::timeout(Duration::from_secs(1), stdout.next_line()).await;
+    if extra.is_ok() {
+        let stderr = read_stderr(process.stderr()).await.expect("startup stderr");
+        panic!(
+            "unexpected extra control output: {extra:?}; stderr: {}",
+            String::from_utf8_lossy(&stderr)
+        );
+    }
+
+    let status = process.kill_and_wait().await;
+    assert!(!status.success(), "test cleanup must terminate the PT");
+    let stderr = read_stderr(process.stderr())
+        .await
+        .expect("read cleanup stderr");
+    assert_stderr_no_proxy_data(&stderr, &[]);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn configured_proxy_is_rejected_without_disclosing_credentials_or_host() {
+    let mut process = spawn_pt(Some(OsString::from(
+        "socks5://acct_copper:pw_quartz@127.0.0.1:9050",
+    )));
+    assert_rejected(
+        &mut process,
+        &["socks5", "acct_copper", "pw_quartz", "127.0.0.1", "9050"],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn without_proxy_transports_are_still_configured() {
+    let mut process = spawn_pt(None);
+    assert_transport_configured(&mut process).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn empty_proxy_is_treated_as_unset() {
+    let mut process = spawn_pt(Some(OsString::new()));
+    assert_transport_configured(&mut process).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn malformed_proxy_is_rejected_without_control_channel_injection() {
+    let mut process = spawn_pt(Some(OsString::from(
+        "socks5://acct_copper:pw_quartz@host:9\nINJECTED",
+    )));
+    assert_rejected(
+        &mut process,
+        &["socks5", "acct_copper", "pw_quartz", "host", "INJECTED"],
+    )
+    .await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn non_unicode_proxy_is_rejected_without_echoing_bytes() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let proxy = OsString::from_vec(b"socks5://user:secret@bad.example:9050\xff\nINJECTED".to_vec());
+    let mut process = spawn_pt(Some(proxy));
+    assert_rejected(
+        &mut process,
+        &[
+            "socks5",
+            "user",
+            "secret",
+            "bad.example",
+            "9050",
+            "INJECTED",
+        ],
+    )
+    .await;
 }

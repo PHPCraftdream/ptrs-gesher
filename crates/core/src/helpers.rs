@@ -193,6 +193,7 @@ pub(crate) fn get_client_transports() -> Result<Vec<String>, Error> {
 
 pub(crate) fn get_proxy_url() -> Result<Option<Url>, Error> {
     let url_str = match env::var(constants::PROXY) {
+        Ok(s) if s.is_empty() => return Ok(None),
         Ok(s) => s,
         Err(env::VarError::NotPresent) => return Ok(None),
         Err(e) => return Err(to_io_other(format!("failed to parse proxy config: {e}"))),

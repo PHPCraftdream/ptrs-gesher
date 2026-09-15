@@ -89,9 +89,6 @@ use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use fast_socks5::util::target_addr::TargetAddr;
 use safelog::sensitive;
-#[cfg(feature = "experimental-server")]
-use tokio::sync::oneshot;
-use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::{
     io::{copy_bidirectional, AsyncRead, AsyncWrite, AsyncWriteExt},
@@ -101,24 +98,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::Level;
 use tracing_subscriber::{filter::LevelFilter, prelude::*};
 
-use std::{net::SocketAddr, pin::Pin, str::FromStr, sync::Arc, time::Duration};
-
-/// Maximum number of concurrently handled client connections. This is also
-/// the size of the lifecycle permit pool: every in-flight connection task
-/// holds one permit for its whole lifetime, so "all permits available" is
-/// an exact zero-active-tasks signal for shutdown (DoS mitigation included).
-const MAX_CONCURRENT_CONNS: usize = 1024;
-
-/// Grace period a soft interrupt (first SIGINT / Ctrl+C) gives to
-/// already-established connections: they may finish on their own before
-/// the remainder is force-cancelled. Bounded so `run()` always returns.
-const DRAIN_GRACE: Duration = Duration::from_secs(15);
-
-/// Upper bound on the final wait AFTER in-flight connections are
-/// force-cancelled. Connection tasks watch the cancellation token at their
-/// next await point, so this only guards a task wedged inside a
-/// non-cancellable section; it is not the normal teardown duration.
-const FORCE_GRACE: Duration = Duration::from_secs(5);
+use std::{future::Future, net::SocketAddr, pin::Pin, str::FromStr, sync::Arc};
 
 /// Client Socks address to listen on.
 const CLIENT_SOCKS_ADDR: &str = "127.0.0.1:0";
@@ -258,9 +238,11 @@ async fn dial_bridge(remote_addr: SocketAddr) -> std::io::Result<TcpStream> {
 ///
 /// # Shutdown semantics
 ///
-/// `run()` owns every task it spawns — the accept loops, every
-/// per-connection task, and the stdin watcher — and does not return while
-/// any of them is still alive in the ambient runtime:
+/// In the client path, `run()` owns the accept loops and every
+/// per-connection task, and does not return while any of them is still alive
+/// in the ambient runtime. The incomplete `experimental-server` path remains
+/// separately gated and retains its legacy task ownership while it is enabled
+/// for development only:
 ///
 /// * terminate (`SIGTERM` / Ctrl+Break) or parent EOF
 ///   (`TOR_PT_EXIT_ON_STDIN_CLOSE=1`): in-flight connections are
@@ -273,6 +255,9 @@ async fn dial_bridge(remote_addr: SocketAddr) -> std::io::Result<TcpStream> {
 ///   immediate teardown.
 /// * all listeners ended on their own ("proxy closed"): handled like an
 ///   interrupt, so tunnel tasks are never left behind.
+///
+/// When stdin monitoring is enabled, this call requires exclusive access to
+/// stdin until it returns.
 ///
 /// # Cancel safety
 ///
@@ -303,298 +288,48 @@ pub async fn run() -> Result<()> {
     // `TOR_PT_EXIT_ON_STDIN_CLOSE=1` it signals "stop" by closing our
     // stdin — that's the canonical managed-PT shutdown path arti's
     // ptmgr uses when a transport is removed/reconfigured. Watch stdin
-    // in the background and fire `parent_died` on EOF so the main loop
-    // below can exit promptly. The watcher is owned like every other
-    // task: `stop_accepting` cancels it, so it never outlives run().
-    // When the env var is not set the watcher is not spawned and the
-    // token never fires, preserving the previous "ignore stdin" behavior
-    // exactly.
-    let parent_died = tokio_util::sync::CancellationToken::new();
-    if ptrs::pt_should_exit_on_stdin_close() {
-        let parent_died = parent_died.clone();
-        let watcher_off = ctx.stdin_watcher.clone();
-        tokio::spawn(async move {
-            tokio::select! {
-                // run() is shutting down: stop watching, don't fire.
-                _ = watcher_off.cancelled() => {}
-                _ = ptrs::wait_stdin_close() => parent_died.cancel(),
-            }
-        });
-    }
+    // in the background and fire shutdown on EOF so the main loop below can
+    // exit promptly. The env var remains opt-in: otherwise this future is
+    // permanently pending and stdin is ignored.
+    // Keep stdin watching as a directly owned future. This avoids a
+    // detached blocking task on setup errors and keeps EOF observable during
+    // graceful drain.
+    let stdin_enabled = ptrs::pt_should_exit_on_stdin_close();
+    let stdin_wait = async move {
+        if stdin_enabled {
+            stdin_watch::wait_stdin_close().await
+        } else {
+            std::future::pending::<std::io::Result<()>>().await
+        }
+    };
+    let setup = setup_listeners(&statedir, ctx.clone());
+    lifecycle::run_with_setup(ctx, stdin_wait, setup, lifecycle::shutdown_signal).await
+}
 
-    // launch runners
-    let mut listeners: JoinSet<Result<()>> = if ptrs::is_client()? {
-        // running as CLIENT — run() owns the returned accept-loop tasks.
-        client_setup(&statedir, ctx.clone()).await?
+async fn setup_listeners(statedir: &str, ctx: RunTasks) -> Result<JoinSet<Result<()>>> {
+    if ptrs::is_client()? {
+        client_setup(statedir, ctx).await
     } else {
-        // running as SERVER
-        //
-        // Server-side is gated behind `experimental-server` because the PT
-        // handshake is not yet wired and the ExtORPort dial is missing.
-        // Without the feature we refuse to start rather than silently
-        // exposing an unauthenticated proxy.
         #[cfg(feature = "experimental-server")]
         {
-            let rx = server_setup(&statedir, ctx.accept.clone()).await?;
-            // The experimental server still reports "all listeners gone"
-            // through its legacy oneshot channel; adopt that channel into
-            // the same task set the client uses so every shutdown path
-            // below treats both roles uniformly. (server_setup's internal
-            // accept loops stay feature-gated legacy — the server side is
-            // incomplete by design.)
+            // This path is intentionally legacy and incomplete; the public
+            // lifecycle ownership guarantee is for the client path only.
+            let rx = server_setup(statedir, ctx.accept.clone()).await?;
             let mut set = JoinSet::new();
             set.spawn(async move {
                 rx.await
                     .map_err(|e| anyhow!("server exit channel closed: {e}"))?;
                 Ok(())
             });
-            set
+            Ok(set)
         }
         #[cfg(not(feature = "experimental-server"))]
         {
-            return Err(anyhow!(
+            Err(anyhow!(
                 "lyrebird server-side is not implemented; rebuild with \
                  `--features experimental-server` for development use only"
-            ));
+            ))
         }
-    };
-
-    info!("accepting connections");
-
-    // The pt config protocol is finished, and incoming connections are
-    // processed by the owned accept loops. Wait till the parent dies
-    // (immediate exit), a SIGTERM / Ctrl+Break is received (immediate
-    // exit), a SIGINT / Ctrl+C is received (graceful drain), or every
-    // listener task ends on its own ("proxy closed").
-    let exit = loop {
-        tokio::select! {
-            maybe = listeners.join_next() => match maybe {
-                // The set is empty: every listener has ended. (Previously
-                // this was reported through a oneshot fired by a detached
-                // monitor task that run() did not own.)
-                None => break ExitKind::ProxyClosed,
-                // One of several listeners ended: log it — both failure
-                // levels — and keep serving on the rest.
-                Some(res) => log_listener_result(res),
-            },
-            sig = shutdown_signal() => {
-                if sig.is_terminate() {
-                    info!("proxy terminated");
-                    break ExitKind::Terminate;
-                }
-                break ExitKind::Interrupt;
-            }
-            // `parent_died` only fires when TOR_PT_EXIT_ON_STDIN_CLOSE=1
-            // was set AND the parent closed our stdin. When the env var is
-            // unset the watcher is never spawned and this branch is
-            // pending forever.
-            _ = parent_died.cancelled() => break ExitKind::ParentClosedStdin,
-        }
-    };
-
-    // ---- unified teardown: every exit path ends here --------------------
-    // Phase 1 on all paths: stop accepting and release the auxiliary
-    // watcher, so no new work can appear while we are shutting down.
-    ctx.stop_accepting();
-    match exit {
-        ExitKind::Interrupt => {
-            info!("received interrupt, shutting down");
-            join_accept_loops(&mut listeners).await;
-            // Soft teardown: give current transfers the budget to finish on
-            // their own, escalating on a second interrupt or parent EOF.
-            let drained = tokio::select! {
-                drained = drain_connections(&ctx, DRAIN_GRACE) => drained,
-                _ = shutdown_signal() => {
-                    info!("second interrupt; cancelling remaining connections");
-                    false
-                }
-                _ = parent_died.cancelled() => {
-                    info!("parent process closed stdin during shutdown; cancelling remaining connections");
-                    false
-                }
-            };
-            if !drained {
-                cancel_connections(&ctx).await;
-            }
-        }
-        ExitKind::ProxyClosed => {
-            info!("proxy closed");
-            join_accept_loops(&mut listeners).await;
-            if !drain_connections(&ctx, DRAIN_GRACE).await {
-                info!("drain budget elapsed; cancelling remaining connections");
-                cancel_connections(&ctx).await;
-            }
-        }
-        // Terminate / parent EOF mean "exit now": cancel in-flight
-        // connections first, then join the accept loops. Both waits are
-        // bounded, so run() always actually returns.
-        ExitKind::Terminate | ExitKind::ParentClosedStdin => {
-            cancel_connections(&ctx).await;
-            join_accept_loops(&mut listeners).await;
-        }
-    }
-    // Every task this run() spawned has now been joined (or bounded-force
-    // finished): the listener set is empty and all lifecycle permits are
-    // back, so nothing owned by run() survives in the caller's runtime.
-    debug_assert_eq!(
-        ctx.lifecycle.available_permits(),
-        MAX_CONCURRENT_CONNS,
-        "connection tasks still in flight after shutdown"
-    );
-
-    Ok(())
-}
-
-/// Which branch of run()'s main wait loop ended the service phase. Selects
-/// the teardown style on the unified exit path below.
-#[derive(Clone, Copy)]
-enum ExitKind {
-    /// Every listener task has ended on its own.
-    ProxyClosed,
-    /// First SIGINT / Ctrl+C: graceful drain of in-flight connections.
-    Interrupt,
-    /// SIGTERM / Ctrl+Break: immediate teardown.
-    Terminate,
-    /// Parent closed our stdin (TOR_PT_EXIT_ON_STDIN_CLOSE=1 was set).
-    ParentClosedStdin,
-}
-
-/// Everything one [`run()`] invocation owns, shared with the tasks it
-/// spawns: one cancellation token per teardown phase, plus the lifecycle
-/// permit pool that doubles as the connection-admission cap.
-///
-/// Shutdown runs in two phases:
-///
-/// 1. [`RunTasks::stop_accepting`] — synchronous; fires `accept` and
-///    `stdin_watcher` so no new connection task can appear and no
-///    auxiliary task outlives `run()`.
-/// 2. either a graceful drain (in-flight tunnels finish on their own,
-///    observed through [`RunTasks::wait_idle`] under a finite timeout) or
-///    a forced teardown (`conns` fired; each connection wrapper drops its
-///    tunnel at its next await point).
-#[derive(Clone)]
-struct RunTasks {
-    /// Phase-1 token: cancelled first on EVERY shutdown path. Accept loops
-    /// break out of their accept loop when it fires.
-    accept: CancellationToken,
-    /// Phase-2 token: tears down in-flight connection tasks. Fired
-    /// immediately on terminate/EOF; only after the drain budget expires
-    /// on a soft interrupt.
-    conns: CancellationToken,
-    /// Cancels the stdin watcher spawned under
-    /// `TOR_PT_EXIT_ON_STDIN_CLOSE=1`, so no auxiliary task survives
-    /// `run()`.
-    stdin_watcher: CancellationToken,
-    /// Admission + lifecycle pool of [`MAX_CONCURRENT_CONNS`] permits:
-    /// every in-flight connection task holds exactly one for its lifetime,
-    /// which makes the pool an exact in-flight-connection counter.
-    lifecycle: Arc<Semaphore>,
-}
-
-impl RunTasks {
-    fn new() -> Self {
-        Self {
-            accept: CancellationToken::new(),
-            conns: CancellationToken::new(),
-            stdin_watcher: CancellationToken::new(),
-            lifecycle: Arc::new(Semaphore::new(MAX_CONCURRENT_CONNS)),
-        }
-    }
-
-    /// Phase 1 of every shutdown path: stop taking new connections and
-    /// release the auxiliary stdin watcher. Synchronous: after this
-    /// returns, no new connection task can be spawned.
-    fn stop_accepting(&self) {
-        self.accept.cancel();
-        self.stdin_watcher.cancel();
-    }
-
-    /// Resolves exactly when no connection task is in flight: each
-    /// in-flight connection holds one lifecycle permit, so acquiring the
-    /// whole pool succeeds only once all of them are back. Cancel-safe;
-    /// the acquired (empty) permit bundle is dropped immediately, and no
-    /// new task can appear because `accept` is cancelled before any
-    /// caller awaits this.
-    async fn wait_idle(&self) {
-        let _ = self
-            .lifecycle
-            .acquire_many(u32::try_from(MAX_CONCURRENT_CONNS).expect("permit count fits u32"))
-            .await;
-    }
-}
-
-/// Graceful teardown phase: wait up to `budget` for in-flight connections
-/// to finish on their own. Returns `true` when every connection task ended
-/// within the budget, `false` when the budget expired and the remainder
-/// must be force-cancelled.
-async fn drain_connections(ctx: &RunTasks, budget: Duration) -> bool {
-    tokio::time::timeout(budget, ctx.wait_idle()).await.is_ok()
-}
-
-/// Forced teardown phase: cancel every in-flight connection, then wait —
-/// bounded by [`FORCE_GRACE`] — until each has released its lifecycle
-/// permit. Connection wrappers watch the token with a biased `select!`, so
-/// this normally resolves in milliseconds; the bound only covers a task
-/// wedged inside a non-cancellable section.
-async fn cancel_connections(ctx: &RunTasks) {
-    ctx.conns.cancel();
-    let _ = tokio::time::timeout(FORCE_GRACE, ctx.wait_idle()).await;
-}
-
-/// Log the completion of one accept-loop task, surfacing BOTH failure
-/// levels: the outer [`tokio::task::JoinError`] (the task panicked or was
-/// aborted) and the accept loop's own `Err` (e.g. a fatal accept error) —
-/// neither may be swallowed silently.
-fn log_listener_result(res: std::result::Result<Result<()>, tokio::task::JoinError>) {
-    match res {
-        Ok(Ok(())) => info!("listener stopped"),
-        Ok(Err(e)) => warn!("listener failed: {e:#}"),
-        Err(join) => warn!("listener task aborted: {join}"),
-    }
-}
-
-/// Join every remaining accept loop in the set, logging each result (both
-/// failure levels — see [`log_listener_result`]).
-async fn join_accept_loops(listeners: &mut JoinSet<Result<()>>) {
-    while let Some(res) = listeners.join_next().await {
-        log_listener_result(res);
-    }
-}
-
-/// Cross-platform shutdown-signal helper. On Unix maps `SIGTERM` →
-/// `Terminate`, `SIGINT` → `Interrupt`. On Windows uses
-/// `Ctrl+Break` → `Terminate`, `Ctrl+C` → `Interrupt`.
-#[derive(Clone, Copy)]
-enum Shutdown {
-    Interrupt,
-    Terminate,
-}
-
-impl Shutdown {
-    fn is_terminate(self) -> bool {
-        matches!(self, Shutdown::Terminate)
-    }
-}
-
-#[cfg(unix)]
-async fn shutdown_signal() -> Shutdown {
-    use tokio::signal::unix::{signal, SignalKind};
-    let mut sigint = signal(SignalKind::interrupt()).expect("install SIGINT handler");
-    let mut sigterm = signal(SignalKind::terminate()).expect("install SIGTERM handler");
-    tokio::select! {
-        _ = sigterm.recv() => Shutdown::Terminate,
-        _ = sigint.recv() => Shutdown::Interrupt,
-    }
-}
-
-#[cfg(not(unix))]
-async fn shutdown_signal() -> Shutdown {
-    use tokio::signal::windows::{ctrl_break, ctrl_c};
-    let mut c_c = ctrl_c().expect("install Ctrl+C handler");
-    let mut c_break = ctrl_break().expect("install Ctrl+Break handler");
-    tokio::select! {
-        _ = c_break.recv() => Shutdown::Terminate,
-        _ = c_c.recv() => Shutdown::Interrupt,
     }
 }
 
@@ -628,16 +363,13 @@ async fn client_setup(_statedir: &str, ctx: RunTasks) -> Result<JoinSet<Result<(
     // "no upstream proxy requested", matching the reference PT
     // implementations. Either way the parent sees the transport fail to
     // configure instead of believing its proxy is in use.
-    let proxy_requested = std::env::var_os(ptrs::constants::PROXY)
-        .map(|value| value.to_string_lossy().into_owned())
-        .filter(|value| !value.is_empty());
-    if let Some(proxy_uri) = proxy_requested {
-        let reason = format!(
-            "upstream proxy dialing is not supported by this transport; refusing to connect directly instead of via {proxy_uri}"
-        );
-        pt_proto::print_proxy_error(&reason);
+    let proxy_requested =
+        std::env::var_os(ptrs::constants::PROXY).is_some_and(|value| !value.is_empty());
+    if proxy_requested {
+        const PROXY_REFUSAL: &str = "upstream proxy dialing is not supported by this transport";
+        pt_proto::print_proxy_error(PROXY_REFUSAL);
         return Err(anyhow!(
-            "TOR_PT_PROXY={proxy_uri} is set but upstream proxy dialing is not implemented; refusing to bypass the configured proxy (PT-spec fail-closed)"
+            "TOR_PT_PROXY is set but upstream proxy dialing is not implemented; refusing to bypass the configured proxy (PT-spec fail-closed)"
         ));
     }
 
@@ -648,11 +380,10 @@ async fn client_setup(_statedir: &str, ctx: RunTasks) -> Result<JoinSet<Result<(
     let client_pt_info = ptrs::ClientInfo::new()?;
     let proxy_uri = url::Url::parse("data:,").expect("placeholder url");
 
-    // Every accept loop goes into the set returned to the caller: `run()`
-    // owns these tasks and joins them on every exit path, so no listener —
-    // and no connection a listener spawned — can outlive `run()` in the
-    // ambient runtime.
-    let mut listeners: JoinSet<Result<()>> = JoinSet::new();
+    // Build all accept futures before spawning any of them. If a later bind
+    // or local-address lookup fails, no earlier listener task needs cleanup.
+    type AcceptTask = Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>;
+    let mut accept_tasks: Vec<AcceptTask> = Vec::new();
 
     for name in client_pt_info.methods {
         info!(name);
@@ -662,23 +393,23 @@ async fn client_setup(_statedir: &str, ctx: RunTasks) -> Result<JoinSet<Result<(
             let listener = tokio::net::TcpListener::bind(CLIENT_SOCKS_ADDR).await?;
             let local_addr = listener.local_addr()?;
             pt_proto::print_cmethod(&name, "socks5", local_addr);
-            listeners.spawn(client_accept_loop(
+            accept_tasks.push(Box::pin(client_accept_loop(
                 listener,
                 builder,
                 proxy_uri.clone(),
                 ctx.clone(),
-            ));
+            )));
         } else if name == webtunnel_name {
             let builder = webtunnel::WebTunnelBuilder::default();
             let listener = tokio::net::TcpListener::bind(CLIENT_SOCKS_ADDR).await?;
             let local_addr = listener.local_addr()?;
             pt_proto::print_cmethod(&name, "socks5", local_addr);
-            listeners.spawn(client_accept_loop(
+            accept_tasks.push(Box::pin(client_accept_loop(
                 listener,
                 builder,
                 proxy_uri.clone(),
                 ctx.clone(),
-            ));
+            )));
         } else {
             pt_proto::print_cmethod_error(&name, "no such transport is supported");
             warn!("no such transport is supported");
@@ -689,6 +420,10 @@ async fn client_setup(_statedir: &str, ctx: RunTasks) -> Result<JoinSet<Result<(
     // PT spec §3.3.3: end of method announcements.
     pt_proto::print_cmethods_done();
 
+    let mut listeners = JoinSet::new();
+    for task in accept_tasks {
+        listeners.spawn(task);
+    }
     Ok(listeners)
 }
 
@@ -736,10 +471,14 @@ where
                     Some(p) => p,
                     None => break,
                 };
+                if ctx.accept.is_cancelled() {
+                    drop(permit);
+                    break;
+                }
                 let builder_clone = builder.clone();
                 let proxy_clone = proxy_uri.clone();
                 let conns = ctx.conns.clone();
-                tokio::spawn(async move {
+                ctx.spawn_connection(async move {
                     let _permit = permit; // held for the task's lifetime, freed on drop
                     tokio::select! {
                         biased;
@@ -756,7 +495,7 @@ where
                             }
                         }
                     }
-                });
+                }).await;
             }
         }
     }
@@ -873,8 +612,8 @@ where
 /// cancel-safe: NO — `establish` runs the obfs4/webtunnel handshake, which
 /// writes to the underlying socket. Dropping this future mid-handshake can
 /// leave the peer expecting bytes that were never sent. The caller
-/// (`client_handle_connection`) runs inside a dedicated `tokio::spawn` task,
-/// so it is not composed under a `select!`/`timeout` cancellation point.
+/// (`client_handle_connection`) is selected against the connection
+/// cancellation token, so forced shutdown may drop this future mid-handshake.
 pub(crate) async fn establish_pt_conn<In2, C2>(
     pt_client: C2,
     dial: Pin<ptrs::FutureResult<In2, std::io::Error>>,
@@ -898,7 +637,16 @@ where
     }
 }
 
+mod lifecycle;
+use lifecycle::RunTasks;
+#[cfg(test)]
+use lifecycle::{
+    cancel_connections, drain_connections, drive, join_accept_loops, run_with_setup, Shutdown,
+    MAX_CONCURRENT_CONNS,
+};
+
 mod server;
+mod stdin_watch;
 #[cfg(feature = "experimental-server")]
 use server::server_setup;
 

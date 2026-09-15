@@ -2561,6 +2561,7 @@ dependencies = [
  "criterion",
  "fast-socks5",
  "futures",
+ "libc",
  "ptrs-gesher-core",
  "ptrs-gesher-obfs4",
  "ptrs-gesher-webtunnel",
@@ -2572,6 +2573,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "url",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

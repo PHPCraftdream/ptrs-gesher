@@ -14,6 +14,69 @@ async fn cancellation_interrupts_a_full_connection_limit() {
     assert!(matches!(outcome, Ok(None)));
 }
 
+#[tokio::test(start_paused = true)]
+async fn forced_shutdown_aborts_and_joins_pending_connection() {
+    struct DropMarker(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for DropMarker {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    let ctx = RunTasks::new();
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dropped_by_task = Arc::clone(&dropped);
+    let permit = ctx
+        .lifecycle
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("test lifecycle permit");
+    ctx.spawn_connection(async move {
+        let _permit = permit;
+        let _marker = DropMarker(dropped_by_task);
+        std::future::pending::<()>().await;
+    })
+    .await;
+
+    let started = tokio::time::Instant::now();
+    tokio::time::timeout(std::time::Duration::from_secs(6), cancel_connections(&ctx))
+        .await
+        .expect("forced shutdown must abort a pending connection");
+
+    assert!(started.elapsed() >= std::time::Duration::from_secs(5));
+    assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
+    assert!(ctx.connections.lock().await.is_empty());
+}
+
+#[tokio::test]
+async fn setup_error_drops_pending_stdin_future() {
+    struct DropMarker(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for DropMarker {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let marker = DropMarker(Arc::clone(&dropped));
+    let stdin_wait = async move {
+        let _marker = marker;
+        std::future::pending::<std::io::Result<()>>().await
+    };
+    let setup = async { Err::<JoinSet<Result<()>>, _>(anyhow!("injected setup failure")) };
+
+    let result = run_with_setup(RunTasks::new(), stdin_wait, setup, || {
+        std::future::pending::<Shutdown>()
+    })
+    .await;
+
+    assert_eq!(result.unwrap_err().to_string(), "injected setup failure");
+    assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
+}
+
 #[test]
 fn arg_string_uname_only_when_passwd_is_nul() {
     let creds = Some(("cert=AAA;iat-mode=0".to_string(), "\0".to_string()));
@@ -572,14 +635,16 @@ async fn client_setup_rejects_configured_upstream_proxy() {
 
     clear_client_env();
 
-    // The setup must fail closed: an error naming the refused proxy, so
-    // the parent process sees a failed configuration instead of a PT that
-    // quietly connects directly.
+    // The setup must fail closed without copying proxy credentials or URI
+    // data into a returned error.
     let err = outcome.expect_err("a configured TOR_PT_PROXY must abort client_setup");
     let msg = format!("{err:#}");
     assert!(
-        msg.contains("TOR_PT_PROXY") && msg.contains("127.0.0.1:9050"),
-        "the refusal must name the offending variable and proxy URI, got: {msg}"
+        msg.contains("TOR_PT_PROXY")
+            && msg.contains("upstream proxy dialing is not implemented")
+            && !msg.contains("127.0.0.1:9050")
+            && !msg.contains("user:pass"),
+        "the refusal must be actionable without echoing proxy data, got: {msg}"
     );
 }
 
@@ -736,6 +801,63 @@ async fn spawn_stack_with_active_tunnel(
     // One round-trip proves the tunnel is actively relaying.
     roundtrip_through_tunnel(&mut parent, b"pre-shutdown-probe").await;
     (parent, socks_addr)
+}
+
+#[tokio::test]
+async fn parent_eof_during_interrupt_drain_cancels_active_connection() {
+    let ctx = RunTasks::new();
+    let mut listeners = JoinSet::new();
+    let (mut parent, socks_addr) = spawn_stack_with_active_tunnel(&ctx, &mut listeners).await;
+
+    let (stdin_tx, mut stdin_rx) = tokio::sync::oneshot::channel();
+    let (draining_tx, draining_rx) = tokio::sync::oneshot::channel();
+    let mut draining_tx = Some(draining_tx);
+    let accept = ctx.accept.clone();
+    let stdin_wait = std::future::poll_fn(move |cx| {
+        if accept.is_cancelled() {
+            if let Some(tx) = draining_tx.take() {
+                let _ = tx.send(());
+            }
+        }
+        Pin::new(&mut stdin_rx)
+            .poll(cx)
+            .map(|result| result.expect("stdin test event"))
+    });
+
+    let (signal_tx, signal_rx) = tokio::sync::mpsc::channel(1);
+    let signal_rx = Arc::new(tokio::sync::Mutex::new(signal_rx));
+    let signal = move || {
+        let rx = Arc::clone(&signal_rx);
+        async move { rx.lock().await.recv().await.expect("signal test event") }
+    };
+
+    let run = drive(ctx.clone(), listeners, stdin_wait, signal);
+    let events = async {
+        signal_tx
+            .send(Shutdown::Interrupt)
+            .await
+            .expect("send interrupt");
+        draining_rx
+            .await
+            .expect("stdin must remain watched during drain");
+        assert_port_closed(socks_addr).await;
+        roundtrip_through_tunnel(&mut parent, b"draining-probe").await;
+        stdin_tx.send(Ok(())).expect("send parent EOF event");
+        // Keep the signal source alive until shutdown completes.
+        signal_tx
+    };
+    let (result, _signals) = tokio::time::timeout(TEST_STEP, async { tokio::join!(run, events) })
+        .await
+        .expect("parent EOF must escalate the drain before 15 seconds");
+    result.expect("lifecycle returned an error");
+    assert_no_connection_tasks(&ctx);
+
+    let mut buf = [0u8; 8];
+    let n = tokio::time::timeout(TEST_STEP, parent.read(&mut buf))
+        .await
+        .expect("cancelled tunnel must reach EOF")
+        .expect("read after parent EOF");
+    assert_eq!(n, 0);
 }
 
 #[tokio::test]

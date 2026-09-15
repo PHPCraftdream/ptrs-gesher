@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **lyrebird**: keep stdin EOF detection active during graceful shutdown and
+  cancel it without leaving a blocking reader behind. Join owned connection
+  tasks before returning, including forced shutdown and setup failures.
+- **lyrebird**: reject unsupported `TOR_PT_PROXY` values without copying proxy
+  credentials or control characters into protocol output and error messages.
+  An empty value consistently means that no upstream proxy is configured.
+
 ## [0.5.3] - 2026-09-08
 
 ### Fixed
