@@ -6,7 +6,7 @@ use ptrs::trace;
 /// happening is negligible.
 use siphasher::{prelude::*, sip::SipHasher24};
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashSet, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -16,7 +16,6 @@ use std::time::{Duration, Instant};
 // bridge sees in one day, so in practice should never be reached.
 const MAX_FILTER_SIZE: usize = 100 * 1024;
 
-#[derive(Clone, PartialEq)]
 struct Entry {
     digest: u64,
     first_seen: Instant,
@@ -49,12 +48,13 @@ impl ReplayFilter {
 }
 
 struct InnerReplayFilter {
-    filter: HashMap<u64, Entry>,
+    filter: HashSet<u64>,
     fifo: VecDeque<Entry>,
 
     key: [u8; 16],
     ttl_limit: Duration,
     max_cap: usize,
+    latest_time: Option<Instant>,
 }
 
 impl Drop for InnerReplayFilter {
@@ -71,15 +71,23 @@ impl InnerReplayFilter {
         getrandom::getrandom(&mut key).expect("system RNG failure seeding replay filter key");
 
         Self {
-            filter: HashMap::new(),
+            filter: HashSet::new(),
             fifo: VecDeque::new(),
             key,
             ttl_limit,
             max_cap,
+            latest_time: None,
         }
     }
 
     fn test_and_set(&mut self, now: Instant, buf: impl AsRef<[u8]>) -> bool {
+        // Calls can capture `now` before waiting for the mutex and arrive out
+        // of order. Clamp timestamps so stale callers cannot move time back.
+        let now = match self.latest_time {
+            Some(latest) if now < latest => latest,
+            _ => now,
+        };
+        self.latest_time = Some(now);
         self.garbage_collect(now);
 
         let mut hash = SipHasher24::new_with_key(&self.key);
@@ -89,8 +97,15 @@ impl InnerReplayFilter {
         };
 
         trace!("checking inner");
-        if self.filter.contains_key(&digest) {
+        if self.filter.contains(&digest) {
             return true;
+        }
+
+        if self.max_cap == 0 {
+            return false;
+        }
+        while self.fifo.len() >= self.max_cap {
+            self.evict_oldest();
         }
 
         trace!("not found: {digest}... inserting");
@@ -99,8 +114,8 @@ impl InnerReplayFilter {
             first_seen: now,
         };
 
-        self.fifo.push_front(e.clone());
-        self.filter.insert(digest, e);
+        self.fifo.push_front(e);
+        self.filter.insert(digest);
 
         trace!("inserted: {}", self.filter.len());
         false
@@ -124,37 +139,20 @@ impl InnerReplayFilter {
                 self.max_cap,
                 self.ttl_limit
             );
-            // If the filter is not full, only purge entries that have exceedded
-            // the TTL, otherwise purge one entry and test to see if we are
-            // still over max length. This should not (typically) be possible as
-            // we garbage collect on insert.
-            if self.fifo.len() < self.max_cap && self.ttl_limit > Duration::from_millis(0) {
-                let delta_t = now - e.first_seen;
-                trace!("{:?} > {:?}", now, e.first_seen);
-                if now < e.first_seen {
-                    trace!("Invalid time");
-                    // Aeeeeeee, the system time jumped backwards, potentially by
-                    // a lot.  This will eventually self-correct, but "eventually"
-                    // could be a long time.  As much as this sucks, jettison the
-                    // entire filter.
-                    self.reset();
-                    return;
-                } else if delta_t < self.ttl_limit {
-                    return;
-                }
+            let expired = self.ttl_limit.is_zero()
+                || now.saturating_duration_since(e.first_seen) >= self.ttl_limit;
+            if !expired {
+                return;
             }
-
-            trace!("removing entry");
-            // remove the entry
-            _ = self.filter.remove(&e.digest);
-            _ = self.fifo.pop_back();
+            self.evict_oldest();
         }
     }
 
-    fn reset(&mut self) {
-        trace!("RESETING");
-        self.filter = HashMap::new();
-        self.fifo = VecDeque::new();
+    fn evict_oldest(&mut self) {
+        if let Some(entry) = self.fifo.pop_back() {
+            trace!("removing entry");
+            self.filter.remove(&entry.digest);
+        }
     }
 }
 
@@ -218,29 +216,29 @@ mod test {
             "test_and_set populated filter, compact check returned true"
         );
 
-        // Ensure that the filter gets reaped if the clock jumps backwards.
+        // A stale timestamp must not reset the filter or lose replay history.
         now = Instant::now();
         assert!(
-            !f.test_and_set(now, buf),
-            "test_and_set populated filter, backward time jump returned true"
+            f.test_and_set(now, buf),
+            "test_and_set populated filter, backward time jump lost replay history"
         );
         assert_eq!(
             f.fifo.len(),
-            1,
+            2,
             "filter fifo has a unexpected number of entries: {}",
             f.fifo.len()
         );
         assert_eq!(
             f.filter.len(),
-            1,
+            2,
             "filter map has a unexpected number of entries: {}",
             f.filter.len()
         );
 
-        // Ensure that the entry is properly added after reaping.
+        // The replay is still recognized after the stale call.
         assert!(
             f.test_and_set(now, buf),
-            "test_and_set populated filter, post-backward clock jump (replayed) returned false"
+            "test_and_set populated filter, post-backward clock jump returned false"
         );
 
         // Ensure that when the capacity limit is hit entries are evicted
@@ -272,5 +270,45 @@ mod test {
         // Server accepts MACs computed for epoch_hour ± 1, so a recorded
         // handshake can be re-presented up to ~2h after capture.
         assert!(crate::constants::REPLAY_TTL >= Duration::from_secs(2 * 3600));
+    }
+
+    #[test]
+    fn reversed_timestamps_keep_replay_history() {
+        let mut filter = InnerReplayFilter::new(Duration::from_secs(10), 4);
+        let base = Instant::now();
+        assert!(!filter.test_and_set(base + Duration::from_secs(5), b"first"));
+        assert!(filter.test_and_set(base, b"first"));
+        assert_eq!(filter.fifo.len(), 1);
+    }
+
+    #[test]
+    fn full_capacity_duplicate_oldest_is_not_evicted() {
+        let mut filter = InnerReplayFilter::new(Duration::from_secs(10), 2);
+        let now = Instant::now();
+        assert!(!filter.test_and_set(now, b"oldest"));
+        assert!(!filter.test_and_set(now, b"newest"));
+        assert!(filter.test_and_set(now, b"oldest"));
+        assert_eq!(filter.fifo.len(), 2);
+        assert_eq!(filter.filter.len(), 2);
+    }
+
+    #[test]
+    fn ttl_expires_at_boundary() {
+        let ttl = Duration::from_secs(10);
+        let mut filter = InnerReplayFilter::new(ttl, 2);
+        let now = Instant::now();
+        assert!(!filter.test_and_set(now, b"entry"));
+        assert!(!filter.test_and_set(now + ttl, b"entry"));
+    }
+
+    #[test]
+    fn unique_insertions_remain_bounded() {
+        let mut filter = InnerReplayFilter::new(Duration::from_secs(60), 3);
+        let now = Instant::now();
+        for message in [b"one".as_slice(), b"two", b"three", b"four", b"five"] {
+            assert!(!filter.test_and_set(now, message));
+            assert!(filter.fifo.len() <= 3);
+            assert!(filter.filter.len() <= 3);
+        }
     }
 }

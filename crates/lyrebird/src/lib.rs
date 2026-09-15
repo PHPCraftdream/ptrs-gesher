@@ -1,7 +1,7 @@
 //! # Lyrebird - Pluggable Transport Proxy Applications
 //!
 //! This crate provides a PT-manager loop usable as a library
-//! (`lyrebird::run()`) or as a standalone binary that implements the
+//! (`lyrebird::run_from_env()`) or as a standalone binary that implements the
 //! Tor pluggable-transport spec on top of the [`ptrs`] interface.
 //!
 //! **Stability**: the public API is unstable and subject to change
@@ -88,7 +88,7 @@ use ptrs::{error, info, warn, PluggableTransport};
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
 use fast_socks5::util::target_addr::TargetAddr;
-use safelog::sensitive;
+use safelog::{sensitive, Guard};
 use tokio::task::JoinSet;
 use tokio::{
     io::{copy_bidirectional, AsyncRead, AsyncWrite, AsyncWriteExt},
@@ -96,12 +96,16 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use tracing::Level;
-use tracing_subscriber::{filter::LevelFilter, prelude::*};
+use tracing_subscriber::prelude::*;
 
 use std::{future::Future, net::SocketAddr, pin::Pin, str::FromStr, sync::Arc};
 
 /// Client Socks address to listen on.
 const CLIENT_SOCKS_ADDR: &str = "127.0.0.1:0";
+
+/// Maximum time allowed for the SOCKS5 method, authentication, and request
+/// negotiation before a connection is discarded.
+const SOCKS5_SETUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
 /// Error defined to denote a failure to get the bridge line
 #[derive(Debug, thiserror::Error)]
@@ -132,13 +136,7 @@ fn init_logging_recvr(
     should_scrub: bool,
     level_str: &str,
     statedir: &str,
-) -> Result<()> {
-    if should_scrub {
-        let _ = safelog::enforce_safe_logging();
-    } else {
-        let _ = safelog::disable_safe_logging();
-    }
-
+) -> Result<Guard> {
     // The PT protocol owns stdout for the parent ↔ PT control channel.
     // Logs go to stderr; the file layer below (when enabled) writes
     // separately into the state directory.
@@ -146,16 +144,18 @@ fn init_logging_recvr(
     // Compact (single-line) layout matches the parent process's
     // tracing-subscriber default — we share a terminal with it when
     // launched via the busybox dispatch, so consistent formatting
-    // matters more than the pretty multi-line output. Per-target
-    // filter mutes the chatty `fast_socks5` connection log; arti is
-    // the one bashing through dozens of PT connections during
-    // bootstrap and the per-conn lines drown the relevant signal.
-    let console_filter =
-        tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-            tracing_subscriber::EnvFilter::new(
-                "info,fast_socks5=warn,obfs4::sessions=warn,lyrebird::handshake=info",
-            )
-        });
+    // matters more than the pretty multi-line output.
+    let level = Level::from_str(level_str).context("invalid log level")?;
+    let safelog_guard = if should_scrub {
+        safelog::enforce_safe_logging().context("enabling safe logging")?
+    } else {
+        safelog::disable_safe_logging().context("disabling safe logging")?
+    };
+    if has_logging_subscriber() {
+        return Ok(safelog_guard);
+    }
+
+    let filter = default_log_filter(level);
     // Honor the https://no-color.org convention: any (even empty) NO_COLOR
     // disables ANSI. We're normally launched as a PT child by the parent
     // process's busybox dispatch and inherit its environment, so the parent
@@ -166,25 +166,53 @@ fn init_logging_recvr(
     let console_layer = tracing_subscriber::fmt::layer()
         .with_ansi(ansi)
         .with_writer(std::io::stderr)
-        .with_filter(console_filter);
+        .with_filter(filter.clone());
 
     let log_layers = if enable {
-        let level = Level::from_str(level_str)?;
-
-        let file = std::fs::File::create(format!("{statedir}/obfs4proxy.log"))?;
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(format!("{statedir}/obfs4proxy.log"))?;
 
         let state_dir_layer = tracing_subscriber::fmt::layer()
             .with_writer(file)
-            .with_filter(LevelFilter::from_level(level));
+            .with_filter(filter);
 
         console_layer.and_then(state_dir_layer).boxed()
     } else {
         console_layer.boxed()
     };
 
-    tracing_subscriber::registry().with(log_layers).init();
+    let result = tracing_subscriber::registry().with(log_layers).try_init();
+    if let Err(error) = result {
+        // try_init reports conflicts with an existing subscriber or log
+        // logger, including an explicitly installed NoSubscriber.
+        tracing::debug!("preserving process-owned logging: {error}");
+    }
 
-    Ok(())
+    Ok(safelog_guard)
+}
+
+fn has_logging_subscriber() -> bool {
+    tracing::dispatcher::get_default(|dispatch| !dispatch.is::<tracing::subscriber::NoSubscriber>())
+}
+
+fn default_log_filter(level: Level) -> tracing_subscriber::EnvFilter {
+    default_log_filter_from_env(level, std::env::var_os("RUST_LOG").as_deref())
+}
+
+fn default_log_filter_from_env(
+    level: Level,
+    rust_log: Option<&std::ffi::OsStr>,
+) -> tracing_subscriber::EnvFilter {
+    rust_log
+        .and_then(|value| value.to_str())
+        .and_then(|value| tracing_subscriber::EnvFilter::try_new(value).ok())
+        .unwrap_or_else(|| tracing_subscriber::EnvFilter::new(default_filter_directives(level)))
+}
+
+fn default_filter_directives(level: Level) -> String {
+    level.to_string()
 }
 
 /// Resolve a `fast_socks5::util::TargetAddr` to a concrete `SocketAddr`.
@@ -259,6 +287,10 @@ async fn dial_bridge(remote_addr: SocketAddr) -> std::io::Result<TcpStream> {
 /// When stdin monitoring is enabled, this call requires exclusive access to
 /// stdin until it returns.
 ///
+/// An existing tracing subscriber is preserved. CLI logging filters apply
+/// only when this call installs its own subscriber; the safelog guard remains
+/// active until shutdown completes.
+///
 /// # Cancel safety
 ///
 /// This function is **not cancel-safe**. It manages long-lived server
@@ -272,13 +304,31 @@ pub async fn run() -> Result<()> {
     let statedir = ptrs::make_state_dir()?;
 
     // launch tracing subscriber with filter level
-    init_logging_recvr(
+    let _logging_guard = init_logging_recvr(
         args.enable_logging,
         !args.unsafe_logging,
         &args.log_level,
         &statedir,
     )?;
 
+    run_managed(&statedir).await
+}
+
+/// Run the managed PT loop using `TOR_PT_*` environment variables.
+///
+/// This entry point does not parse process arguments or initialize logging.
+/// The embedding application owns its tracing subscriber and safelog policy.
+/// Shutdown and exclusive stdin requirements are the same as for [`run`].
+///
+/// # Cancel safety
+///
+/// Not cancel-safe: drive the future to completion to join owned tasks.
+pub async fn run_from_env() -> Result<()> {
+    let statedir = ptrs::make_state_dir()?;
+    run_managed(&statedir).await
+}
+
+async fn run_managed(statedir: &str) -> Result<()> {
     // Everything this run() invocation owns hangs off `ctx`: the shutdown
     // tokens for the two teardown phases and the lifecycle permit pool
     // every connection task holds a permit from.
@@ -302,7 +352,7 @@ pub async fn run() -> Result<()> {
             std::future::pending::<std::io::Result<()>>().await
         }
     };
-    let setup = setup_listeners(&statedir, ctx.clone());
+    let setup = setup_listeners(statedir, ctx.clone());
     lifecycle::run_with_setup(ctx, stdin_wait, setup, lifecycle::shutdown_signal).await
 }
 
@@ -351,7 +401,7 @@ async fn client_setup(_statedir: &str, ctx: RunTasks) -> Result<JoinSet<Result<(
     // actually in use) or `PROXY-ERROR` and terminate — before any
     // transport is initialized. There is no upstream proxy dialer in this
     // codebase: `dial_bridge` always opens a *direct* TCP connection, and
-    // the requested URI used to be dropped on the floor (`_proxy_uri`).
+    // no proxy URI is retained because proxy dialing is unsupported.
     // Proceeding silently would route traffic around the configured proxy
     // while the parent believes its routing requirement is honored, and
     // answering `PROXY DONE` would promise a route the code never uses.
@@ -373,12 +423,7 @@ async fn client_setup(_statedir: &str, ctx: RunTasks) -> Result<JoinSet<Result<(
         ));
     }
 
-    // TOR_PT_PROXY is guaranteed unset or empty from here on (fail-closed
-    // check above). The per-connection `proxy_uri` plumbing stays inert;
-    // it is kept as the seam a future upstream proxy-dialer would attach
-    // to.
     let client_pt_info = ptrs::ClientInfo::new()?;
-    let proxy_uri = url::Url::parse("data:,").expect("placeholder url");
 
     // Build all accept futures before spawning any of them. If a later bind
     // or local-address lookup fails, no earlier listener task needs cleanup.
@@ -393,23 +438,13 @@ async fn client_setup(_statedir: &str, ctx: RunTasks) -> Result<JoinSet<Result<(
             let listener = tokio::net::TcpListener::bind(CLIENT_SOCKS_ADDR).await?;
             let local_addr = listener.local_addr()?;
             pt_proto::print_cmethod(&name, "socks5", local_addr);
-            accept_tasks.push(Box::pin(client_accept_loop(
-                listener,
-                builder,
-                proxy_uri.clone(),
-                ctx.clone(),
-            )));
+            accept_tasks.push(Box::pin(client_accept_loop(listener, builder, ctx.clone())));
         } else if name == webtunnel_name {
             let builder = webtunnel::WebTunnelBuilder::default();
             let listener = tokio::net::TcpListener::bind(CLIENT_SOCKS_ADDR).await?;
             let local_addr = listener.local_addr()?;
             pt_proto::print_cmethod(&name, "socks5", local_addr);
-            accept_tasks.push(Box::pin(client_accept_loop(
-                listener,
-                builder,
-                proxy_uri.clone(),
-                ctx.clone(),
-            )));
+            accept_tasks.push(Box::pin(client_accept_loop(listener, builder, ctx.clone())));
         } else {
             pt_proto::print_cmethod_error(&name, "no such transport is supported");
             warn!("no such transport is supported");
@@ -441,7 +476,6 @@ async fn connection_permit(
 async fn client_accept_loop<C>(
     listener: TcpListener,
     builder: impl ptrs::ClientBuilder<TcpStream, ClientPT = C> + Send + 'static,
-    proxy_uri: url::Url,
     ctx: RunTasks,
 ) -> Result<()>
 where
@@ -476,7 +510,6 @@ where
                     break;
                 }
                 let builder_clone = builder.clone();
-                let proxy_clone = proxy_uri.clone();
                 let conns = ctx.conns.clone();
                 ctx.spawn_connection(async move {
                     let _permit = permit; // held for the task's lifetime, freed on drop
@@ -486,7 +519,7 @@ where
                         // halves of the tunnel. Runs only once the graceful
                         // drain budget expired (or on terminate/EOF).
                         _ = conns.cancelled() => {}
-                        res = client_handle_connection(conn, builder_clone, proxy_clone, client_addr) => {
+                        res = client_handle_connection(conn, builder_clone, client_addr) => {
                             if let Err(e) = res {
                                 warn!(
                                     address = sensitive(client_addr).to_string(),
@@ -508,7 +541,6 @@ where
 async fn client_handle_connection<In, C, B>(
     conn: In,
     mut builder: B,
-    _proxy_uri: url::Url,
     client_addr: SocketAddr,
 ) -> Result<()>
 where
@@ -535,7 +567,10 @@ where
     config.set_execute_command(false);
     let socks5_conn = fast_socks5::server::Socks5Socket::new(conn, Arc::new(config));
 
-    let mut socks5_conn = socks5_conn.upgrade_to_socks5().await?;
+    let mut socks5_conn =
+        tokio::time::timeout(SOCKS5_SETUP_TIMEOUT, socks5_conn.upgrade_to_socks5())
+            .await
+            .context("SOCKS5 negotiation timed out")??;
     let creds = socks5_conn.take_credentials();
 
     let target_addr = socks5_conn
@@ -649,6 +684,11 @@ mod server;
 mod stdin_watch;
 #[cfg(feature = "experimental-server")]
 use server::server_setup;
+
+#[cfg(test)]
+mod logging_tests;
+#[cfg(test)]
+mod socks_tests;
 
 // ================================================================ //
 //        PT-spec helpers (auth, args, parent-channel messages)     //

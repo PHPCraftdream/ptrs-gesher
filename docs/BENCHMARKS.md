@@ -2,6 +2,11 @@
 
 Captured via `cargo bench --workspace -- --save-baseline initial`.
 
+These are historical measurements. The current obfs4 throughput fixture reuses
+an established tunnel and excludes connection setup and teardown from timing;
+the older throughput numbers below include per-transfer setup and cannot be
+compared directly. No replacement baseline has been captured for this change.
+
 - **Host:** Windows 10 / 11th Gen Intel Core i7-11800H @ 2.30 GHz
 - **Toolchain:** `rustc 1.93.0 (254b59607 2026-01-19)`
 - **Date:** 2026-05-27
@@ -17,9 +22,9 @@ captured with the **long-form Criterion defaults** (100 samples,
 
 The bench groups have since been re-tuned to a faster default
 (20 samples, 0.5 s warm-up, 1 s measurement, ~4 minute total run)
-to keep day-to-day regression checks cheap. Numbers within ±5 % of
-the baseline below are noise; anything beyond that is a real
-signal worth investigating.
+to keep day-to-day regression checks cheap. Evaluate changes under the same
+toolchain, hardware and workload; a fixed percentage alone does not distinguish
+a regression from environmental noise.
 
 To compare on the same machine after changes (uses the new fast
 defaults baked into each `criterion_group!`):
@@ -71,7 +76,7 @@ round-trips.
 | `framing/build_and_marshall_512B` | 158.96 ns | [154.92 ns, 163.03 ns] |
 | `framing/build_and_marshall_1400B` | 166.65 ns | [163.59 ns, 169.78 ns] |
 
-## Replay filter (Bloom-style sliding-window cache)
+## Replay filter (digest set with FIFO expiration)
 
 | Benchmark | Median | Range |
 |---|---:|---|

@@ -16,20 +16,23 @@
 > The bridge-side (`ServerTransportPlugin`) code path is gated behind the
 > `experimental-server` cargo feature, is not built by default, and panics
 > with `unimplemented!` at connection time. The PT handshake is not wired
-> and there is no ExtORPort dial; enabling this feature on a real bridge
-> would expose an unauthenticated proxy. Only the client-side
+> and there is no ExtORPort dial. Enable it only for development. The client-side
 > (`ClientTransportPlugin`) path is usable today.
 
 PT-manager loop for Tor pluggable transports. Usable as a library
-(`lyrebird::run()`) or as a standalone binary. Dispatches `obfs4` and
+(`lyrebird::run_from_env()`) or as a standalone binary. Dispatches `obfs4` and
 `webtunnel` transports over the Tor PT protocol (SOCKS5 on the client
 side, Extended ORPort on the server side).
 
 ## Status
 
-Version `0.3.0` -- not yet published to crates.io. Interface subject to
-change. Not production ready; do not rely on this for security-critical
+The interface remains subject to change. Not production ready; do not rely on this for security-critical
 applications.
+
+For embedding, set the managed-transport environment and call
+`lyrebird::run_from_env().await`. This preserves the application's arguments,
+tracing subscriber and safelog policy. The existing `lyrebird::run()` entry point
+continues to parse the standalone CLI options and configure its logging policy.
 
 ## Usage (binary)
 

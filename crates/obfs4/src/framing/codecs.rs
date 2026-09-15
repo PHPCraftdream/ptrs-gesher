@@ -1,6 +1,5 @@
 use crate::{
-    common::drbg::{self, Drbg, Seed},
-    constants::MESSAGE_OVERHEAD,
+    common::drbg::{Drbg, Seed},
     framing::{FrameError, Messages},
 };
 
@@ -12,35 +11,103 @@ use crypto_secretbox::{
 use ptrs::{debug, error, trace};
 use tokio_util::codec::{Decoder, Encoder};
 
-/// MaximumSegmentLength is the length of the largest possible segment
-/// including overhead.
-pub(crate) const MAX_SEGMENT_LENGTH: usize = 1500 - (40 + 12);
+use super::{
+    KEY_LENGTH, KEY_MATERIAL_LENGTH, LENGTH_LENGTH, MAX_FRAME_LENGTH, MAX_FRAME_PAYLOAD_LENGTH,
+    MAX_MESSAGE_PAYLOAD_LENGTH, MAX_SEGMENT_LENGTH, MESSAGE_OVERHEAD, MIN_FRAME_LENGTH,
+    NONCE_PREFIX_LENGTH, TAG_SIZE,
+};
 
-/// secret box overhead is fixed length prefix and counter
-const SECRET_BOX_OVERHEAD: usize = TAG_SIZE;
-
-/// FrameOverhead is the length of the framing overhead.
-pub(crate) const FRAME_OVERHEAD: usize = LENGTH_LENGTH + SECRET_BOX_OVERHEAD;
-
-/// MaximumFramePayloadLength is the length of the maximum allowed payload
-/// per frame.
-pub(crate) const MAX_FRAME_PAYLOAD_LENGTH: usize = MAX_SEGMENT_LENGTH - FRAME_OVERHEAD;
-
-pub(crate) const MAX_FRAME_LENGTH: usize = MAX_SEGMENT_LENGTH - LENGTH_LENGTH;
-pub(crate) const MIN_FRAME_LENGTH: usize = FRAME_OVERHEAD - LENGTH_LENGTH;
-
-pub(crate) const NONCE_PREFIX_LENGTH: usize = 16;
 pub(crate) const NONCE_COUNTER_LENGTH: usize = 8;
 pub(crate) const NONCE_LENGTH: usize = NONCE_PREFIX_LENGTH + NONCE_COUNTER_LENGTH;
 
-pub(crate) const LENGTH_LENGTH: usize = 2;
+const ZERO_PADDING: [u8; MAX_MESSAGE_PAYLOAD_LENGTH] = [0; MAX_MESSAGE_PAYLOAD_LENGTH];
 
-/// KEY_LENGTH is the length of the Encoder/Decoder secret key.
-pub(crate) const KEY_LENGTH: usize = 32;
+/// A borrowed payload frame represented as a zero-copy `Buf`.
+pub(crate) struct PayloadFrame<'a> {
+    header: [u8; MESSAGE_OVERHEAD],
+    header_pos: usize,
+    payload: &'a [u8],
+    payload_pos: usize,
+}
 
-pub(crate) const TAG_SIZE: usize = 16;
+impl<'a> PayloadFrame<'a> {
+    pub(crate) fn new(payload: &'a [u8]) -> Self {
+        Self {
+            header: [0, (payload.len() >> 8) as u8, payload.len() as u8],
+            header_pos: 0,
+            payload,
+            payload_pos: 0,
+        }
+    }
+}
 
-pub(crate) const KEY_MATERIAL_LENGTH: usize = KEY_LENGTH + NONCE_PREFIX_LENGTH + drbg::SEED_LENGTH;
+impl Buf for PayloadFrame<'_> {
+    fn remaining(&self) -> usize {
+        (MESSAGE_OVERHEAD - self.header_pos).saturating_add(self.payload.len() - self.payload_pos)
+    }
+
+    fn chunk(&self) -> &[u8] {
+        if self.header_pos < MESSAGE_OVERHEAD {
+            &self.header[self.header_pos..]
+        } else {
+            &self.payload[self.payload_pos..]
+        }
+    }
+
+    fn advance(&mut self, count: usize) {
+        assert!(count <= self.remaining(), "payload frame advanced too far");
+        let header_remaining = MESSAGE_OVERHEAD - self.header_pos;
+        if count < header_remaining {
+            self.header_pos += count;
+        } else {
+            self.header_pos = MESSAGE_OVERHEAD;
+            self.payload_pos += count - header_remaining;
+        }
+    }
+}
+
+/// A zero-copy padding frame represented as a `Buf`.
+pub(crate) struct PaddingFrame {
+    header_pos: usize,
+    padding_len: usize,
+    padding_pos: usize,
+}
+
+impl PaddingFrame {
+    pub(crate) fn new(padding_len: usize) -> Self {
+        Self {
+            header_pos: 0,
+            padding_len,
+            padding_pos: 0,
+        }
+    }
+}
+
+impl Buf for PaddingFrame {
+    fn remaining(&self) -> usize {
+        (MESSAGE_OVERHEAD - self.header_pos).saturating_add(self.padding_len - self.padding_pos)
+    }
+
+    fn chunk(&self) -> &[u8] {
+        static HEADER: [u8; MESSAGE_OVERHEAD] = [0; MESSAGE_OVERHEAD];
+        if self.header_pos < MESSAGE_OVERHEAD {
+            &HEADER[self.header_pos..]
+        } else {
+            &ZERO_PADDING[..(self.padding_len - self.padding_pos).min(ZERO_PADDING.len())]
+        }
+    }
+
+    fn advance(&mut self, count: usize) {
+        assert!(count <= self.remaining(), "padding frame advanced too far");
+        let header_remaining = MESSAGE_OVERHEAD - self.header_pos;
+        if count < header_remaining {
+            self.header_pos += count;
+        } else {
+            self.header_pos = MESSAGE_OVERHEAD;
+            self.padding_pos += count - header_remaining;
+        }
+    }
+}
 
 /// XSalsa20-Poly1305 frame encoder/decoder for the obfs4 data channel.
 // TODO: make this (Codec) threadsafe

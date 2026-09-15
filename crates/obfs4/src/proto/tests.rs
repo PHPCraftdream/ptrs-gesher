@@ -166,7 +166,7 @@ fn fixed_future_deadline_is_preserved() {
 }
 
 // Regression: a single decoded obfs4 frame can carry up to
-// MAX_MESSAGE_PAYLOAD_LENGTH (~1448B) of payload. `poll_read` used to do
+// MAX_MESSAGE_PAYLOAD_LENGTH (~1427B) of payload. `poll_read` used to do
 // `buf.put_slice(&message)`, which panics when the message is larger than
 // the caller's `ReadBuf`. The fix copies what fits and parks the rest in a
 // residual buffer for subsequent reads. This test drives the exact helpers
@@ -178,7 +178,7 @@ fn fixed_future_deadline_is_preserved() {
 fn oversized_frame_payload_drains_without_loss() {
     use tokio::io::ReadBuf;
 
-    let payload_len = crate::constants::MAX_MESSAGE_PAYLOAD_LENGTH;
+    let payload_len = framing::MAX_MESSAGE_PAYLOAD_LENGTH;
     assert!(
         payload_len > 100,
         "frame payload should exceed the small read buffer for this test"
@@ -222,7 +222,8 @@ async fn wire_padding_matches_reference_lengths_and_authenticates() {
             let (socket, _peer) = tokio::io::duplex(1);
             let km = [0x42; framing::KEY_MATERIAL_LENGTH];
             let mut framed = Framed::new(socket, framing::Obfs4Codec::new(km, km));
-            O4Stream::pad_burst(&mut framed, tail, target).unwrap();
+            let mut scratch = BytesMut::with_capacity(SEG);
+            O4Stream::pad_burst(&mut framed, tail, target, &mut scratch).unwrap();
             let mut wire = framed.write_buffer().clone();
             let pad = if target >= tail {
                 target - tail
@@ -244,6 +245,22 @@ async fn wire_padding_matches_reference_lengths_and_authenticates() {
             );
         }
     }
+}
+
+#[test]
+fn padding_scratch_reuses_its_allocation() {
+    const SEG: usize = framing::MAX_SEGMENT_LENGTH;
+    let (socket, _peer) = tokio::io::duplex(SEG);
+    let km = [0x43; framing::KEY_MATERIAL_LENGTH];
+    let mut framed = Framed::new(socket, framing::Obfs4Codec::new(km, km));
+    let mut scratch = BytesMut::with_capacity(SEG);
+
+    O4Stream::pad_burst(&mut framed, 0, SEG / 2, &mut scratch).unwrap();
+    let pointer = scratch.as_ptr();
+    let capacity = scratch.capacity();
+    O4Stream::pad_burst(&mut framed, 1, SEG / 2, &mut scratch).unwrap();
+    assert_eq!(scratch.as_ptr(), pointer);
+    assert_eq!(scratch.capacity(), capacity);
 }
 
 // ── IAT delay tests ─────────────────────────────────────────────────

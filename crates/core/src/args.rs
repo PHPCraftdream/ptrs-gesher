@@ -1,6 +1,5 @@
 //! Key–value mappings for the representation of client and server options.
 
-use itertools::Itertools;
 use std::collections::HashMap;
 
 use crate::Error;
@@ -21,6 +20,7 @@ use crate::Error;
 /// [The Little Book of Rust Macros](https://veykril.github.io/tlborm/decl-macros/building-blocks/counting.html)
 /// for more detail.
 #[doc(hidden)]
+#[cfg(test)]
 macro_rules! count {
     (@single $($x:tt)*) => (());
     (@count $($rest:expr),*) => (<[()]>::len(&[$(count!(@single $rest)),*]));
@@ -46,7 +46,7 @@ macro_rules! count {
 ///
 /// This macro is crate-internal (used by tests and helpers); it is not part of
 /// the public API.
-#[allow(unused_macros)]
+#[cfg(test)]
 macro_rules! args {
     ($($key:expr => $value:expr,)+) => { args!($($key => $value),+) };
     ($($key:expr => $value:expr),*) => {
@@ -63,6 +63,7 @@ macro_rules! args {
 
 /// Create a **HashMap** from a list of key-value pairs
 #[doc(hidden)]
+#[cfg(test)]
 macro_rules! hashmap {
     ($($key:expr => $value:expr,)+) => { hashmap!($($key => $value),+) };
     ($($key:expr => $value:expr),*) => {
@@ -90,11 +91,17 @@ impl Args {
 
     /// Add a key-value pair. Appends to existing values for the same key.
     pub fn add(&mut self, key: &str, value: &str) {
-        // value either exists or is allocated here.
-        self.0.entry(key.to_string()).or_default();
+        self.add_owned(key.to_owned(), value.to_owned());
+    }
 
-        // therefor value should never be None and it is safe to unwrap.
-        self.0.get_mut(key).unwrap().push(value.to_string());
+    fn add_owned(&mut self, key: String, value: String) {
+        self.0.entry(key).or_default().push(value);
+    }
+
+    fn from_owned(key: String, value: String) -> Self {
+        let mut args = Self(HashMap::with_capacity(1));
+        args.add_owned(key, value);
+        args
     }
 
     /// Get the list of values for a key, or `None` if the key is absent.
@@ -155,7 +162,7 @@ impl Args {
         let mut remaining = params;
         loop {
             // Read the key.
-            let (offset, key) = index_unescaped(remaining, vec!['=', ',', ';'])?;
+            let (offset, key) = index_unescaped(remaining, &['=', ',', ';'])?;
 
             // End of string or no equals sign?
             if offset >= remaining.len() || !remaining[offset..].starts_with('=') {
@@ -169,7 +176,7 @@ impl Args {
             remaining = &remaining[offset + 1..];
 
             // Read the value.
-            let (offset, value) = index_unescaped(remaining, vec![',', ';'])?;
+            let (offset, value) = index_unescaped(remaining, &[',', ';'])?;
 
             if key.is_empty() {
                 return Err(Error::ParseError(format!(
@@ -177,7 +184,7 @@ impl Args {
                     &remaining[..offset]
                 )));
             }
-            args.add(&key, &value);
+            args.add_owned(key, value);
 
             remaining = &remaining[offset..];
 
@@ -199,40 +206,55 @@ impl Args {
     /// "Equal signs and commas [and backslashes] MUST be escaped with a backslash."
     pub fn encode_smethod_args(&self) -> String {
         if self.is_empty() {
-            return String::from("");
+            return String::new();
         }
 
-        let escape = |s: &str| -> String { backslash_escape(s, vec!['=', ',']) };
+        let mut entries: Vec<_> = self.iter().collect();
+        entries.sort_unstable_by(|left, right| left.0.cmp(right.0));
 
-        self.iter()
-            .sorted()
+        let pair_count = self.0.values().map(Vec::len).sum::<usize>();
+        let capacity = self
+            .0
+            .iter()
             .map(|(key, values)| {
-                values
-                    .iter()
-                    .map(|value| format!("{}={}", escape(key), escape(value)))
-                    .collect::<Vec<String>>()
-                    .join(",")
+                key.len()
+                    .saturating_mul(values.len())
+                    .saturating_add(values.iter().map(String::len).sum::<usize>())
             })
-            .collect::<Vec<String>>()
-            .join(",")
+            .sum::<usize>()
+            .saturating_add(pair_count.saturating_mul(2))
+            .saturating_sub(1);
+        let mut encoded = String::with_capacity(capacity);
+
+        let mut first = true;
+        for (key, values) in entries {
+            for value in values {
+                if !first {
+                    encoded.push(',');
+                }
+                first = false;
+                push_backslash_escaped(&mut encoded, key, &['=', ',']);
+                encoded.push('=');
+                push_backslash_escaped(&mut encoded, value, &['=', ',']);
+            }
+        }
+        encoded
     }
 }
 
-fn backslash_escape(s: &str, set: Vec<char>) -> String {
-    let mut result = String::new();
-    s.chars().for_each(|a| {
-        if a == '\\' || set.contains(&a) {
-            result.push('\\');
+fn push_backslash_escaped(output: &mut String, s: &str, set: &[char]) {
+    for c in s.chars() {
+        if c == '\\' || set.contains(&c) {
+            output.push('\\');
         }
-        result.push(a);
-    });
-    result
+        output.push(c);
+    }
 }
 
 /// Return the index of the next unescaped byte in s that is in the term set, or
 /// else the length of the string if no terminators appear. Additionally return
 /// the unescaped string up to the returned index.
-fn index_unescaped(s: &str, term: Vec<char>) -> Result<(usize, String), Error> {
+fn index_unescaped(s: &str, term: &[char]) -> Result<(usize, String), Error> {
     let mut unesc = String::new();
     let mut chars = s.char_indices();
     let mut i: usize;
@@ -326,7 +348,7 @@ impl Opts {
         loop {
             let begin = i;
             // Read the method name.
-            let (offset, method_name) = index_unescaped(&s[i..], vec![':', '=', ';'])?;
+            let (offset, method_name) = index_unescaped(&s[i..], &[':', '=', ';'])?;
 
             i += offset;
             // End of string or no colon?
@@ -341,7 +363,7 @@ impl Opts {
             i += 1;
 
             // Read the key.
-            let (offset, key) = index_unescaped(&s[i..], vec!['=', ';'])?;
+            let (offset, key) = index_unescaped(&s[i..], &['=', ';'])?;
 
             i += offset;
             // End of string or no equals sign?
@@ -356,7 +378,7 @@ impl Opts {
             i += 1;
 
             // Read the value.
-            let (offset, value) = index_unescaped(&s[i..], vec![';'])?;
+            let (offset, value) = index_unescaped(&s[i..], &[';'])?;
 
             i += offset;
             if method_name.is_empty() {
@@ -369,10 +391,14 @@ impl Opts {
                 return Err(Error::ParseError(format!("empty key in {}", &s[begin..i])));
             }
 
-            opts.0
-                .entry(method_name)
-                .and_modify(|e| e.add(&key, &value))
-                .or_insert(Args(hashmap! {key => vec![value]}));
+            match opts.0.entry(method_name) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    entry.get_mut().add_owned(key, value);
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(Args::from_owned(key, value));
+                }
+            }
 
             if i >= s.len() {
                 break;

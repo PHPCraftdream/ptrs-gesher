@@ -1,4 +1,4 @@
-use crate::framing::{self, FrameError};
+use crate::framing::{FrameError, MAX_MESSAGE_PAYLOAD_LENGTH};
 
 // TODO: drbg for size sampling
 //common::drbg,
@@ -7,11 +7,6 @@ use crate::framing::{self, FrameError};
 
 use ptrs::trace;
 use tokio_util::bytes::{Buf, BufMut};
-
-pub(crate) const MESSAGE_OVERHEAD: usize = 2 + 1;
-pub(crate) const MAX_MESSAGE_PAYLOAD_LENGTH: usize =
-    framing::MAX_FRAME_PAYLOAD_LENGTH - MESSAGE_OVERHEAD;
-// pub(crate) const MAX_MESSAGE_PADDING_LENGTH: usize = MAX_MESSAGE_PAYLOAD_LENGTH;
 
 /// A single-byte packet-type discriminant used in obfs4 frame headers.
 pub type MessageType = u8;
@@ -51,14 +46,17 @@ pub fn build_and_marshall<T: BufMut>(
 
     // is the provided data a reasonable size?
     let buf = data.as_ref();
-    let total_size = buf.len() + pad_len;
+    let total_size = buf
+        .len()
+        .checked_add(pad_len)
+        .ok_or(FrameError::InvalidPayloadLength(usize::MAX))?;
     trace!(
         "building: total size = {}+{}={} / {MAX_MESSAGE_PAYLOAD_LENGTH}",
         buf.len(),
         pad_len,
         total_size,
     );
-    if total_size >= MAX_MESSAGE_PAYLOAD_LENGTH {
+    if total_size > MAX_MESSAGE_PAYLOAD_LENGTH {
         Err(FrameError::InvalidPayloadLength(total_size))?
     }
 
@@ -118,25 +116,35 @@ mod tests {
 
     #[test]
     fn build_rejects_oversized_total() {
-        let mut buf = BytesMut::new();
-        let big_payload = vec![0u8; MAX_MESSAGE_PAYLOAD_LENGTH];
+        let mut buf = BytesMut::from(&[0xA5, 0x5A][..]);
+        let before = buf.clone();
+        let big_payload = vec![0u8; MAX_MESSAGE_PAYLOAD_LENGTH + 1];
         let result = build_and_marshall(&mut buf, 0x01, big_payload, 0);
         assert!(result.is_err());
+        assert_eq!(
+            buf, before,
+            "rejected input must not change the destination"
+        );
     }
 
     #[test]
     fn build_rejects_oversized_padding() {
-        let mut buf = BytesMut::new();
+        let mut buf = BytesMut::from(&[0xA5, 0x5A][..]);
+        let before = buf.clone();
         let result = build_and_marshall(&mut buf, 0x01, [].as_slice(), u16::MAX as usize + 1);
         assert!(result.is_err());
+        assert_eq!(
+            buf, before,
+            "rejected input must not change the destination"
+        );
     }
 
     #[test]
     fn build_max_valid_payload() {
         let mut buf = BytesMut::new();
-        let payload = vec![0u8; MAX_MESSAGE_PAYLOAD_LENGTH - 1];
+        let payload = vec![0u8; MAX_MESSAGE_PAYLOAD_LENGTH];
         build_and_marshall(&mut buf, 0x01, payload, 0).unwrap();
-        assert_eq!(buf.len(), 3 + MAX_MESSAGE_PAYLOAD_LENGTH - 1);
+        assert_eq!(buf.len(), 3 + MAX_MESSAGE_PAYLOAD_LENGTH);
     }
 
     #[test]
@@ -144,8 +152,16 @@ mod tests {
         let mut buf = BytesMut::new();
         let payload = vec![0u8; MAX_MESSAGE_PAYLOAD_LENGTH / 2];
         let pad_len = MAX_MESSAGE_PAYLOAD_LENGTH - payload.len();
-        // total == MAX_MESSAGE_PAYLOAD_LENGTH should fail (uses >=)
         let result = build_and_marshall(&mut buf, 0x01, &payload, pad_len);
+        assert!(result.is_ok());
+        assert_eq!(buf.len(), 3 + MAX_MESSAGE_PAYLOAD_LENGTH);
+
+        let before = buf.clone();
+        let result = build_and_marshall(&mut buf, 0x01, &payload, pad_len + 1);
         assert!(result.is_err());
+        assert_eq!(
+            buf, before,
+            "rejected input must not change the destination"
+        );
     }
 }

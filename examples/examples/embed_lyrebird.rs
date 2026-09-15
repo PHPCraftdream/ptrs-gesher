@@ -4,7 +4,7 @@
 //! In a real deployment, Tor (or arti) launches the PT binary and communicates
 //! via `TOR_PT_*` environment variables and a stdout/stdin control channel.
 //! When embedding lyrebird as a library you set those env vars yourself and
-//! then call `lyrebird::run().await`. This example shows the required env
+//! then call `lyrebird::run_from_env().await`. This example shows the required env
 //! vars and the call site, but does NOT actually run the loop (it would block
 //! waiting for a Tor parent that is not there).
 //!
@@ -44,11 +44,12 @@ fn main() {
     // --- The actual embedding call ---
     println!("To actually run the PT loop:\n");
     println!("    // Set env vars, then:");
-    println!("    lyrebird::run().await?;\n");
+    println!("    lyrebird::run_from_env().await?;\n");
     println!("This blocks until the parent process signals shutdown (via");
     println!("stdin EOF or SIGTERM).\n");
 
     // Demonstrate that the lyrebird crate is reachable.
+    let _unpolled_runner = lyrebird::run_from_env();
     let creds = Some(("cert=AAA".to_string(), ";iat-mode=0".to_string()));
     let arg_string = lyrebird::arg_string_from_creds(creds);
     println!("Smoke-check: arg_string_from_creds -> \"{arg_string}\"");

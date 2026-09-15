@@ -104,14 +104,112 @@ fn codec_roundtrip() -> Result<()> {
 }
 
 #[test]
+fn borrowed_payload_and_padding_match_legacy_wire() -> Result<()> {
+    let km = [0x4Au8; KEY_MATERIAL_LENGTH];
+    let payload = b"borrowed frame bytes";
+
+    let mut direct = EncryptingCodec::new(km, km);
+    let mut legacy = EncryptingCodec::new(km, km);
+    let mut direct_wire = BytesMut::new();
+    let mut legacy_wire = BytesMut::new();
+    direct.encode(PayloadFrame::new(payload), &mut direct_wire)?;
+    let mut marshalled = BytesMut::new();
+    Messages::Payload(payload.to_vec()).marshall(&mut marshalled)?;
+    legacy.encode(marshalled, &mut legacy_wire)?;
+    assert_eq!(direct_wire, legacy_wire);
+
+    let mut direct = EncryptingCodec::new(km, km);
+    let mut legacy = EncryptingCodec::new(km, km);
+    let mut direct_wire = BytesMut::new();
+    let mut legacy_wire = BytesMut::new();
+    direct.encode(PaddingFrame::new(37), &mut direct_wire)?;
+    let mut marshalled = BytesMut::new();
+    Messages::Padding(37).marshall(&mut marshalled)?;
+    legacy.encode(marshalled, &mut legacy_wire)?;
+    assert_eq!(direct_wire, legacy_wire);
+    Ok(())
+}
+
+#[test]
+fn borrowed_frame_buffers_preserve_partial_cursor_state() {
+    let mut payload = PayloadFrame::new(b"abc");
+    assert_eq!(payload.remaining(), 6);
+    assert_eq!(payload.chunk(), &[0, 0, 3]);
+    payload.advance(1);
+    assert_eq!(payload.remaining(), 5);
+    assert_eq!(payload.chunk(), &[0, 3]);
+    payload.advance(2);
+    assert_eq!(payload.remaining(), 3);
+    assert_eq!(payload.chunk(), b"abc");
+    payload.advance(2);
+    assert_eq!(payload.remaining(), 1);
+    assert_eq!(payload.chunk(), b"c");
+    payload.advance(1);
+    assert_eq!(payload.remaining(), 0);
+    assert!(payload.chunk().is_empty());
+
+    let mut padding = PaddingFrame::new(4);
+    assert_eq!(padding.remaining(), 7);
+    assert_eq!(padding.chunk(), &[0, 0, 0]);
+    padding.advance(3);
+    assert_eq!(padding.remaining(), 4);
+    assert_eq!(padding.chunk(), &[0, 0, 0, 0]);
+    padding.advance(2);
+    assert_eq!(padding.remaining(), 2);
+    assert_eq!(padding.chunk(), &[0, 0]);
+    padding.advance(2);
+    assert_eq!(padding.remaining(), 0);
+    assert!(padding.chunk().is_empty());
+}
+
+#[test]
+fn borrowed_payload_respects_frame_limit() {
+    let km = [0x4Bu8; KEY_MATERIAL_LENGTH];
+    let mut codec = EncryptingCodec::new(km, km);
+    let mut wire = BytesMut::new();
+    let max = vec![0xA5; crate::framing::MAX_MESSAGE_PAYLOAD_LENGTH];
+    codec.encode(PayloadFrame::new(&max), &mut wire).unwrap();
+    assert_eq!(wire.len(), MAX_SEGMENT_LENGTH);
+    let too_large = vec![0xA5; crate::framing::MAX_MESSAGE_PAYLOAD_LENGTH + 1];
+    let before = wire.clone();
+    assert!(codec
+        .encode(PayloadFrame::new(&too_large), &mut wire)
+        .is_err());
+    assert_eq!(wire, before);
+
+    let before = wire.clone();
+    assert!(codec
+        .encode(
+            PaddingFrame::new(crate::framing::MAX_MESSAGE_PAYLOAD_LENGTH + 1),
+            &mut wire,
+        )
+        .is_err());
+    assert_eq!(wire, before);
+}
+
+#[test]
 fn codec_encode_oversized_payload() {
     let enc_km = [0x11u8; KEY_MATERIAL_LENGTH];
     let dec_km = [0x22u8; KEY_MATERIAL_LENGTH];
     let mut codec = EncryptingCodec::new(enc_km, dec_km);
     let big = BytesMut::from(vec![0u8; MAX_FRAME_PAYLOAD_LENGTH + 1].as_slice());
-    let mut dst = BytesMut::new();
+    let mut dst = BytesMut::from(&[0xA5, 0x5A][..]);
+    let before = dst.clone();
     let result = codec.encode(big, &mut dst);
     assert!(result.is_err());
+    assert_eq!(
+        dst, before,
+        "rejected input must not change the destination"
+    );
+
+    let mut wire = BytesMut::new();
+    codec
+        .encode(PayloadFrame::new(&[0x01, 0x02, 0x03]), &mut wire)
+        .unwrap();
+    let mut decoder = EncryptingCodec::new(dec_km, enc_km);
+    assert!(
+        matches!(decoder.decode(&mut wire), Ok(Some(Messages::Payload(data))) if data.as_slice() == [0x01, 0x02, 0x03])
+    );
 }
 
 #[test]

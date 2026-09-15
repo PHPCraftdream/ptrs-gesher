@@ -29,8 +29,6 @@ use crate::{
 use ptrs::trace;
 use tokio_util::bytes::{Buf, BufMut};
 
-const PAD: [u8; MAX_MESSAGE_PADDING_LENGTH] = [0u8; MAX_MESSAGE_PADDING_LENGTH];
-
 /// Discriminant for the v1 obfs4 protocol message types.
 #[derive(Debug, PartialEq)]
 pub enum MessageTypes {
@@ -78,6 +76,7 @@ pub enum Messages {
 }
 
 impl Messages {
+    #[cfg(test)]
     pub(crate) fn as_pt(&self) -> MessageTypes {
         match self {
             Messages::Payload(_) => MessageTypes::Payload,
@@ -86,28 +85,14 @@ impl Messages {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn marshall<T: BufMut>(&self, dst: &mut T) -> Result<(), FrameError> {
-        dst.put_u8(self.as_pt().into());
-        match self {
-            Messages::Payload(buf) => {
-                dst.put_u16(buf.len() as u16);
-                dst.put(&buf[..]);
-            }
-            Messages::PrngSeed(buf) => {
-                dst.put_u16(buf.len() as u16);
-                dst.put(&buf[..SEED_LENGTH]);
-            }
-            Messages::Padding(pad_len) => {
-                if *pad_len > MAX_MESSAGE_PADDING_LENGTH {
-                    return Err(FrameError::InvalidPayloadLength(*pad_len));
-                }
-                dst.put_u16(0u16);
-                if *pad_len > 0 {
-                    dst.put(&PAD[..*pad_len]);
-                }
-            }
-        }
-        Ok(())
+        let (payload, padding): (&[u8], usize) = match self {
+            Self::Payload(bytes) => (bytes, 0),
+            Self::PrngSeed(bytes) => (bytes, 0),
+            Self::Padding(length) => (&[], *length),
+        };
+        crate::framing::build_and_marshall(dst, self.as_pt().into(), payload, padding)
     }
 
     pub(crate) fn try_parse<T: BufMut + Buf>(buf: &mut T) -> Result<Self, FrameError> {
@@ -229,10 +214,12 @@ mod test {
 
     #[test]
     fn padding_oversized_returns_error() {
-        let msg = Messages::Padding(MAX_MESSAGE_PADDING_LENGTH + 1);
-        let mut buf = BytesMut::new();
+        let msg = Messages::Padding(MAX_MESSAGE_PAYLOAD_LENGTH + 1);
+        let mut buf = BytesMut::from(&[0xA5, 0x5A][..]);
+        let before = buf.clone();
         let result = msg.marshall(&mut buf);
         assert!(result.is_err());
+        assert_eq!(buf, before);
     }
 
     #[test]

@@ -8,10 +8,20 @@
 
 use std::time::Duration;
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
-use obfs4::Server;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use obfs4::{Obfs4Stream, Server};
+use tokio::io::{AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::runtime::Runtime;
+
+type DuplexObfs4Stream = Obfs4Stream<tokio::io::DuplexStream>;
+
+struct Tunnel {
+    reader: ReadHalf<DuplexObfs4Stream>,
+    writer: WriteHalf<DuplexObfs4Stream>,
+    server: tokio::task::JoinHandle<()>,
+    tx: [u8; 4096],
+    rx: [u8; 8192],
+}
 
 fn fast_criterion() -> Criterion {
     Criterion::default()
@@ -30,10 +40,7 @@ fn rt() -> Runtime {
         .unwrap()
 }
 
-/// Establish a fresh obfs4 tunnel, run a one-shot N-byte echo, drop the tunnel.
-/// Measures *steady-state* throughput because handshake is amortised across
-/// the full payload — for handshake latency see `handshake_bench`.
-async fn echo_n_bytes(n: usize) {
+async fn establish_tunnel() -> Tunnel {
     let (c, s) = tokio::io::duplex(64 * 1024);
     let server = Server::getrandom();
     let client_cb = server.client_params();
@@ -42,54 +49,72 @@ async fn echo_n_bytes(n: usize) {
         let stream = server.wrap(s).await.unwrap();
         let (mut r, mut w) = tokio::io::split(stream);
         tokio::io::copy(&mut r, &mut w).await.unwrap();
+        w.shutdown().await.unwrap();
     });
 
     let client = client_cb.build();
     let stream = client.wrap(c).await.unwrap();
-    let (mut r, mut w) = tokio::io::split(stream);
+    let (r, w) = tokio::io::split(stream);
 
-    let writer = tokio::spawn(async move {
-        let chunk = vec![0u8; 4096];
+    Tunnel {
+        reader: r,
+        writer: w,
+        server: server_handle,
+        tx: [0u8; 4096],
+        rx: [0u8; 8192],
+    }
+}
+
+async fn transfer_n_bytes(tunnel: &mut Tunnel, n: usize) {
+    let Tunnel {
+        reader,
+        writer,
+        tx,
+        rx,
+        ..
+    } = tunnel;
+    let send = async {
         let mut sent = 0usize;
         while sent < n {
-            let remaining = n - sent;
-            let take = remaining.min(chunk.len());
-            w.write_all(&chunk[..take]).await.unwrap();
+            let take = (n - sent).min(tx.len());
+            writer.write_all(&tx[..take]).await.unwrap();
             sent += take;
         }
-        w.flush().await.unwrap();
-        // half-close so the echo loop on the server eventually terminates
-        drop(w);
-    });
-
-    let mut buf = vec![0u8; 8192];
-    let mut received = 0usize;
-    while received < n {
-        let got = r.read(&mut buf).await.unwrap();
-        if got == 0 {
-            break;
+        writer.flush().await.unwrap();
+    };
+    let receive = async {
+        let mut received = 0usize;
+        while received < n {
+            let take = (n - received).min(rx.len());
+            reader.read_exact(&mut rx[..take]).await.unwrap();
+            received += take;
         }
-        received += got;
-    }
-    assert_eq!(received, n, "echo lost bytes");
+    };
+    let ((), ()) = tokio::join!(send, receive);
+}
 
-    writer.await.unwrap();
-    server_handle.abort();
+async fn timed_transfers(size: usize, iterations: u64) -> Duration {
+    let mut tunnel = establish_tunnel().await;
+    let start = tokio::time::Instant::now();
+    for _ in 0..iterations {
+        transfer_n_bytes(&mut tunnel, size).await;
+    }
+    let elapsed = start.elapsed();
+
+    tunnel.writer.shutdown().await.unwrap();
+    while tunnel.reader.read(&mut tunnel.rx).await.unwrap() != 0 {}
+    tunnel.server.await.unwrap();
+    elapsed
 }
 
 fn bench_tunnel_throughput(c: &mut Criterion) {
     let rt = rt();
     let mut group = c.benchmark_group("obfs4_tunnel_throughput");
-    // Use 1KB and 32KB; the duplex buffer is 64KB so 32KB still fits in one
-    // wakeup and lets us see if larger chunks amortise framing overhead.
-    // Large size only; the small case is dominated by setup overhead
-    // and adds no signal proportional to its wall-clock cost.
     let size: usize = 32 * 1024;
     group.throughput(Throughput::Bytes(size as u64));
     group.bench_with_input(BenchmarkId::from_parameter(size), &size, |b, &size| {
-        b.to_async(&rt).iter(|| async move {
-            echo_n_bytes(black_box(size)).await;
-        });
+        b.to_async(&rt)
+            .iter_custom(|iterations| async move { timed_transfers(size, iterations).await });
     });
     group.finish();
 }
@@ -104,11 +129,15 @@ fn bench_handshake_only(c: &mut Criterion) {
             let client = server.client_params().build();
 
             let server_handle = tokio::spawn(async move {
-                let _ = server.wrap(ss).await.unwrap();
+                let mut stream = server.wrap(ss).await.unwrap();
+                stream.shutdown().await.unwrap();
             });
 
-            let _client_stream = client.wrap(cs).await.unwrap();
-            server_handle.await.unwrap();
+            let mut client_stream = client.wrap(cs).await.unwrap();
+            let (client_result, server_result) =
+                tokio::join!(client_stream.shutdown(), server_handle);
+            client_result.unwrap();
+            server_result.unwrap();
         });
     });
 }

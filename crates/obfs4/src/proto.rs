@@ -10,7 +10,7 @@ use crate::{
 };
 
 use bytes::{Buf, BytesMut};
-use futures::{Future, Sink, Stream};
+use futures::{Future, Stream};
 use pin_project::pin_project;
 use ptrs::trace;
 use sha2::{Digest, Sha256};
@@ -133,7 +133,7 @@ where
 
     /// Bytes decoded from a single obfs4 frame that did not fit in the caller's
     /// `ReadBuf` on a previous `poll_read`. A decoded frame can carry up to
-    /// `MAX_MESSAGE_PAYLOAD_LENGTH` (~1448B) of payload, which is larger than an
+    /// `MAX_MESSAGE_PAYLOAD_LENGTH` (~1427B) of payload, which is larger than an
     /// arbitrary caller buffer; the surplus is parked here and delivered on
     /// subsequent reads so no payload is lost (and `put_slice` never overflows).
     read_residual: BytesMut,
@@ -153,6 +153,9 @@ where
     /// Set to `true` after a write completes with IAT enabled; cleared when
     /// the sleep fires and the next write can proceed.
     iat_delay_pending: bool,
+
+    /// Reusable plaintext/wire staging for padding added after backpressure.
+    padding_scratch: BytesMut,
 }
 
 impl<T> O4Stream<T>
@@ -209,6 +212,7 @@ where
             // proceeds immediately without delay.
             iat_sleep: Box::pin(tokio::time::sleep(Duration::ZERO)),
             iat_delay_pending: false,
+            padding_scratch: BytesMut::with_capacity(framing::MAX_SEGMENT_LENGTH),
         };
         let mut buffered = std::mem::take(transport.stream.read_buffer_mut());
         while let Some(message) = transport.stream.codec_mut().decode(&mut buffered)? {
@@ -269,6 +273,7 @@ where
         stream: &mut Framed<T, framing::Obfs4Codec>,
         burst_len: usize,
         target: usize,
+        scratch: &mut BytesMut,
     ) -> Result<()> {
         let tail = burst_len % framing::MAX_SEGMENT_LENGTH;
         let pad = if target >= tail {
@@ -283,14 +288,15 @@ where
         } else {
             [Some(framing::MAX_MESSAGE_PAYLOAD_LENGTH), Some(pad)]
         };
-        let mut wire = BytesMut::new();
+        scratch.clear();
         for length in lengths.into_iter().flatten() {
-            let mut packet = BytesMut::new();
-            Messages::Padding(length).marshall(&mut packet)?;
-            stream.codec_mut().encode(packet, &mut wire)?;
+            stream
+                .codec_mut()
+                .encode(framing::PaddingFrame::new(length), scratch)?;
+            stream.write_buffer_mut().extend_from_slice(scratch);
+            scratch.clear();
         }
         // At most two extra frames; the next poll_ready applies backpressure.
-        stream.write_buffer_mut().extend_from_slice(&wire);
         Ok(())
     }
 }
@@ -333,7 +339,7 @@ where
         let mut this = self.as_mut().project();
 
         // determine if the stream is ready to send an event?
-        match futures::Sink::<&[u8]>::poll_ready(this.stream.as_mut(), cx) {
+        match futures::Sink::<framing::PayloadFrame<'_>>::poll_ready(this.stream.as_mut(), cx) {
             Poll::Pending => return Poll::Pending,
             Poll::Ready(Err(e)) => return Poll::Ready(Err(e.into())),
             Poll::Ready(Ok(())) => {}
@@ -355,29 +361,28 @@ where
         // while we have bytes in the buffer write `chunk_size` pieces
         // until we have less than that amount left.
         //
-        // A single `out_buf` is reused for every chunk and for the trailing
-        // frame: the codec's `Encoder` drains it as a `Buf` on `start_send`, and
-        // `clear()` resets the length while keeping the allocation.
         let mut len_sent: usize = 0;
         let mut burst_len = 0;
-        let mut out_buf = BytesMut::with_capacity(framing::MAX_MESSAGE_PAYLOAD_LENGTH);
         while msg_len - len_sent > chunk_size {
-            // package one chunk of the mesage as a payload
-            let payload = framing::Messages::Payload(buf[len_sent..len_sent + chunk_size].to_vec());
-
-            // send the marshalled payload
-            payload.marshall(&mut out_buf)?;
-            burst_len += out_buf.len() + framing::FRAME_OVERHEAD;
-            this.stream.as_mut().start_send(&mut out_buf)?;
+            let payload = &buf[len_sent..len_sent + chunk_size];
+            burst_len += framing::FRAME_OVERHEAD + framing::MESSAGE_OVERHEAD + payload.len();
+            futures::Sink::<framing::PayloadFrame<'_>>::start_send(
+                this.stream.as_mut(),
+                framing::PayloadFrame::new(payload),
+            )?;
 
             len_sent += chunk_size;
-            out_buf.clear();
 
             // determine if the stream is ready to send more data. if not back off
-            match futures::Sink::<&[u8]>::poll_ready(this.stream.as_mut(), cx) {
+            match futures::Sink::<framing::PayloadFrame<'_>>::poll_ready(this.stream.as_mut(), cx) {
                 Poll::Pending => {
                     let target = this.length_dist.sample().max(0) as usize;
-                    Self::pad_burst(this.stream.as_mut().get_mut(), burst_len, target)?;
+                    Self::pad_burst(
+                        this.stream.as_mut().get_mut(),
+                        burst_len,
+                        target,
+                        this.padding_scratch,
+                    )?;
                     if iat_mode != IAT::Off {
                         let delay =
                             Duration::from_micros(this.iat_dist.sample().max(0) as u64 * 100);
@@ -391,15 +396,20 @@ where
             }
         }
 
-        // Marshal the trailing (possibly partial) chunk.
-        let payload = framing::Messages::Payload(buf[len_sent..].to_vec());
-        payload.marshall(&mut out_buf)?;
-
         // Length padding remains enabled independently of IAT delays.
-        burst_len += out_buf.len() + framing::FRAME_OVERHEAD;
-        this.stream.as_mut().start_send(&mut out_buf)?;
+        let payload = &buf[len_sent..];
+        burst_len += framing::FRAME_OVERHEAD + framing::MESSAGE_OVERHEAD + payload.len();
+        futures::Sink::<framing::PayloadFrame<'_>>::start_send(
+            this.stream.as_mut(),
+            framing::PayloadFrame::new(payload),
+        )?;
         let target = this.length_dist.sample().max(0) as usize;
-        Self::pad_burst(this.stream.as_mut().get_mut(), burst_len, target)?;
+        Self::pad_burst(
+            this.stream.as_mut().get_mut(),
+            burst_len,
+            target,
+            this.padding_scratch,
+        )?;
 
         // ── Arm the IAT delay for the *next* write ──────────────────────
         if iat_mode != IAT::Off {

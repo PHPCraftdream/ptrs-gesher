@@ -53,7 +53,6 @@ tokio = { version = "1.42", features = ["io-util", "net", "macros", "sync", "sig
 tokio-util = "0.7.13"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter"] }
-url = "2.5.4"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

@@ -29,13 +29,16 @@ dependencies.
 | 1 | SOCKS5 client | parent (arti/tor) opens a SOCKS5 connection |
 | 2 | lyrebird (SOCKS5 accept loop) | extracts PT args from the SOCKS5 username/password |
 | 3 | `ClientBuilder::options(&args)` | parses `cert=` / `iat-mode=` into `station_pubkey` + `station_id` |
-| 4 | `ClientTransport::establish(tcp_future)` | awaits the TCP connect, then performs the ntor handshake |
+| 4 | `ClientTransport::establish(tcp_future)` | generates the ephemeral key before TCP connect, then performs the ntor handshake |
 | 5 | `Obfs4Codec` framed tunnel (`AsyncRead` + `AsyncWrite`) | XSalsa20-Poly1305 encryption, optional IAT padding |
 | 6 | Tor relay (via the bridge's ORPort) | — |
 
 ## Server data flow (obfs4)
 
-Mirror of the client flow, but entry is via `ServerBuilder`:
+The obfs4 library supports server handshakes through `ServerBuilder`. The table
+below shows the intended PT-manager integration: Lyrebird's
+`experimental-server` path remains incomplete, with the transport handshake and
+ORPort forwarding not yet wired into its connection handler.
 
 | # | Stage | What happens |
 |---|-------|--------------|
@@ -55,6 +58,11 @@ Mirror of the client flow, but entry is via `ServerBuilder`:
 | 4 | Server responds `101 Switching Protocols` | — |
 | 5 | Raw bidirectional byte stream | no WebSocket framing — just bytes |
 | 6 | Tor relay (via the bridge's ORPort) | — |
+
+Builder clones share lazy DNS and TLS state within their client context. DNS
+resolution and address attempts share the handshake deadline; earlier address
+attempts are bounded so later addresses can be tried. TLS session resumption is
+disabled when reusing the immutable client configuration.
 
 ## Where to add a new transport
 

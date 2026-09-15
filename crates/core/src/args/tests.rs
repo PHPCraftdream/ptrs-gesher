@@ -376,6 +376,10 @@ fn test_encode_smethod_args() {
             hashmap! {"=,\\"=>vec!["=", ",", "\\"]},
             "\\=\\,\\\\=\\=,\\=\\,\\\\=\\,,\\=\\,\\\\=\\\\",
         ),
+        (
+            hashmap! {""=>vec!["", "é"], "a"=>vec!["", "a,b"]},
+            "=,=é,a=,a=a\\,b",
+        ),
         (hashmap! {"secret"=>vec!["yes"]}, "secret=yes"),
         (
             hashmap! {"secret"=> vec!["nou"], "cache" => vec!["/tmp/cache"]},

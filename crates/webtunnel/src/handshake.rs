@@ -20,9 +20,13 @@ use std::time::Duration;
 use base64::Engine;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+use tokio::time::Instant;
 
 use crate::dns::{DohMode, DohResolver};
-use crate::{Error, PrefixStream, WebTunnelConfig, WebTunnelStream};
+use crate::{
+    Error, PrefixStream, PreparedConfig, ResolverCache, TlsContext, WebTunnelConfig,
+    WebTunnelStream,
+};
 
 /// Generate a Sec-WebSocket-Key (16 random bytes, base64-encoded).
 pub fn generate_websocket_key() -> String {
@@ -36,19 +40,18 @@ pub fn generate_websocket_key() -> String {
 
 /// Build the HTTP/1.1 Upgrade request bytes.
 pub fn build_upgrade_request(config: &WebTunnelConfig) -> String {
-    let parsed = url::Url::parse(&config.url).expect("url already validated");
-    let path = parsed.path();
-    let path = if path.is_empty() { "/" } else { path };
+    let prepared = config.prepare().expect("url already validated");
+    build_upgrade_request_prepared(&prepared)
+}
+
+fn build_upgrade_request_prepared(config: &PreparedConfig) -> String {
+    let parsed = &config.url;
+    let request_target = &config.request_target;
 
     // Include the query string in the request-target (RFC 7230 §5.3.1).
     // The Go reference implementation sends path?query; omitting the query
     // silently breaks bridges that embed auth tokens / routing in it.
-    let request_target = match parsed.query() {
-        Some(q) if !q.is_empty() => format!("{path}?{q}"),
-        _ => path.to_string(),
-    };
-
-    let host = config.tls_sni().expect("tls_sni already validated");
+    let host = config.sni.clone();
     let host = if host.parse::<Ipv6Addr>().is_ok() {
         format!("[{host}]")
     } else {
@@ -76,14 +79,18 @@ Sec-WebSocket-Version: 13\r\n\
 /// Returns `Ok((status_code, leftover_bytes))` on 101, or an error for
 /// any other status / parse failure. Lenient: only checks the status code.
 pub fn parse_response(buf: &[u8]) -> Result<(u16, &[u8]), Error> {
+    let (code, body_offset) = parse_response_complete(buf)?
+        .ok_or_else(|| Error::HttpParse("incomplete HTTP response".into()))?;
+    Ok((code, &buf[body_offset..]))
+}
+
+fn parse_response_complete(buf: &[u8]) -> Result<Option<(u16, usize)>, Error> {
     let mut headers = [httparse::EMPTY_HEADER; 32];
     let mut resp = httparse::Response::new(&mut headers);
 
     let body_offset = match resp.parse(buf) {
         Ok(httparse::Status::Complete(n)) => n,
-        Ok(httparse::Status::Partial) => {
-            return Err(Error::HttpParse("incomplete HTTP response".into()))
-        }
+        Ok(httparse::Status::Partial) => return Ok(None),
         Err(e) => return Err(Error::HttpParse(e.to_string())),
     };
 
@@ -96,7 +103,7 @@ pub fn parse_response(buf: &[u8]) -> Result<(u16, &[u8]), Error> {
         return Err(Error::Non101(format!("{code} {reason}")));
     }
 
-    Ok((code, &buf[body_offset..]))
+    Ok(Some((code, body_offset)))
 }
 
 /// Perform the full webtunnel handshake: TCP → (optional TLS) → HTTP Upgrade.
@@ -113,7 +120,19 @@ pub(crate) async fn connect_with_timeout(
     config: &WebTunnelConfig,
     timeout: Duration,
 ) -> Result<PrefixStream<WebTunnelStream>, Error> {
-    tokio::time::timeout(timeout, connect_inner(config))
+    let resolver = crate::resolver_cache();
+    let tls = crate::tls_context();
+    connect_with_timeout_context(config, timeout, &resolver, &tls).await
+}
+
+pub(crate) async fn connect_with_timeout_context(
+    config: &WebTunnelConfig,
+    timeout: Duration,
+    resolver: &ResolverCache,
+    tls: &TlsContext,
+) -> Result<PrefixStream<WebTunnelStream>, Error> {
+    let deadline = Instant::now() + timeout;
+    tokio::time::timeout_at(deadline, connect_inner(config, resolver, tls, deadline))
         .await
         .map_err(|_| {
             Error::Io(io::Error::new(
@@ -123,15 +142,20 @@ pub(crate) async fn connect_with_timeout(
         })?
 }
 
-async fn connect_inner(config: &WebTunnelConfig) -> Result<PrefixStream<WebTunnelStream>, Error> {
-    config.validate()?;
-    let tcp = open_tcp(config).await?;
+async fn connect_inner(
+    config: &WebTunnelConfig,
+    resolver: &ResolverCache,
+    tls: &TlsContext,
+    deadline: Instant,
+) -> Result<PrefixStream<WebTunnelStream>, Error> {
+    let prepared = config.prepare()?;
+    let tcp = open_tcp(&prepared, resolver, deadline).await?;
 
-    if config.use_tls() {
-        let tls_stream = tls_connect(config, tcp).await?;
-        upgrade_and_return(tls_stream, config).await
+    if prepared.use_tls {
+        let tls_stream = tls_connect(&prepared, tcp, tls).await?;
+        upgrade_and_return(tls_stream, &prepared).await
     } else {
-        upgrade_and_return(tcp, config).await
+        upgrade_and_return(tcp, &prepared).await
     }
 }
 
@@ -146,29 +170,80 @@ async fn connect_inner(config: &WebTunnelConfig) -> Result<PrefixStream<WebTunne
 /// Literal IP overrides bypass DNS. Hostname overrides honor `doh_mode`.
 /// `doh_mode=Off` keeps backwards-compatible behaviour for anyone who
 /// explicitly opts out.
-async fn open_tcp(config: &WebTunnelConfig) -> Result<TcpStream, Error> {
-    let (host, port) = config.connect_host_and_port()?;
+async fn open_tcp(
+    config: &PreparedConfig,
+    resolver_cache: &ResolverCache,
+    deadline: Instant,
+) -> Result<TcpStream, Error> {
+    let host = &config.host;
+    let port = config.port;
 
     // Literal addresses need neither encrypted nor system DNS.
     if let Ok(ip) = host.parse::<IpAddr>() {
-        return TcpStream::connect(SocketAddr::new(ip, port))
+        return connect_first_until(&[SocketAddr::new(ip, port)], deadline, TcpStream::connect)
             .await
             .map_err(Error::from);
     }
 
     match config.doh_mode {
-        DohMode::Off => TcpStream::connect((host.as_str(), port))
-            .await
-            .map_err(Error::from),
+        DohMode::Off => connect_system(host, port, deadline).await,
         DohMode::Strict => {
-            let resolver = DohResolver::with_default_pool().map_err(Error::from)?;
-            connect_via_doh_strict(&resolver, &host, port).await
+            let resolver = get_resolver(resolver_cache).map_err(Error::from)?;
+            connect_via_doh_strict_until(&resolver, host, port, deadline).await
         }
         DohMode::Fallback => {
-            let resolver = DohResolver::with_default_pool().ok();
-            connect_via_doh_fallback(resolver.as_ref(), &host, port).await
+            let resolver = get_resolver(resolver_cache).ok();
+            connect_via_doh_fallback_until(resolver.as_deref(), host, port, deadline).await
         }
     }
+}
+
+fn get_resolver(cache: &ResolverCache) -> io::Result<Arc<DohResolver>> {
+    get_resolver_with(cache, || DohResolver::with_default_pool().map(Arc::new))
+}
+
+fn get_resolver_with<F>(cache: &ResolverCache, build: F) -> io::Result<Arc<DohResolver>>
+where
+    F: FnOnce() -> io::Result<Arc<DohResolver>>,
+{
+    cache.get_or_try_init(build)
+}
+
+async fn lookup_system(host: &str, port: u16) -> io::Result<Vec<SocketAddr>> {
+    let addrs = tokio::net::lookup_host((host, port)).await?;
+    let addrs: Vec<_> = addrs.collect();
+    if addrs.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            "system resolver returned no addresses",
+        ));
+    }
+    Ok(addrs)
+}
+
+async fn connect_system(host: &str, port: u16, deadline: Instant) -> Result<TcpStream, Error> {
+    let addrs = lookup_until(deadline, lookup_system(host, port))
+        .await
+        .map_err(Error::from)?;
+    connect_first_until(&addrs, deadline, TcpStream::connect)
+        .await
+        .map_err(Error::from)
+}
+
+async fn lookup_until<F, T>(deadline: Instant, future: F) -> io::Result<T>
+where
+    F: std::future::Future<Output = io::Result<T>>,
+{
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if remaining.is_zero() {
+        return Err(io::Error::new(
+            io::ErrorKind::TimedOut,
+            "connection deadline elapsed",
+        ));
+    }
+    tokio::time::timeout(remaining, future)
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "resolution attempt timed out"))?
 }
 
 /// Strict path: DoH only. On any failure (lookup error or every
@@ -176,16 +251,73 @@ async fn open_tcp(config: &WebTunnelConfig) -> Result<TcpStream, Error> {
 /// to the system resolver. This is the §F1 invariant the
 /// censorship-resistance use case depends on.
 ///
-/// Exposed at `pub(crate)` so tests can drive it with a `DohResolver`
-/// built from a known-unreachable pool — that exercises the "all DoH
-/// failed" branch without needing a real network outage.
-pub(crate) async fn connect_via_doh_strict(
+async fn connect_via_doh_strict_until(
     resolver: &DohResolver,
     host: &str,
     port: u16,
+    deadline: Instant,
 ) -> Result<TcpStream, Error> {
-    let addrs = resolver.resolve(host, port).await.map_err(Error::from)?;
-    connect_first(&addrs).await.map_err(Error::from)
+    connect_strict_with(
+        || resolver.resolve(host, port),
+        || lookup_system(host, port),
+        deadline,
+        TcpStream::connect,
+    )
+    .await
+    .map_err(Error::from)
+}
+
+async fn connect_strict_with<R, RFut, S, SFut, F, Fut>(
+    resolve: R,
+    _system: S,
+    deadline: Instant,
+    mut dial: F,
+) -> io::Result<TcpStream>
+where
+    R: FnOnce() -> RFut,
+    RFut: std::future::Future<Output = io::Result<Vec<SocketAddr>>>,
+    S: FnOnce() -> SFut,
+    SFut: std::future::Future<Output = io::Result<Vec<SocketAddr>>>,
+    F: FnMut(SocketAddr) -> Fut,
+    Fut: std::future::Future<Output = io::Result<TcpStream>>,
+{
+    let addrs = lookup_until(deadline, resolve()).await?;
+    connect_first_until(&addrs, deadline, &mut dial).await
+}
+
+const FALLBACK_SYSTEM_RESERVE: Duration = Duration::from_secs(5);
+
+async fn connect_fallback_with<D, DFut, S, SFut, F, Fut>(
+    doh: Option<D>,
+    system: S,
+    deadline: Instant,
+    mut dial: F,
+) -> io::Result<TcpStream>
+where
+    D: FnOnce() -> DFut,
+    DFut: std::future::Future<Output = io::Result<Vec<SocketAddr>>>,
+    S: FnOnce() -> SFut,
+    SFut: std::future::Future<Output = io::Result<Vec<SocketAddr>>>,
+    F: FnMut(SocketAddr) -> Fut,
+    Fut: std::future::Future<Output = io::Result<TcpStream>>,
+{
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    let reserve = FALLBACK_SYSTEM_RESERVE.min(remaining / 2);
+    let doh_deadline = deadline - reserve;
+
+    if let Some(resolve) = doh {
+        if doh_deadline > Instant::now() {
+            if let Ok(addrs) = lookup_until(doh_deadline, resolve()).await {
+                if let Ok(stream) = connect_first_until(&addrs, doh_deadline, &mut dial).await {
+                    return Ok(stream);
+                }
+            }
+        }
+    }
+
+    let addrs = lookup_until(deadline, system()).await?;
+    let stream = connect_first_until(&addrs, deadline, &mut dial).await?;
+    Ok(stream)
 }
 
 /// Fallback path: DoH first, system DNS on full DoH failure. A
@@ -197,34 +329,86 @@ pub(crate) async fn connect_via_doh_strict(
 /// `resolver` is `Option` so the caller can pass `None` when the
 /// resolver itself failed to build — fallback still tries the system
 /// resolver in that case, matching the "best-effort" contract.
+#[cfg(test)]
 pub(crate) async fn connect_via_doh_fallback(
     resolver: Option<&DohResolver>,
     host: &str,
     port: u16,
 ) -> Result<TcpStream, Error> {
-    if let Some(r) = resolver {
-        if let Ok(addrs) = r.resolve(host, port).await {
-            if let Ok(stream) = connect_first(&addrs).await {
-                return Ok(stream);
-            }
-        }
-    }
-    TcpStream::connect((host, port)).await.map_err(Error::from)
+    connect_via_doh_fallback_until(
+        resolver,
+        host,
+        port,
+        Instant::now() + crate::DEFAULT_HANDSHAKE_TIMEOUT,
+    )
+    .await
+}
+
+async fn connect_via_doh_fallback_until(
+    resolver: Option<&DohResolver>,
+    host: &str,
+    port: u16,
+    deadline: Instant,
+) -> Result<TcpStream, Error> {
+    connect_fallback_with(
+        resolver.map(|r| move || r.resolve(host, port)),
+        || lookup_system(host, port),
+        deadline,
+        TcpStream::connect,
+    )
+    .await
+    .map_err(Error::from)
 }
 
 /// Try each `SocketAddr` in order, returning the first successful TCP
 /// connection. If every attempt fails, return the last error.
 ///
-/// This is a thin sequential "happy-eyeballs-lite". A full RFC 8305
-/// happy-eyeballs (parallel v6/v4) is intentionally out of scope: at
-/// the bridge-handshake layer one extra RTT is acceptable, and the
-/// simpler implementation is easier to audit.
+/// Bound earlier attempts so a silent peer cannot starve later addresses.
+/// The last address may use the remaining handshake budget.
+const CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+
+#[cfg(test)]
 async fn connect_first(addrs: &[SocketAddr]) -> io::Result<TcpStream> {
+    connect_first_until(
+        addrs,
+        Instant::now() + crate::DEFAULT_HANDSHAKE_TIMEOUT,
+        TcpStream::connect,
+    )
+    .await
+}
+
+async fn connect_first_until<F, Fut>(
+    addrs: &[SocketAddr],
+    deadline: Instant,
+    mut dial: F,
+) -> io::Result<TcpStream>
+where
+    F: FnMut(SocketAddr) -> Fut,
+    Fut: std::future::Future<Output = io::Result<TcpStream>>,
+{
     let mut last_err: Option<io::Error> = None;
-    for &addr in addrs {
-        match TcpStream::connect(addr).await {
-            Ok(s) => return Ok(s),
-            Err(e) => last_err = Some(e),
+    for (index, &addr) in addrs.iter().enumerate() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "connection deadline elapsed",
+            ));
+        }
+        let attempt = if index + 1 == addrs.len() {
+            remaining
+        } else {
+            remaining.min(CONNECT_ATTEMPT_TIMEOUT)
+        };
+        match tokio::time::timeout(attempt, dial(addr)).await {
+            Err(_) => {
+                last_err = Some(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    format!("connection attempt to {addr} timed out"),
+                ))
+            }
+            Ok(Ok(s)) => return Ok(s),
+            Ok(Err(e)) => last_err = Some(e),
         }
     }
     Err(last_err.unwrap_or_else(|| {
@@ -236,40 +420,51 @@ async fn connect_first(addrs: &[SocketAddr]) -> io::Result<TcpStream> {
 }
 
 async fn tls_connect(
-    config: &WebTunnelConfig,
+    config: &PreparedConfig,
     tcp: TcpStream,
+    tls: &TlsContext,
 ) -> Result<tokio_rustls::client::TlsStream<TcpStream>, Error> {
-    let sni = config.tls_sni()?;
-    let server_name = rustls::pki_types::ServerName::try_from(sni)
+    let server_name = rustls::pki_types::ServerName::try_from(config.sni.clone())
         .map_err(|e| Error::Tls(format!("invalid SNI: {e}")))?;
 
-    let mut root_store = rustls::RootCertStore::empty();
-    root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
-
-    // No ALPN set — matches the Go client which leaves NextProtos empty.
-    let client_config = rustls::ClientConfig::builder()
-        .with_root_certificates(root_store)
-        .with_no_client_auth();
-
-    let connector = tokio_rustls::TlsConnector::from(Arc::new(client_config));
+    let client_config = tls_config(tls);
+    let connector = tokio_rustls::TlsConnector::from(client_config);
     let tls = connector
         .connect(server_name, tcp)
         .await
         .map_err(|e| Error::Tls(e.to_string()))?;
-
     Ok(tls)
+}
+
+fn tls_config(tls: &TlsContext) -> Arc<rustls::ClientConfig> {
+    tls.get_or_init(|| Arc::new(build_tls_config()))
+}
+
+fn build_tls_config() -> rustls::ClientConfig {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+
+    // No ALPN set — matches the Go client which leaves NextProtos empty.
+    let mut client_config = rustls::ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    // Keep the old per-connection privacy behavior: sharing a config must not
+    // enable TLS ticket resumption across otherwise independent handshakes.
+    client_config.resumption = rustls::client::Resumption::disabled();
+
+    client_config
 }
 
 /// Send the HTTP Upgrade request, read the 101 response, return the stream
 /// in raw-byte mode. `S` is either `TlsStream<TcpStream>` or `TcpStream`.
 async fn upgrade_and_return<S>(
     mut stream: S,
-    config: &WebTunnelConfig,
+    config: &PreparedConfig,
 ) -> Result<PrefixStream<WebTunnelStream>, Error>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin + StreamWrapper + 'static,
 {
-    let request = build_upgrade_request(config);
+    let request = build_upgrade_request_prepared(config);
     stream
         .write_all(request.as_bytes())
         .await
@@ -284,6 +479,7 @@ where
     // Status::Complete.
     let mut buf = vec![0u8; 4096];
     let mut total = 0usize;
+    let mut boundary = HeaderBoundary::default();
     loop {
         if total >= buf.len() {
             return Err(Error::Handshake("response headers too large".into()));
@@ -297,33 +493,52 @@ where
         }
         total += n;
 
-        let mut headers = [httparse::EMPTY_HEADER; 32];
-        let mut resp = httparse::Response::new(&mut headers);
-
-        match resp.parse(&buf[..total]) {
-            Ok(httparse::Status::Complete(body_offset)) => {
-                let code = resp
-                    .code
-                    .ok_or_else(|| Error::HttpParse("no status code".into()))?;
-                if code != 101 {
-                    let reason = resp.reason.unwrap_or("(no reason)");
-                    return Err(Error::Non101(format!("{code} {reason}")));
-                }
-
-                let leftover: Vec<u8> = buf[body_offset..total].to_vec();
-                if !leftover.is_empty() {
-                    crate::warn!(
-                        "webtunnel: {} trailing bytes after 101 — preserving in stream prefix",
-                        leftover.len()
-                    );
-                }
-
-                let inner = StreamWrapper::wrap(stream)?;
-                return Ok(PrefixStream::new(inner, leftover));
-            }
-            Ok(httparse::Status::Partial) => continue,
-            Err(e) => return Err(Error::HttpParse(e.to_string())),
+        let Some(header_end) = boundary.find(&buf[..total]) else {
+            continue;
+        };
+        let (_code, leftover_slice) = parse_response(&buf[..total])?;
+        let body_offset = total - leftover_slice.len();
+        if body_offset < header_end {
+            return Err(Error::HttpParse("invalid HTTP response boundary".into()));
         }
+        let leftover: Vec<u8> = buf[body_offset..total].to_vec();
+        if !leftover.is_empty() {
+            crate::warn!(
+                "webtunnel: {} trailing bytes after 101 — preserving in stream prefix",
+                leftover.len()
+            );
+        }
+
+        let inner = StreamWrapper::wrap(stream)?;
+        return Ok(PrefixStream::new(inner, leftover));
+    }
+}
+
+/// Incremental framing only; httparse validates the complete header.
+#[derive(Default)]
+struct HeaderBoundary {
+    scanned: usize,
+    line_start: usize,
+    saw_status_line: bool,
+}
+
+impl HeaderBoundary {
+    fn find(&mut self, bytes: &[u8]) -> Option<usize> {
+        while self.scanned < bytes.len() {
+            let index = self.scanned;
+            self.scanned += 1;
+            if bytes[index] != b'\n' {
+                continue;
+            }
+            let line = &bytes[self.line_start..index];
+            self.line_start = self.scanned;
+            let empty = line.is_empty() || line == b"\r";
+            if empty && self.saw_status_line {
+                return Some(self.scanned);
+            }
+            self.saw_status_line |= !empty;
+        }
+        None
     }
 }
 
@@ -346,198 +561,4 @@ impl StreamWrapper for TcpStream {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::WebTunnelConfig;
-    use ptrs::args::Args;
-
-    fn make_config(url: &str) -> WebTunnelConfig {
-        let mut args = Args::new();
-        args.add("url", url);
-        WebTunnelConfig::from_args(&args).unwrap()
-    }
-
-    #[test]
-    fn websocket_key_is_base64_24_chars() {
-        let key = generate_websocket_key();
-        assert_eq!(key.len(), 24);
-        assert!(base64::engine::general_purpose::STANDARD
-            .decode(&key)
-            .is_ok());
-    }
-
-    #[test]
-    fn websocket_key_is_random() {
-        let k1 = generate_websocket_key();
-        let k2 = generate_websocket_key();
-        assert_ne!(k1, k2);
-    }
-
-    #[test]
-    fn build_upgrade_request_format() {
-        let config = make_config("https://example.com/secret");
-        let req = build_upgrade_request(&config);
-        assert!(req.starts_with("GET /secret HTTP/1.1\r\n"));
-        assert!(req.contains("Host: example.com\r\n"));
-        assert!(req.contains("Upgrade: websocket\r\n"));
-        assert!(req.contains("Connection: Upgrade\r\n"));
-        assert!(req.contains("Sec-WebSocket-Key: "));
-        assert!(req.contains("Sec-WebSocket-Version: 13\r\n"));
-        assert!(req.ends_with("\r\n\r\n"));
-    }
-
-    #[test]
-    fn build_upgrade_request_root_path() {
-        let config = make_config("https://example.com");
-        let req = build_upgrade_request(&config);
-        assert!(req.starts_with("GET / HTTP/1.1\r\n"));
-    }
-
-    #[test]
-    fn parse_response_101_ok() {
-        let resp = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: upgrade\r\n\r\n";
-        let (code, leftover) = parse_response(resp).unwrap();
-        assert_eq!(code, 101);
-        assert!(leftover.is_empty());
-    }
-
-    #[test]
-    fn parse_response_101_with_leftover() {
-        let resp = b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\nEXTRADATA";
-        let (code, leftover) = parse_response(resp).unwrap();
-        assert_eq!(code, 101);
-        assert_eq!(leftover, b"EXTRADATA");
-    }
-
-    #[test]
-    fn parse_response_non_101() {
-        let resp = b"HTTP/1.1 404 Not Found\r\n\r\n";
-        let err = parse_response(resp).unwrap_err();
-        assert!(matches!(err, Error::Non101(_)));
-    }
-
-    #[test]
-    fn parse_response_incomplete() {
-        let resp = b"HTTP/1.1 101 Switch";
-        let err = parse_response(resp).unwrap_err();
-        assert!(matches!(err, Error::HttpParse(_)));
-    }
-
-    #[test]
-    fn parse_response_malformed() {
-        let resp = b"NOT HTTP AT ALL\r\n\r\n";
-        let err = parse_response(resp).unwrap_err();
-        assert!(matches!(err, Error::HttpParse(_)));
-    }
-
-    // -- DoH connect-path tests ------------------------------------------------
-    //
-    // These tests exercise the strict-vs-fallback decision logic without
-    // touching the network. The "unreachable" DoH pool uses 127.0.0.1 as
-    // its bootstrap IP: hickory will dial 127.0.0.1:443 to perform the DoH
-    // TLS handshake, which fails immediately with `ConnectionRefused` on a
-    // host with no service on that port — fast enough that the test never
-    // hangs and never has to talk to the real internet.
-    //
-    // The DoH-resolver build itself is fallible; in production we build
-    // anew per connect, so a bad pool can surface either as a build error
-    // (caught here by the empty-pool / IP-only test in `dns::resolver`) or
-    // a resolve error (caught here). The build-error path of fallback is
-    // covered by passing `None` for the resolver — same shape.
-
-    use std::net::{IpAddr, Ipv4Addr};
-
-    use crate::dns::endpoints::DohEndpoint;
-
-    /// A DoH pool whose only "endpoint" dials 127.0.0.1 — no TLS listener
-    /// on :443 there, so every lookup terminates with a connection error
-    /// without involving the network. Pinned `localhost.invalid` SNI
-    /// ensures `rustls` rejects the (non-existent) certificate.
-    const UNREACHABLE_ENDPOINT: DohEndpoint = DohEndpoint {
-        name: "unreachable-test",
-        sni: "localhost.invalid",
-        path: Some("/dns-query"),
-        bootstrap: &[IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1))],
-    };
-
-    /// §F1: `Strict` MUST surface an error when the DoH pool cannot
-    /// resolve. It MUST NOT silently fall through to the system DNS
-    /// resolver — that would defeat the censorship-resistance contract.
-    ///
-    /// We use an `.invalid` host (RFC 2606 reserved TLD — guaranteed
-    /// non-resolvable by any honest resolver) so a hypothetical leak
-    /// into the system resolver could not "rescue" the call. Combined
-    /// with an unreachable DoH pool the only path to success would be
-    /// a strict-mode bypass — which is exactly what this test is
-    /// guarding against. The companion `fallback_*` tests demonstrate
-    /// that the system-resolver path itself is wired up correctly.
-    #[tokio::test]
-    async fn strict_returns_err_when_doh_pool_unreachable() {
-        let resolver =
-            DohResolver::from_endpoints(&[UNREACHABLE_ENDPOINT]).expect("unreachable pool builds");
-
-        let result = connect_via_doh_strict(&resolver, "bridge.test.invalid", 443).await;
-        assert!(
-            result.is_err(),
-            "strict must NOT fall through to system DNS or any other resolver, but got Ok",
-        );
-    }
-
-    /// `Fallback` MUST recover via the system resolver when the DoH
-    /// pool is unreachable — that is its entire contract.
-    #[tokio::test]
-    async fn fallback_recovers_via_system_resolver() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-
-        let resolver =
-            DohResolver::from_endpoints(&[UNREACHABLE_ENDPOINT]).expect("unreachable pool builds");
-
-        let stream = connect_via_doh_fallback(Some(&resolver), "localhost", port)
-            .await
-            .expect("fallback must reach the system-resolved localhost");
-        // Sanity: stream is connected to the listener.
-        assert_eq!(stream.peer_addr().unwrap().port(), port);
-    }
-
-    /// `Fallback` with `resolver = None` (resolver-build failed) must
-    /// still try the system resolver. Same end behaviour as the case
-    /// above, exercising the resolver-absent branch.
-    #[tokio::test]
-    async fn fallback_with_no_resolver_still_uses_system_resolver() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let port = listener.local_addr().unwrap().port();
-
-        let stream = connect_via_doh_fallback(None, "localhost", port)
-            .await
-            .expect("fallback with None resolver must use system DNS");
-        assert_eq!(stream.peer_addr().unwrap().port(), port);
-    }
-
-    /// `connect_first` picks the first reachable address, skipping
-    /// unreachable ones. Two-element list where the first refuses and
-    /// the second accepts — must succeed and report the second port.
-    #[tokio::test]
-    async fn connect_first_picks_reachable_after_skipping_dead() {
-        let good = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let good_port = good.local_addr().unwrap().port();
-
-        // Port 1 on 127.0.0.1 is almost certainly closed; if it isn't,
-        // the test would skip past it via the "second succeeds" path.
-        let dead: SocketAddr = "127.0.0.1:1".parse().unwrap();
-        let alive: SocketAddr = format!("127.0.0.1:{good_port}").parse().unwrap();
-
-        let stream = connect_first(&[dead, alive]).await.expect("alive must win");
-        assert_eq!(stream.peer_addr().unwrap().port(), good_port);
-    }
-
-    /// `connect_first` returns the last error when no address is
-    /// reachable (and `AddrNotAvailable` for an empty input). The
-    /// empty-input shape is the regression guard for the helper's
-    /// "no addresses to connect to" branch.
-    #[tokio::test]
-    async fn connect_first_returns_error_on_empty_input() {
-        let err = connect_first(&[]).await.expect_err("empty must fail");
-        assert_eq!(err.kind(), io::ErrorKind::AddrNotAvailable);
-    }
-}
+mod tests;

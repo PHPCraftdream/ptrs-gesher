@@ -93,6 +93,12 @@ impl std::str::FromStr for DohMode {
 /// configured with every endpoint from [`DEFAULT_DOH`] (or a custom set
 /// supplied via [`DohResolver::from_endpoints`]); hickory's own
 /// multi-nameserver dispatch picks an upstream per query.
+///
+/// The Tokio runtime provider is handle-independent: constructing this value
+/// does not spawn work or capture a runtime. Hickory starts its background
+/// exchange tasks on the runtime that polls [`DohResolver::resolve`]. The
+/// client therefore shares this value only inside one builder context and can
+/// safely use separate contexts on separate runtimes.
 pub(crate) struct DohResolver {
     inner: TokioResolver,
 }

@@ -51,6 +51,7 @@ pub use messages_v1::{MessageTypes, Messages};
 
 mod codecs;
 pub use codecs::EncryptingCodec as Obfs4Codec;
+pub(crate) use codecs::{PaddingFrame, PayloadFrame};
 
 /// Handshake message types for the obfs4 framing layer.
 pub mod handshake;
@@ -73,8 +74,12 @@ pub(crate) const FRAME_OVERHEAD: usize = LENGTH_LENGTH + SECRET_BOX_OVERHEAD;
 /// per frame.
 pub(crate) const MAX_FRAME_PAYLOAD_LENGTH: usize = MAX_SEGMENT_LENGTH - FRAME_OVERHEAD;
 
-// pub(crate) const MAX_FRAME_LENGTH: usize = MAX_SEGMENT_LENGTH - LENGTH_LENGTH;
-// pub(crate) const MIN_FRAME_LENGTH: usize = FRAME_OVERHEAD - LENGTH_LENGTH;
+/// Message header size: type byte plus big-endian payload length.
+pub(crate) const MESSAGE_OVERHEAD: usize = 2 + 1;
+pub(crate) const MAX_MESSAGE_PAYLOAD_LENGTH: usize = MAX_FRAME_PAYLOAD_LENGTH - MESSAGE_OVERHEAD;
+
+pub(crate) const MAX_FRAME_LENGTH: usize = MAX_SEGMENT_LENGTH - LENGTH_LENGTH;
+pub(crate) const MIN_FRAME_LENGTH: usize = FRAME_OVERHEAD - LENGTH_LENGTH;
 
 pub(crate) const NONCE_PREFIX_LENGTH: usize = 16;
 // pub(crate) const NONCE_COUNTER_LENGTH: usize = 8;

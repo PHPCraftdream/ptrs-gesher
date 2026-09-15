@@ -78,11 +78,9 @@ fn bench_replay_filter_scaling(c: &mut Criterion) {
 fn bench_framing_build_and_marshall(c: &mut Criterion) {
     use obfs4::framing::build_and_marshall;
     let mut group = c.benchmark_group("framing");
-    // 1426 is the largest body `build_and_marshall` accepts: its guard rejects
-    // `data.len() + pad_len >= MAX_MESSAGE_PAYLOAD_LENGTH` (1427), so 1426 is the
-    // maximum single-message payload (the on-wire 1448B segment also carries the
-    // type/length header and the AEAD tag, which this layer does not add).
-    for &size in &[0usize, 64, 512, 1426] {
+    // 1427 is the largest body `build_and_marshall` accepts. The on-wire 1448B
+    // segment also carries the type/length header and AEAD tag.
+    for &size in &[0usize, 64, 512, 1427] {
         let payload = vec![0xABu8; size];
         // Throughput reports MB/s over the marshalled payload bytes. The 0B case
         // has zero throughput by definition, so only attach the counter when

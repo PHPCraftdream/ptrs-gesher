@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **obfs4**: preserve replay history when caller timestamps arrive out of order;
+  checking a duplicate at capacity no longer evicts an unexpired entry.
+- **lyrebird**: bound SOCKS5 negotiation to ten seconds, retain the safe-logging
+  guard, honor log levels, and preserve an embedding application's subscriber.
+  The additive `run_from_env()` entry point leaves CLI and logging configuration
+  to the embedding application.
+- **webtunnel**: give later addresses a chance after a stalled dial and reserve
+  time for system-DNS fallback within the overall handshake deadline.
+- **obfs4**: accept the maximum valid message body consistently and leave the
+  destination unchanged when message construction fails.
 - Update locked `rustls` to 0.23.45 to address
   [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285.html).
 - **lyrebird**: keep stdin EOF detection active during graceful shutdown and
@@ -17,6 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **lyrebird**: reject unsupported `TOR_PT_PROXY` values without copying proxy
   credentials or control characters into protocol output and error messages.
   An empty value consistently means that no upstream proxy is configured.
+
+### Changed
+
+- Encode obfs4 payloads through borrowed buffers and reuse padding scratch
+  storage. Build alias tables in linear time and sample with one OS RNG call.
+- Reuse lazy DNS and TLS state within a WebTunnel builder/client context;
+  shared TLS configuration keeps session resumption disabled.
+- Reduce temporary allocations in argument parsing and SMETHOD encoding.
+- Measure obfs4 throughput on an established tunnel, with concurrent reads and
+  writes and fully awaited cleanup. No new performance baseline is claimed.
 
 ## [0.5.3] - 2026-09-08
 

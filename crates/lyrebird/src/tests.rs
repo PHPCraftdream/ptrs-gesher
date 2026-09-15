@@ -138,7 +138,6 @@ async fn pt_args_auth_accepts_no_creds() {
 
 #[tokio::test]
 async fn dial_bridge_sets_tcp_nodelay() {
-    // Loopback listener so the dial completes synchronously.
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
     let _accept = tokio::spawn(async move { listener.accept().await });
@@ -378,13 +377,11 @@ async fn client_accept_loop_exits_on_pre_cancelled_token() {
     ctx.accept.cancel();
 
     let builder = Obfs4PT::client_builder();
-    let proxy_uri = url::Url::parse("data:,").expect("placeholder url");
-
     // The loop must return within 2 s.  On the old code (no break)
     // it would spin indefinitely and the timeout would fire.
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(2),
-        client_accept_loop(listener, builder, proxy_uri, ctx),
+        client_accept_loop(listener, builder, ctx),
     )
     .await;
 
@@ -486,7 +483,6 @@ async fn client_handle_connection_tunnels_through_obfs4_and_replies_itself() {
     let handler = tokio::spawn(client_handle_connection(
         lyrebird_side,
         builder,
-        url::Url::parse("data:,").unwrap(),
         client_addr,
     ));
 
@@ -559,7 +555,6 @@ async fn client_handle_connection_no_success_reply_when_bridge_not_obfs4() {
     let handler = tokio::spawn(client_handle_connection(
         lyrebird_side,
         builder,
-        url::Url::parse("data:,").unwrap(),
         client_addr,
     ));
 
@@ -770,13 +765,7 @@ async fn spawn_stack_with_active_tunnel(
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let socks_addr = listener.local_addr().unwrap();
     let builder = Obfs4PT::client_builder();
-    let proxy_uri = url::Url::parse("data:,").expect("placeholder url");
-    listeners.spawn(client_accept_loop(
-        listener,
-        builder,
-        proxy_uri,
-        ctx.clone(),
-    ));
+    listeners.spawn(client_accept_loop(listener, builder, ctx.clone()));
 
     // The parent (arti/tor stand-in) connects over real TCP and drives
     // the SOCKS5 handshake with the bridge-line args packed as user/pass.

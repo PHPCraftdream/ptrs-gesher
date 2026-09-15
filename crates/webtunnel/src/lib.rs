@@ -9,6 +9,7 @@ use std::{
     io,
     net::{SocketAddr, SocketAddrV4, SocketAddrV6},
     pin::Pin,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -145,16 +146,12 @@ impl WebTunnelConfig {
     }
 
     pub(crate) fn validate(&self) -> Result<(), Error> {
-        let url = url::Url::parse(&self.url).map_err(|e| Error::InvalidUrl(e.to_string()))?;
-        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
-            return Err(Error::InvalidUrl(
-                "expected an http or https URL with a host".into(),
-            ));
-        }
-        rustls::pki_types::ServerName::try_from(self.tls_sni()?)
-            .map_err(|e| Error::InvalidUrl(format!("invalid servername: {e}")))?;
-        self.connect_host_and_port()?;
+        let _ = self.prepare()?;
         Ok(())
+    }
+
+    fn prepare(&self) -> Result<PreparedConfig, Error> {
+        PreparedConfig::new(self)
     }
 
     /// Override the DoH resolution mode (chainable).
@@ -167,58 +164,16 @@ impl WebTunnelConfig {
     /// [`Self::connect_host_port`] but returns the host and port as
     /// separate values so the resolver can hand the hostname to DoH
     /// without re-parsing.
+    #[cfg(test)]
     pub(crate) fn connect_host_and_port(&self) -> Result<(String, u16), Error> {
-        if let Some(ref addr) = self.tcp_addr {
-            if let Ok(addr) = addr.parse::<SocketAddr>() {
-                return Ok((addr.ip().to_string(), addr.port()));
-            }
-            // `addr=` is a raw `host:port` (typically an IP) — split it
-            // for symmetry with the URL-derived path, even though the
-            // host part here is almost always already an IP and DoH is
-            // bypassed in that case.
-            let (host, port) = addr.rsplit_once(':').ok_or_else(|| {
-                Error::InvalidUrl(format!("addr= missing ':' (expected host:port): {addr}"))
-            })?;
-            if host.is_empty() || host.contains([':', '[', ']']) {
-                return Err(Error::InvalidUrl(format!("invalid addr= host: {host}")));
-            }
-            let port: u16 = port
-                .parse()
-                .map_err(|e| Error::InvalidUrl(format!("addr= invalid port {port:?}: {e}")))?;
-            return Ok((host.to_string(), port));
-        }
-        let parsed = url::Url::parse(&self.url)
-            .map_err(|e: url::ParseError| Error::InvalidUrl(e.to_string()))?;
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| Error::InvalidUrl("url has no host".into()))?
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .to_string();
-        let port = parsed
-            .port_or_known_default()
-            .ok_or_else(|| Error::InvalidUrl("cannot determine port from url scheme".into()))?;
-        Ok((host, port))
+        let prepared = self.prepare()?;
+        Ok((prepared.host, prepared.port))
     }
 
     /// The hostname used for the TLS SNI extension and the HTTP Host header.
+    #[cfg(test)]
     fn tls_sni(&self) -> Result<String, Error> {
-        if let Some(ref sni) = self.servername {
-            return Ok(sni
-                .trim_start_matches('[')
-                .trim_end_matches(']')
-                .to_string());
-        }
-        let parsed = url::Url::parse(&self.url)
-            .map_err(|e: url::ParseError| Error::InvalidUrl(e.to_string()))?;
-        parsed
-            .host_str()
-            .map(|host| {
-                host.trim_start_matches('[')
-                    .trim_end_matches(']')
-                    .to_string()
-            })
-            .ok_or_else(|| Error::InvalidUrl("url has no host".into()))
+        Ok(self.prepare()?.sni)
     }
 
     /// The host:port to actually connect to via TCP. Either `addr=` or the URL's host:port.
@@ -229,25 +184,103 @@ impl WebTunnelConfig {
     /// re-parse round-trip.
     #[cfg(test)]
     fn connect_host_port(&self) -> Result<String, Error> {
-        if let Some(ref addr) = self.tcp_addr {
-            return Ok(addr.clone());
-        }
-        let parsed = url::Url::parse(&self.url)
-            .map_err(|e: url::ParseError| Error::InvalidUrl(e.to_string()))?;
-        let host = parsed
-            .host_str()
-            .ok_or_else(|| Error::InvalidUrl("url has no host".into()))?;
-        let port = parsed
-            .port_or_known_default()
-            .ok_or_else(|| Error::InvalidUrl("cannot determine port from url scheme".into()))?;
+        let (host, port) = self.connect_host_and_port()?;
+        let host = if host.contains(':') {
+            format!("[{host}]")
+        } else {
+            host
+        };
         Ok(format!("{host}:{port}"))
     }
 
     /// Whether TLS should be used (true for `https://`, false for `http://`).
+    #[cfg(test)]
     fn use_tls(&self) -> bool {
-        url::Url::parse(&self.url)
-            .map(|u| u.scheme().eq_ignore_ascii_case("https"))
+        self.prepare()
+            .map(|prepared| prepared.use_tls)
             .unwrap_or(false)
+    }
+}
+
+/// Parsed, validated connection inputs. The public config remains mutable for
+/// callers, while one handshake uses one consistent snapshot.
+struct PreparedConfig {
+    url: url::Url,
+    request_target: String,
+    host: String,
+    port: u16,
+    sni: String,
+    use_tls: bool,
+    doh_mode: DohMode,
+}
+
+impl PreparedConfig {
+    fn new(config: &WebTunnelConfig) -> Result<Self, Error> {
+        let url = url::Url::parse(&config.url)
+            .map_err(|e: url::ParseError| Error::InvalidUrl(e.to_string()))?;
+        if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+            return Err(Error::InvalidUrl(
+                "expected an http or https URL with a host".into(),
+            ));
+        }
+
+        let (host, port) = if let Some(addr) = &config.tcp_addr {
+            if let Ok(socket) = addr.parse::<SocketAddr>() {
+                (socket.ip().to_string(), socket.port())
+            } else {
+                let (host, port) = addr.rsplit_once(':').ok_or_else(|| {
+                    Error::InvalidUrl(format!("addr= missing ':' (expected host:port): {addr}"))
+                })?;
+                if host.is_empty() || host.contains([':', '[', ']']) {
+                    return Err(Error::InvalidUrl(format!("invalid addr= host: {host}")));
+                }
+                let port = port
+                    .parse()
+                    .map_err(|e| Error::InvalidUrl(format!("addr= invalid port {port:?}: {e}")))?;
+                (host.to_string(), port)
+            }
+        } else {
+            let host = url
+                .host_str()
+                .ok_or_else(|| Error::InvalidUrl("url has no host".into()))?
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_string();
+            let port = url
+                .port_or_known_default()
+                .ok_or_else(|| Error::InvalidUrl("cannot determine port from url scheme".into()))?;
+            (host, port)
+        };
+        let sni = config
+            .servername
+            .as_deref()
+            .unwrap_or_else(|| url.host_str().unwrap_or_default())
+            .trim_start_matches('[')
+            .trim_end_matches(']')
+            .to_string();
+        rustls::pki_types::ServerName::try_from(sni.clone())
+            .map_err(|e| Error::InvalidUrl(format!("invalid servername: {e}")))?;
+
+        let path = if url.path().is_empty() {
+            "/"
+        } else {
+            url.path()
+        };
+        let request_target = match url.query() {
+            Some(query) if !query.is_empty() => format!("{path}?{query}"),
+            _ => path.to_string(),
+        };
+
+        let use_tls = url.scheme().eq_ignore_ascii_case("https");
+        Ok(Self {
+            url,
+            request_target,
+            host,
+            port,
+            sni,
+            use_tls,
+            doh_mode: config.doh_mode,
+        })
     }
 }
 
@@ -260,6 +293,54 @@ impl WebTunnelConfig {
 pub struct WebTunnelBuilder {
     config: Option<WebTunnelConfig>,
     timeout: Duration,
+    tls: TlsContext,
+    resolver: ResolverCache,
+}
+
+type TlsContext = Arc<ClientCache<rustls::ClientConfig>>;
+type ResolverCache = Arc<ClientCache<dns::DohResolver>>;
+
+#[derive(Debug)]
+struct ClientCache<T> {
+    value: Mutex<Option<Arc<T>>>,
+}
+
+impl<T> ClientCache<T> {
+    fn new() -> Self {
+        Self {
+            value: Mutex::new(None),
+        }
+    }
+
+    fn get_or_try_init<E>(&self, build: impl FnOnce() -> Result<Arc<T>, E>) -> Result<Arc<T>, E> {
+        // Only complete values are published; an initialization panic leaves
+        // the slot empty. The guard never crosses an async suspension point.
+        let mut value = self
+            .value
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Some(value) = value.as_ref() {
+            return Ok(Arc::clone(value));
+        }
+        let initialized = build()?;
+        *value = Some(Arc::clone(&initialized));
+        Ok(initialized)
+    }
+
+    fn get_or_init(&self, build: impl FnOnce() -> Arc<T>) -> Arc<T> {
+        match self.get_or_try_init(|| Ok::<_, std::convert::Infallible>(build())) {
+            Ok(value) => value,
+            Err(never) => match never {},
+        }
+    }
+}
+
+fn tls_context() -> TlsContext {
+    Arc::new(ClientCache::new())
+}
+
+fn resolver_cache() -> ResolverCache {
+    Arc::new(ClientCache::new())
 }
 
 impl Default for WebTunnelBuilder {
@@ -267,6 +348,8 @@ impl Default for WebTunnelBuilder {
         Self {
             config: None,
             timeout: DEFAULT_HANDSHAKE_TIMEOUT,
+            tls: tls_context(),
+            resolver: resolver_cache(),
         }
     }
 }
@@ -296,6 +379,8 @@ where
         WebTunnelClient {
             config: self.config.clone(),
             timeout: self.timeout,
+            tls: Arc::clone(&self.tls),
+            resolver: Arc::clone(&self.resolver),
         }
     }
 
@@ -334,6 +419,8 @@ where
 pub struct WebTunnelClient {
     config: Option<WebTunnelConfig>,
     timeout: Duration,
+    tls: TlsContext,
+    resolver: ResolverCache,
 }
 
 impl<InRW, InErr> ptrs::ClientTransport<InRW, InErr> for WebTunnelClient
@@ -354,7 +441,13 @@ where
         drop(input);
         Box::pin(async move {
             let config = self.config.ok_or(Error::MissingUrl)?;
-            handshake::connect_with_timeout(&config, self.timeout).await
+            handshake::connect_with_timeout_context(
+                &config,
+                self.timeout,
+                &self.resolver,
+                &self.tls,
+            )
+            .await
         })
     }
 
@@ -365,7 +458,13 @@ where
         drop(io);
         Box::pin(async move {
             let config = self.config.ok_or(Error::MissingUrl)?;
-            handshake::connect_with_timeout(&config, self.timeout).await
+            handshake::connect_with_timeout_context(
+                &config,
+                self.timeout,
+                &self.resolver,
+                &self.tls,
+            )
+            .await
         })
     }
 

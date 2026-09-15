@@ -11,6 +11,7 @@
 use crate::common::drbg;
 
 use std::cmp::{max, min};
+use std::collections::VecDeque;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
@@ -57,6 +58,11 @@ impl WeightedDist {
 
     /// Generates a random value according to the generated distribution.
     pub fn sample(&self) -> i32 {
+        let mut buf = [0_u8; 16];
+        // Both random draws are independent OS-CSPRNG output. Keep this
+        // outside the mutex so sampling does not hold the lock during I/O.
+        getrandom::getrandom(&mut buf).expect("system RNG failure during obfs4 length sampling");
+
         let dist = self.0.lock().unwrap();
 
         // Invariant: `values`/`prob`/`alias` are non-empty after construction.
@@ -71,21 +77,16 @@ impl WeightedDist {
             "WeightedDist sampled before tables were populated (empty values)"
         );
 
-        let mut buf = [0_u8; 8];
         // Generate a fair die roll fro a $n$-sided die; call the side $i$.
-        // A failure of the OS CSPRNG is not recoverable here; fail fast with a
-        // clear message rather than a bare unwrap.
-        getrandom::getrandom(&mut buf).expect("system RNG failure during obfs4 length sampling");
 
         #[cfg(target_pointer_width = "64")]
-        let i = usize::from_ne_bytes(buf) % dist.values.len();
+        let i = usize::from_ne_bytes(buf[..8].try_into().unwrap()) % dist.values.len();
 
         #[cfg(target_pointer_width = "32")]
         let i = usize::from_ne_bytes(buf[0..4].try_into().unwrap()) % dist.values.len();
 
         // flip a coin that comes up heads with probability $prob[i]$.
-        getrandom::getrandom(&mut buf).expect("system RNG failure during obfs4 length sampling");
-        let bits = u64::from_le_bytes(buf);
+        let bits = u64::from_le_bytes(buf[8..].try_into().unwrap());
         let f = (bits >> 11) as f64 / ((1u64 << 53) as f64);
         // f is now uniform in [0.0, 1.0)
         if f < dist.prob[i] {
@@ -169,14 +170,14 @@ impl InnerWeightedDist {
         // multiply each probability by $n$.
         let mut scaled: Vec<f64> = self.weights.iter().map(|f| f * (n as f64) / sum).collect();
         // if $p$ < 1$ add $i$ to $small$.
-        let mut small: Vec<usize> = scaled
+        let mut small: VecDeque<usize> = scaled
             .iter()
             .enumerate()
             .filter(|(_, f)| **f < 1.0)
             .map(|(i, _)| i)
             .collect();
         // if $p$ >= 1$ add $i& to $large$.
-        let mut large: Vec<usize> = scaled
+        let mut large: VecDeque<usize> = scaled
             .iter()
             .enumerate()
             .filter(|(_, f)| **f >= 1.0)
@@ -192,30 +193,30 @@ impl InnerWeightedDist {
         // if $p_g < 1$ add $g$ to $small$.
         // otherwise add $g$ to $large$ as %p_g >= 1$
         while !small.is_empty() && !large.is_empty() {
-            let l = small.remove(0);
-            let g = large.remove(0);
+            let l = small.pop_front().expect("small is non-empty");
+            let g = large.pop_front().expect("large is non-empty");
 
             prob[l] = scaled[l];
             alias[l] = g;
 
             scaled[g] = scaled[g] + scaled[l] - 1.0;
             if scaled[g] < 1.0 {
-                small.push(g);
+                small.push_back(g);
             } else {
-                large.push(g);
+                large.push_back(g);
             }
         }
 
         // while $large$ is not empty, remove the first element ($g$) and
         // set $prob[g] = 1$.
-        while !large.is_empty() {
-            prob[large.remove(0)] = 1.0;
+        while let Some(g) = large.pop_front() {
+            prob[g] = 1.0;
         }
 
         // while $small$ is not empty, remove the first element ($l$) and
         // set $prob[l] = 1$.
-        while !small.is_empty() {
-            prob[small.remove(0)] = 1.0;
+        while let Some(l) = small.pop_front() {
+            prob[l] = 1.0;
         }
 
         self.prob = prob;
@@ -232,15 +233,14 @@ impl fmt::Display for WeightedDist {
 
 impl fmt::Display for InnerWeightedDist {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let mut buf: String = "[ ".into();
-
+        f.write_str("[ ")?;
         for (i, v) in self.values.iter().enumerate() {
             let p = self.weights[i];
             if p > 0.01 {
-                buf.push_str(&format!("{v}: {p}, "));
+                write!(f, "{v}: {p}, ")?;
             }
         }
-        write!(f, "]")
+        f.write_str("]")
     }
 }
 
@@ -287,5 +287,36 @@ mod test {
             assert!((10..=50).contains(&s), "sample {s} out of range [10, 50]");
         }
         Ok(())
+    }
+
+    #[test]
+    fn display_is_meaningful_and_deterministic() {
+        let dist = InnerWeightedDist {
+            min_value: 0,
+            max_value: 3,
+            biased: false,
+            values: vec![1, 2, 3],
+            weights: vec![0.02, 0.01, 0.5],
+            alias: vec![0, 1, 2],
+            prob: vec![1.0, 1.0, 1.0],
+        };
+
+        assert_eq!(dist.to_string(), "[ 1: 0.02, 3: 0.5, ]");
+    }
+
+    #[test]
+    fn alias_tables_preserve_fifo_assignment() {
+        let mut dist = InnerWeightedDist {
+            min_value: 0,
+            max_value: 3,
+            biased: false,
+            values: vec![0, 1, 2, 3],
+            weights: vec![1.0, 4.0, 2.0, 1.0],
+            alias: vec![],
+            prob: vec![],
+        };
+        dist.gen_tables();
+        assert_eq!(dist.alias, [1, 0, 1, 2]);
+        assert_eq!(dist.prob, [0.5, 1.0, 0.5, 0.5]);
     }
 }

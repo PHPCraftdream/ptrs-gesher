@@ -1,6 +1,7 @@
 use super::*;
 use base64::Engine;
 use ptrs::ClientBuilder;
+use std::sync::Arc;
 use tokio::net::TcpStream;
 
 #[test]
@@ -330,6 +331,15 @@ fn builder_accepts_valid_args() {
     let mut builder = WebTunnelBuilder::default();
     let args = make_args(&[("url", "https://example.com/secret")]);
     <WebTunnelBuilder as ptrs::ClientBuilder<TcpStream>>::options(&mut builder, &args).unwrap();
+}
+
+#[test]
+fn built_clients_share_immutable_connection_context() {
+    let builder = WebTunnelBuilder::default();
+    let first = <WebTunnelBuilder as ClientBuilder<TcpStream>>::build(&builder);
+    let second = <WebTunnelBuilder as ClientBuilder<TcpStream>>::build(&builder);
+    assert!(Arc::ptr_eq(&first.tls, &second.tls));
+    assert!(Arc::ptr_eq(&first.resolver, &second.resolver));
 }
 
 #[test]
