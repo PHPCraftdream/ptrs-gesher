@@ -2,6 +2,7 @@ use super::*;
 
 use std::{
     ffi::OsString,
+    fmt,
     io::{self, Write},
     process::{Command, Stdio},
     sync::{Arc, Mutex},
@@ -31,6 +32,22 @@ fn emit_owned_new_trace(message: &'static str) {
 
 fn owned_span(role: &str) -> tracing::Span {
     tracing::info_span!(target: "owned_logging", "owned_span", role)
+}
+
+struct OwnedDebugRole(&'static str);
+
+impl fmt::Debug for OwnedDebugRole {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+fn owned_debug_span(role: &'static str) -> tracing::Span {
+    tracing::info_span!(
+        target: "owned_logging",
+        "owned_debug_span",
+        role = tracing::field::debug(OwnedDebugRole(role))
+    )
 }
 
 #[derive(Clone)]
@@ -188,7 +205,7 @@ fn owned_logging_reconfigures_transactionally_in_subprocess() {
         std::fs::create_dir_all(&reconfigured_dir).expect("create reconfigured directory");
         std::env::set_var(
             "RUST_LOG",
-            "owned_logging=info,owned_logging[owned_span{role=allowed}]=trace",
+            "owned_logging=info,owned_logging[owned_span{role=allowed}]=trace,owned_logging[owned_debug_span{role=^ALLOWED$}]=trace",
         );
         let guard = init_logging_recvr(
             true,
@@ -210,6 +227,8 @@ fn owned_logging_reconfigures_transactionally_in_subprocess() {
         emit_owned_trace("field-trace-denied");
         drop(_denied_guard);
 
+        let reentered = owned_span("allowed");
+        let debug_reentered = owned_debug_span("ALLOWED");
         std::env::remove_var("RUST_LOG");
         let missing_dir = statedir.join("missing");
         assert!(init_logging_recvr(
@@ -234,7 +253,25 @@ fn owned_logging_reconfigures_transactionally_in_subprocess() {
         emit_owned_debug("same-span-after-reconfigure");
         emit_owned_new_trace("new-callsite-inside-old-span");
         drop(migrated);
+
+        std::env::set_var(
+            "RUST_LOG",
+            "owned_logging=info,owned_logging[owned_span{role=allowed}]=trace,owned_logging[owned_debug_span{role=^ALLOWED$}]=trace",
+        );
+        let relaxed = init_logging_recvr(
+            true,
+            false,
+            "DEBUG",
+            reconfigured_dir.to_str().expect("UTF-8 temp path"),
+        )
+        .expect("relax logging with active span");
+        emit_owned_debug("same-span-after-relax");
+        emit_owned_trace("field-trace-allowed-after-relax");
+        drop(relaxed);
         drop(active_guard);
+        reentered.in_scope(|| emit_owned_trace("reentered-after-relax"));
+        debug_reentered.in_scope(|| emit_owned_trace("debug-field-after-relax"));
+        owned_span("denied").in_scope(|| emit_owned_trace("field-trace-denied-after-relax"));
 
         let no_file = init_logging_recvr(
             false,
@@ -276,8 +313,14 @@ fn owned_logging_reconfigures_transactionally_in_subprocess() {
         assert!(output.contains("first-log-event"));
         assert!(output.contains("event-after-failed-reconfigure"));
         assert!(!output.contains("same-span-after-reconfigure"));
-        assert!(reconfigured_output.contains("same-span-after-reconfigure"));
-        assert!(reconfigured_output.contains("new-callsite-inside-old-span"));
+        assert!(!output.contains("new-callsite-inside-old-span"));
+        assert!(!reconfigured_output.contains("same-span-after-reconfigure"));
+        assert!(!reconfigured_output.contains("new-callsite-inside-old-span"));
+        assert!(reconfigured_output.contains("same-span-after-relax"));
+        assert!(reconfigured_output.contains("field-trace-allowed-after-relax"));
+        assert!(!reconfigured_output.contains("field-trace-denied-after-relax"));
+        assert!(reconfigured_output.contains("reentered-after-relax"));
+        assert!(reconfigured_output.contains("debug-field-after-relax"));
         assert!(reconfigured_output.contains("event-after-file-reenabled"));
         assert!(reconfigured_output.contains("event-after-file-reenabled-log"));
         assert!(reconfigured_output.contains("new-span-after-reconfigure"));

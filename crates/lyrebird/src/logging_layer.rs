@@ -1,5 +1,7 @@
 use std::{
-    collections::{HashMap, HashSet},
+    cell::RefCell,
+    collections::HashMap,
+    fmt,
     sync::{Arc, Mutex, RwLock},
 };
 
@@ -14,8 +16,102 @@ pub(super) struct LogConfig {
 
 pub(super) struct ManagedLayer {
     pub(super) inner: Arc<RwLock<LogConfig>>,
-    spans: Mutex<HashMap<tracing::span::Id, Arc<tracing_subscriber::EnvFilter>>>,
+    spans: Mutex<HashMap<tracing::span::Id, SpanState>>,
     callsites: Arc<Mutex<Vec<&'static tracing::Metadata<'static>>>>,
+}
+
+#[derive(Clone)]
+struct SpanState {
+    metadata: &'static tracing::Metadata<'static>,
+    values: Vec<Option<StoredValue>>,
+}
+
+#[derive(Clone)]
+enum StoredValue {
+    Bool(bool),
+    F64(f64),
+    I64(i64),
+    U64(u64),
+    String(String),
+    Debug(String),
+}
+
+struct RawDebug(String);
+
+impl fmt::Debug for RawDebug {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl StoredValue {
+    fn as_value(&self) -> Box<dyn tracing::field::Value> {
+        match self {
+            Self::Bool(value) => Box::new(*value),
+            Self::F64(value) => Box::new(*value),
+            Self::I64(value) => Box::new(*value),
+            Self::U64(value) => Box::new(*value),
+            Self::String(value) => Box::new(value.clone()),
+            Self::Debug(value) => Box::new(tracing::field::debug(RawDebug(value.clone()))),
+        }
+    }
+}
+
+struct SpanValueVisitor<'a> {
+    metadata: &'static tracing::Metadata<'static>,
+    values: &'a mut [Option<StoredValue>],
+}
+
+impl SpanValueVisitor<'_> {
+    fn slot(&mut self, field: &tracing::field::Field) -> Option<&mut Option<StoredValue>> {
+        self.metadata
+            .fields()
+            .field(field.name())
+            .and_then(|field| self.values.get_mut(field.index()))
+    }
+}
+
+impl tracing::field::Visit for SpanValueVisitor<'_> {
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        if let Some(slot) = self.slot(field) {
+            *slot = Some(StoredValue::Bool(value));
+        }
+    }
+
+    fn record_f64(&mut self, field: &tracing::field::Field, value: f64) {
+        if let Some(slot) = self.slot(field) {
+            *slot = Some(StoredValue::F64(value));
+        }
+    }
+
+    fn record_i64(&mut self, field: &tracing::field::Field, value: i64) {
+        if let Some(slot) = self.slot(field) {
+            *slot = Some(StoredValue::I64(value));
+        }
+    }
+
+    fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+        if let Some(slot) = self.slot(field) {
+            *slot = Some(StoredValue::U64(value));
+        }
+    }
+
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        if let Some(slot) = self.slot(field) {
+            *slot = Some(StoredValue::String(value.to_owned()));
+        }
+    }
+
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn fmt::Debug) {
+        if let Some(slot) = self.slot(field) {
+            *slot = Some(StoredValue::Debug(format!("{value:?}")));
+        }
+    }
+}
+
+thread_local! {
+    static ACTIVE_SPANS: RefCell<Vec<tracing::span::Id>> = const { RefCell::new(Vec::new()) };
+    static BOUND_FILTER: RefCell<Option<Arc<tracing_subscriber::EnvFilter>>> = const { RefCell::new(None) };
 }
 
 type LayeredSubscriber = tracing_subscriber::layer::Layered<ManagedLayer, Registry>;
@@ -50,19 +146,6 @@ impl Layer<Registry> for ManagedLayer {
         let _ = <tracing_subscriber::EnvFilter as Layer<Registry>>::register_callsite(
             &*filter, metadata,
         );
-        let filters: Vec<_> = self
-            .spans
-            .lock()
-            .map(|spans| spans.values().cloned().collect())
-            .unwrap_or_default();
-        let mut registered = HashSet::from([Arc::as_ptr(&filter)]);
-        for active in filters {
-            if registered.insert(Arc::as_ptr(&active)) {
-                let _ = <tracing_subscriber::EnvFilter as Layer<Registry>>::register_callsite(
-                    &*active, metadata,
-                );
-            }
-        }
         tracing::subscriber::Interest::sometimes()
     }
 
@@ -111,8 +194,19 @@ impl Layer<Registry> for ManagedLayer {
         ctx: tracing_subscriber::layer::Context<'_, Registry>,
     ) {
         let filter = self.new_span_filter(&ctx);
+        let mut values = vec![None; attrs.metadata().fields().len()];
+        attrs.record(&mut SpanValueVisitor {
+            metadata: attrs.metadata(),
+            values: &mut values,
+        });
         if let Ok(mut spans) = self.spans.lock() {
-            spans.insert(id.clone(), Arc::clone(&filter));
+            spans.insert(
+                id.clone(),
+                SpanState {
+                    metadata: attrs.metadata(),
+                    values,
+                },
+            );
         }
         filter.on_new_span(attrs, id, ctx.clone());
         if let Ok(sink) = self.inner.read().map(|layer| Arc::clone(&layer.sink)) {
@@ -126,7 +220,15 @@ impl Layer<Registry> for ManagedLayer {
         values: &tracing::span::Record<'_>,
         ctx: tracing_subscriber::layer::Context<'_, Registry>,
     ) {
-        let filter = self.filter_for_id(span);
+        if let Ok(mut spans) = self.spans.lock() {
+            if let Some(state) = spans.get_mut(span) {
+                values.record(&mut SpanValueVisitor {
+                    metadata: state.metadata,
+                    values: &mut state.values,
+                });
+            }
+        }
+        let filter = self.new_span_filter(&ctx);
         filter.on_record(span, values, ctx.clone());
         if let Ok(sink) = self.inner.read().map(|layer| Arc::clone(&layer.sink)) {
             sink.on_record(span, values, ctx);
@@ -149,8 +251,10 @@ impl Layer<Registry> for ManagedLayer {
         id: &tracing::span::Id,
         ctx: tracing_subscriber::layer::Context<'_, Registry>,
     ) {
-        let filter = self.filter_for_id(id);
+        let filter = self.new_span_filter(&ctx);
+        self.replay_span(&filter, id, &ctx);
         filter.on_enter(id, ctx.clone());
+        ACTIVE_SPANS.with(|active| active.borrow_mut().push(id.clone()));
         if let Ok(sink) = self.inner.read().map(|layer| Arc::clone(&layer.sink)) {
             sink.on_enter(id, ctx);
         }
@@ -161,8 +265,17 @@ impl Layer<Registry> for ManagedLayer {
         id: &tracing::span::Id,
         ctx: tracing_subscriber::layer::Context<'_, Registry>,
     ) {
-        let filter = self.filter_for_id(id);
+        let filter = self.new_span_filter(&ctx);
         filter.on_exit(id, ctx.clone());
+        ACTIVE_SPANS.with(|active| {
+            let position = {
+                let active = active.borrow();
+                active.iter().rposition(|active_id| active_id == id)
+            };
+            if let Some(position) = position {
+                active.borrow_mut().remove(position);
+            }
+        });
         if let Ok(sink) = self.inner.read().map(|layer| Arc::clone(&layer.sink)) {
             sink.on_exit(id, ctx);
         }
@@ -173,7 +286,7 @@ impl Layer<Registry> for ManagedLayer {
         id: tracing::span::Id,
         ctx: tracing_subscriber::layer::Context<'_, Registry>,
     ) {
-        let filter = self.filter_for_id(&id);
+        let filter = self.new_span_filter(&ctx);
         filter.on_close(id.clone(), ctx.clone());
         if let Ok(mut spans) = self.spans.lock() {
             spans.remove(&id);
@@ -211,32 +324,76 @@ impl ManagedLayer {
         &self,
         ctx: &tracing_subscriber::layer::Context<'_, Registry>,
     ) -> Arc<tracing_subscriber::EnvFilter> {
-        let current = ctx.current_span().id().cloned();
-        if let Some(id) = current {
-            if let Ok(spans) = self.spans.lock() {
-                if let Some(filter) = spans.get(&id) {
-                    return Arc::clone(filter);
-                }
-            }
-        }
-        self.inner
-            .read()
-            .map(|layer| Arc::clone(&layer.filter))
-            .unwrap_or_else(|_| Arc::new(tracing_subscriber::EnvFilter::new("off")))
+        let filter = self.current_filter();
+        self.sync_filter(&filter, ctx);
+        filter
     }
 
-    fn filter_for_id(&self, id: &tracing::span::Id) -> Arc<tracing_subscriber::EnvFilter> {
-        self.spans
+    fn sync_filter(
+        &self,
+        filter: &Arc<tracing_subscriber::EnvFilter>,
+        ctx: &tracing_subscriber::layer::Context<'_, Registry>,
+    ) {
+        // EnvFilter keeps entered-span state per thread; replay it on reload.
+        let changed = BOUND_FILTER.with(|bound| {
+            bound
+                .borrow()
+                .as_ref()
+                .is_none_or(|previous| !Arc::ptr_eq(previous, filter))
+        });
+        if !changed {
+            return;
+        }
+
+        let active = ACTIVE_SPANS.with(|active| active.borrow().clone());
+        let active_ids: Vec<_> = self
+            .spans
+            .lock()
+            .map(|spans| {
+                active
+                    .iter()
+                    .filter(|id| spans.contains_key(*id))
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default();
+        for id in active_ids {
+            self.replay_span(filter, &id, ctx);
+            filter.on_enter(&id, ctx.clone());
+        }
+        BOUND_FILTER.with(|bound| *bound.borrow_mut() = Some(Arc::clone(filter)));
+    }
+
+    fn replay_span(
+        &self,
+        filter: &Arc<tracing_subscriber::EnvFilter>,
+        id: &tracing::span::Id,
+        ctx: &tracing_subscriber::layer::Context<'_, Registry>,
+    ) {
+        let state = self
+            .spans
             .lock()
             .ok()
-            .and_then(|spans| spans.get(id).cloned())
-            .or_else(|| {
-                self.inner
-                    .read()
-                    .ok()
-                    .map(|layer| Arc::clone(&layer.filter))
+            .and_then(|spans| spans.get(id).cloned());
+        let Some(state) = state else {
+            return;
+        };
+        let values = state
+            .values
+            .iter()
+            .map(|value| value.as_ref().map(StoredValue::as_value))
+            .collect::<Vec<_>>();
+        let value_refs = values
+            .iter()
+            .map(|value| {
+                value
+                    .as_deref()
+                    .map(|value| value as &dyn tracing::field::Value)
             })
-            .unwrap_or_else(|| Arc::new(tracing_subscriber::EnvFilter::new("off")))
+            .collect::<Vec<_>>();
+        let values = state.metadata.fields().value_set_all(&value_refs);
+        let attrs = tracing::span::Attributes::new(state.metadata, &values);
+        filter.on_new_span(&attrs, id, ctx.clone());
     }
 }
 
