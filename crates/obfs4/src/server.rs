@@ -499,17 +499,17 @@ impl TryFrom<&Args> for RequiredServerState {
     fn try_from(value: &Args) -> std::prelude::v1::Result<Self, Self::Error> {
         let privkey_str = value
             .retrieve(PRIVATE_KEY_ARG)
-            .ok_or("missing argument {PRIVATE_KEY_ARG}")?;
+            .ok_or_else(|| format!("missing argument '{PRIVATE_KEY_ARG}'"))?;
         let sk = <[u8; KEY_LENGTH]>::from_hex(privkey_str)?;
 
         let drbg_seed_str = value
             .retrieve(SEED_ARG)
-            .ok_or("missing argument {SEED_ARG}")?;
+            .ok_or_else(|| format!("missing argument '{SEED_ARG}'"))?;
         let drbg_seed_value = drbg::Seed::from_hex(drbg_seed_str)?;
 
         let node_id_str = value
             .retrieve(NODE_ID_ARG)
-            .ok_or("missing argument {NODE_ID_ARG}")?;
+            .ok_or_else(|| format!("missing argument '{NODE_ID_ARG}'"))?;
         let node_id = <[u8; NODE_ID_LENGTH]>::from_hex(node_id_str)?;
 
         let iat_mode = match value.retrieve(IAT_ARG) {

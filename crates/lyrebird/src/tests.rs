@@ -32,6 +32,30 @@ fn arg_string_then_parse_yields_kv_map() {
     assert_eq!(args.retrieve("iat-mode").as_deref(), Some("0"));
 }
 
+#[test]
+fn accept_error_policy_retries_transient_failures() {
+    assert!(is_transient_accept_error(&std::io::Error::from(
+        std::io::ErrorKind::WouldBlock,
+    )));
+    assert!(is_transient_accept_error(&std::io::Error::from(
+        std::io::ErrorKind::ConnectionAborted,
+    )));
+    assert!(!is_transient_accept_error(&std::io::Error::from(
+        std::io::ErrorKind::PermissionDenied,
+    )));
+    assert!(!is_transient_accept_error(&std::io::Error::from(
+        std::io::ErrorKind::Other,
+    )));
+
+    #[cfg(unix)]
+    assert!(is_transient_accept_error(
+        &std::io::Error::from_raw_os_error(libc::EMFILE,)
+    ));
+
+    assert!(accept_retry_delay(0) < accept_retry_delay(1));
+    assert_eq!(accept_retry_delay(100), std::time::Duration::from_secs(1));
+}
+
 #[tokio::test]
 async fn pt_args_auth_propagates_creds() {
     use fast_socks5::server::Authentication;

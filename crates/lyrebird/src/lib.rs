@@ -113,6 +113,53 @@ const CLIENT_SOCKS_ADDR: &str = "127.0.0.1:0";
 /// negotiation before a connection is discarded.
 const SOCKS5_SETUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+const ACCEPT_RETRY_BASE_MS: u64 = 50;
+const ACCEPT_RETRY_MAX_MS: u64 = 1_000;
+
+fn is_transient_accept_error(error: &std::io::Error) -> bool {
+    if matches!(
+        error.kind(),
+        std::io::ErrorKind::Interrupted
+            | std::io::ErrorKind::WouldBlock
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::TimedOut
+    ) {
+        return true;
+    }
+
+    match error.raw_os_error() {
+        #[cfg(unix)]
+        Some(code) => matches!(
+            code,
+            libc::EAGAIN
+                | libc::EINTR
+                | libc::ECONNABORTED
+                | libc::ECONNRESET
+                | libc::EMFILE
+                | libc::ENFILE
+                | libc::ENOBUFS
+                | libc::ENOMEM
+        ),
+        // WSAEINTR, WSAEMFILE, WSAEWOULDBLOCK, WSAECONNABORTED,
+        // WSAECONNRESET, WSAENOBUFS.
+        #[cfg(windows)]
+        Some(code) => matches!(code, 10004 | 10024 | 10035 | 10053 | 10054 | 10055),
+        #[cfg(not(any(unix, windows)))]
+        Some(_) => false,
+        None => false,
+    }
+}
+
+fn accept_retry_delay(consecutive_failures: u32) -> std::time::Duration {
+    let factor = 1_u64 << consecutive_failures.min(5);
+    std::time::Duration::from_millis(
+        ACCEPT_RETRY_BASE_MS
+            .saturating_mul(factor)
+            .min(ACCEPT_RETRY_MAX_MS),
+    )
+}
+
 /// Error defined to denote a failure to get the bridge line
 #[derive(Debug, thiserror::Error)]
 #[error("Error while obtaining bridge line data")]
@@ -619,7 +666,8 @@ where
     C: ManagedClient,
 {
     let pt_name = C::method_name();
-    loop {
+    let mut transient_failures = 0_u32;
+    'accept: loop {
         tokio::select! {
             _ = ctx.accept.cancelled() => {
                 info!("{pt_name} received shutdown signal");
@@ -627,11 +675,29 @@ where
             }
             res = listener.accept() => {
                 let (conn, client_addr) = match res {
-                    Err(e) => {
-                        error!("failed to accept tcp connection {e}");
-                        break;
+                    Ok(c) => {
+                        transient_failures = 0;
+                        c
                     }
-                    Ok(c) => c,
+                    Err(e) if !is_transient_accept_error(&e) => {
+                        error!("{pt_name} stopping listener after fatal accept error: {e}");
+                        return Err(e.into());
+                    }
+                    Err(e) => {
+                        let delay = accept_retry_delay(transient_failures);
+                        transient_failures = transient_failures.saturating_add(1);
+                        warn!(
+                            "{pt_name} transient accept error: {e}; retrying in {delay:?}"
+                        );
+                        let retry = tokio::select! {
+                            _ = ctx.accept.cancelled() => false,
+                            _ = tokio::time::sleep(delay) => true,
+                        };
+                        if !retry {
+                            break 'accept;
+                        }
+                        continue 'accept;
+                    }
                 };
                 // Acquire a lifecycle permit before spawning: it doubles as
                 // the concurrency cap and the task-lifetime marker that

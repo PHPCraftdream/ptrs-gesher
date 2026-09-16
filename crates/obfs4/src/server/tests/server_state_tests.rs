@@ -173,6 +173,32 @@ fn validate_args_missing_fields() {
     assert!(result.is_err());
 }
 
+#[test]
+fn validate_args_reports_the_missing_argument_name() {
+    let fields = [
+        (PRIVATE_KEY_ARG, "private-key"),
+        (SEED_ARG, "drbg-seed"),
+        (NODE_ID_ARG, "node-id"),
+    ];
+    for (missing, expected) in fields {
+        let mut args = Args::new();
+        if missing != PRIVATE_KEY_ARG {
+            args.add(
+                PRIVATE_KEY_ARG,
+                "0123456789abcdeffedcba98765432100123456789abcdeffedcba9876543210",
+            );
+        }
+        if missing != SEED_ARG {
+            args.add(SEED_ARG, "0a0b0c0d0e0f0a0b0c0d0e0f0a0b0c0d0e0f0a0b0c0d0e0f");
+        }
+        if missing != NODE_ID_ARG {
+            args.add(NODE_ID_ARG, "0000000000000000000000000000000000000000");
+        }
+        let error = ServerBuilder::<TcpStream>::validate_args(&args).unwrap_err();
+        assert_eq!(error.to_string(), format!("missing argument '{expected}'"));
+    }
+}
+
 #[tokio::test]
 async fn keypair_override_preserves_state_node_id_and_handshake() -> Result<()> {
     let temporary = tempfile::tempdir()?;
