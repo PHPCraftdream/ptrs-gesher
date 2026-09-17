@@ -351,3 +351,98 @@ fn server_builder_timeout_modes() {
     sb.fail_fast();
     assert!(matches!(sb.handshake_timeout, MaybeTimeout::Unset));
 }
+
+#[test]
+fn parent_directory_of_normalizes_bare_filename() {
+    // `Path::new("state.json").parent()` is `Some("")`, not `None`; the empty
+    // parent must normalize to the current directory or the atomic writer
+    // fails on every bare-filename statefile path.
+    assert_eq!(
+        crate::parent_directory_of(std::path::Path::new("state.json")),
+        std::path::Path::new(".")
+    );
+    assert_eq!(
+        crate::parent_directory_of(std::path::Path::new("a/b/state.json")),
+        std::path::Path::new("a/b")
+    );
+}
+
+static CURRENT_DIRECTORY_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+struct CurrentDirectory(std::path::PathBuf);
+
+impl CurrentDirectory {
+    fn switch_to(path: &std::path::Path) -> Self {
+        let previous = std::env::current_dir().expect("current dir is readable");
+        std::env::set_current_dir(path).expect("test can change directory");
+        Self(previous)
+    }
+}
+
+impl Drop for CurrentDirectory {
+    fn drop(&mut self) {
+        let _ = std::env::set_current_dir(&self.0);
+    }
+}
+
+#[test]
+fn bare_filename_statefile_write_succeeds_without_directory() -> Result<()> {
+    let _lock = CURRENT_DIRECTORY_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let temporary = tempfile::tempdir()?;
+    let previous_directory = CurrentDirectory::switch_to(temporary.path());
+    let server = Server::new([0x99; KEY_LENGTH], [0xAA; NODE_ID_LENGTH]);
+    let written = server.write_statefile_to("obfs4_state.json");
+    drop(previous_directory);
+    written?;
+    assert!(temporary.path().join("obfs4_state.json").is_file());
+    let synced = crate::synced_parent_directories();
+    assert!(
+        synced
+            .iter()
+            .any(|directory| directory == std::path::Path::new(".")),
+        "bare filename must sync the normalized '.' directory, synced={synced:?}"
+    );
+    Ok(())
+}
+
+/// On Unix this proves the parent directory was fsynced; on Windows, where a
+/// directory cannot be opened through `std::fs`, it proves the durability call
+/// site is wired into `atomic_write_json` and receives the right directory.
+#[test]
+fn write_statefile_to_syncs_parent_directory_for_durability() -> Result<()> {
+    let temporary = tempfile::tempdir()?;
+    let state_dir = temporary.path().join("server");
+    std::fs::create_dir_all(&state_dir)?;
+    let server = Server::new([0x77; KEY_LENGTH], [0x88; NODE_ID_LENGTH]);
+    server.write_statefile_to(&state_dir)?;
+    let synced = crate::synced_parent_directories();
+    assert_eq!(
+        synced
+            .iter()
+            .filter(|directory| **directory == state_dir)
+            .count(),
+        1,
+        "persisted state file must sync its parent directory exactly once, synced={synced:?}"
+    );
+    assert!(state_dir.join(STATE_FILENAME).is_file());
+    Ok(())
+}
+
+#[test]
+#[cfg(unix)]
+fn statefile_permissions_remain_owner_only() -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    let temporary = tempfile::tempdir()?;
+    let state_dir = temporary.path().join("server");
+    std::fs::create_dir_all(&state_dir)?;
+    let server = Server::new([0xBB; KEY_LENGTH], [0xCC; NODE_ID_LENGTH]);
+    server.write_statefile_to(&state_dir)?;
+    let mode = std::fs::metadata(state_dir.join(STATE_FILENAME))?
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o600);
+    Ok(())
+}

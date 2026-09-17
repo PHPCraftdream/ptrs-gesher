@@ -164,10 +164,7 @@ pub(crate) fn atomic_write_json<T: serde::Serialize>(
     value: &T,
 ) -> Result<()> {
     let bytes = serde_json::to_vec_pretty(value).map_err(|e| Error::Other(Box::new(e)))?;
-    let parent = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-        .unwrap_or_else(|| std::path::Path::new("."));
+    let parent = parent_directory_of(path);
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
     std::io::Write::write_all(&mut temporary, &bytes)?;
     temporary.as_file().sync_all()?;
@@ -181,7 +178,72 @@ pub(crate) fn atomic_write_json<T: serde::Serialize>(
     temporary
         .persist(path)
         .map_err(|error| Error::IOError(error.error))?;
+    // Directory-sync failures propagate as write errors on purpose: persist()
+    // has replaced the target name, but until the parent directory is synced a
+    // crash may still lose the rename, and every caller publishes client
+    // parameters derived from this state right after the write returns.
+    // Returning Err keeps published parameters and durable state consistent;
+    // a retry reloads the already-persisted file, so identity is preserved.
+    sync_parent_directory(parent)?;
     Ok(())
+}
+
+/// Resolve the directory backing `path`'s parent for atomic-write durability.
+///
+/// `Path::parent` returns `Some("")` for a bare filename (not `None`), and an
+/// empty path is rejected by `File::open` and `NamedTempFile::new_in`;
+/// normalize it to the process's current directory.
+fn parent_directory_of(path: &std::path::Path) -> &std::path::Path {
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."))
+}
+
+/// Flush a directory entry so a just-persisted rename survives a crash.
+///
+/// The file contents are already durable (`sync_all` on the temporary file
+/// before persist); this covers the rename itself. Supported on Unix, where a
+/// directory can be opened as a file and fsynced. On Windows a directory
+/// cannot be opened through `std::fs` (it requires
+/// `FILE_FLAG_BACKUP_SEMANTICS` via FFI), so directory-entry durability is
+/// NOT guaranteed by this mechanism there — a documented platform limitation,
+/// not a silent no-op: file data stays durable, only the rename does not.
+fn sync_parent_directory(directory: &std::path::Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let handle = std::fs::File::open(directory)?;
+        handle.sync_all()?;
+    }
+    // Recorded on every platform, not just where the fsync happens: the seam
+    // also has to prove that this call site is wired into atomic_write_json at
+    // all, and that the parent path handed to it was normalized.
+    #[cfg(test)]
+    record_synced_parent_directory(directory);
+    #[cfg(not(any(unix, test)))]
+    {
+        let _ = directory;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+static SYNCED_PARENT_DIRECTORIES: std::sync::Mutex<Vec<std::path::PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
+
+#[cfg(test)]
+fn record_synced_parent_directory(directory: &std::path::Path) {
+    SYNCED_PARENT_DIRECTORIES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(directory.to_path_buf());
+}
+
+#[cfg(test)]
+pub(crate) fn synced_parent_directories() -> Vec<std::path::PathBuf> {
+    SYNCED_PARENT_DIRECTORIES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
 }
 
 /// The transport name string.
