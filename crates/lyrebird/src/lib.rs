@@ -465,6 +465,15 @@ async fn dial_bridge(remote_addr: SocketAddr) -> std::io::Result<TcpStream> {
 ///   immediate teardown.
 /// * all listeners ended on their own ("proxy closed"): handled like an
 ///   interrupt, so tunnel tasks are never left behind.
+/// * a declared transport is lost — a listener accept loop ends with a
+///   fatal (non-transient) accept error or its task panics: the
+///   remaining listeners and in-flight connections are shut down as in
+///   the "proxy closed" case, and `run()` then returns `Err` carrying
+///   the original cause. A lost transport is never restored in-process:
+///   client listeners bind ephemeral ports already announced to the
+///   parent via `CMETHOD`, and the PT spec provides no
+///   re-announcement, so failing loudly lets the parent restart the
+///   transport with a fresh setup.
 ///
 /// When stdin monitoring is enabled, this call requires exclusive access to
 /// stdin until it returns.

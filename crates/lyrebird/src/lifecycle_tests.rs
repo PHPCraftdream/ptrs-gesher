@@ -212,3 +212,150 @@ async fn cancellation_race_after_scheduler_lock_releases_registered_task() {
 
     assert!(ctx.aborts.lock().unwrap().is_empty());
 }
+
+// -- listener-loss propagation (fatal accept error / task panic) --
+//
+// `drive` must fail the run when a declared transport is lost, but only
+// AFTER the mandatory cleanup: every owned connection task cancelled and
+// joined, every lifecycle permit returned. A normal shutdown must stay a
+// success.
+
+#[tokio::test(start_paused = true)]
+#[allow(clippy::redundant_closure)]
+async fn listener_fatal_error_survives_cleanup_and_fails_run() {
+    struct DropMarker(Arc<std::sync::atomic::AtomicBool>);
+
+    impl Drop for DropMarker {
+        fn drop(&mut self) {
+            self.0.store(true, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    let ctx = RunTasks::new();
+    let dropped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+    // One owned connection task still in flight: cleanup must not skip it.
+    let permit = ctx
+        .lifecycle
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("test lifecycle permit");
+    let marker = DropMarker(Arc::clone(&dropped));
+    ctx.spawn_connection(async move {
+        let _permit = permit;
+        let _marker = marker;
+        std::future::pending::<()>().await;
+    })
+    .await;
+
+    let mut listeners = JoinSet::new();
+    listeners.spawn(async { Err(anyhow!("injected fatal accept error")) });
+
+    let result = drive(
+        ctx.clone(),
+        listeners,
+        std::future::pending::<std::io::Result<()>>(),
+        || std::future::pending::<Shutdown>(),
+    )
+    .await;
+
+    // The original cause reaches the caller unchanged, after cleanup.
+    let err = result.expect_err("fatal listener error must fail the run");
+    assert_eq!(
+        err.to_string(),
+        "injected fatal accept error",
+        "the original listener cause must not be replaced"
+    );
+
+    // Mandatory cleanup completed: the connection task was cancelled and
+    // joined (its future dropped), no task or abort handle remains.
+    assert!(dropped.load(std::sync::atomic::Ordering::Acquire));
+    assert!(ctx.connections.lock().await.is_empty());
+    assert!(ctx.aborts.lock().unwrap().is_empty());
+    assert_eq!(ctx.lifecycle.available_permits(), MAX_CONCURRENT_CONNS);
+}
+
+#[tokio::test(start_paused = true)]
+async fn normal_shutdown_still_returns_ok() {
+    let ctx = RunTasks::new();
+    let mut listeners = JoinSet::new();
+    // Emulates a real accept loop: exits cleanly once accepting is stopped.
+    let accept = ctx.accept.clone();
+    listeners.spawn(async move {
+        tokio::select! {
+            _ = accept.cancelled() => Ok(()),
+            _ = std::future::pending::<()>() => Ok(()),
+        }
+    });
+
+    let result = drive(
+        ctx.clone(),
+        listeners,
+        std::future::pending::<std::io::Result<()>>(),
+        || std::future::ready(Shutdown::Interrupt),
+    )
+    .await;
+
+    result.expect("a normal shutdown must stay a success");
+    assert_eq!(ctx.lifecycle.available_permits(), MAX_CONCURRENT_CONNS);
+}
+
+#[tokio::test(start_paused = true)]
+#[allow(clippy::redundant_closure)]
+async fn losing_one_of_several_listeners_fails_the_run_after_joining_survivor() {
+    let ctx = RunTasks::new();
+    let mut listeners = JoinSet::new();
+    listeners.spawn(async { Err(anyhow!("obfs4 fatal accept error")) });
+
+    let survivor_joined = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let flag = Arc::clone(&survivor_joined);
+    let accept = ctx.accept.clone();
+    listeners.spawn(async move {
+        tokio::select! {
+            _ = accept.cancelled() => {
+                flag.store(true, std::sync::atomic::Ordering::Release);
+                Ok(())
+            }
+            _ = std::future::pending::<()>() => Ok(()),
+        }
+    });
+
+    let result = drive(
+        ctx.clone(),
+        listeners,
+        std::future::pending::<std::io::Result<()>>(),
+        || std::future::pending::<Shutdown>(),
+    )
+    .await;
+
+    let err = result.expect_err("losing a declared transport must fail the run");
+    assert_eq!(err.to_string(), "obfs4 fatal accept error");
+    // The surviving listener was stopped and joined during the cleanup.
+    assert!(survivor_joined.load(std::sync::atomic::Ordering::Acquire));
+    assert_eq!(ctx.lifecycle.available_permits(), MAX_CONCURRENT_CONNS);
+}
+
+#[tokio::test(start_paused = true)]
+#[allow(clippy::redundant_closure)]
+async fn listener_panic_fails_the_run_like_a_fatal_error() {
+    let ctx = RunTasks::new();
+    let mut listeners = JoinSet::new();
+    listeners.spawn(async { panic!("injected listener panic") });
+
+    let result = drive(
+        ctx.clone(),
+        listeners,
+        std::future::pending::<std::io::Result<()>>(),
+        || std::future::pending::<Shutdown>(),
+    )
+    .await;
+
+    let err = result.expect_err("a panicked listener task must fail the run");
+    let join = err
+        .root_cause()
+        .downcast_ref::<tokio::task::JoinError>()
+        .expect("the panic must be preserved as the JoinError root cause");
+    assert!(join.is_panic(), "expected a panic JoinError, got {join}");
+    assert_eq!(ctx.lifecycle.available_permits(), MAX_CONCURRENT_CONNS);
+}

@@ -12,7 +12,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-use ptrs::{info, warn};
+use ptrs::{error, info, warn};
 
 const DRAIN_GRACE: Duration = Duration::from_secs(15);
 const FORCE_GRACE: Duration = Duration::from_secs(5);
@@ -37,6 +37,8 @@ impl Shutdown {
 /// Own setup, stdin, listeners, and shutdown signals for one service run.
 /// Keeping setup inside this future ensures an early error drops the pending
 /// stdin future before returning to the caller.
+///
+/// Listener-loss policy: fail fast. See [`drive`].
 /// cancel-safe: NO — drive to completion to join owned tasks.
 pub(super) async fn run_with_setup<I, Setup, S, SF>(
     ctx: RunTasks,
@@ -57,6 +59,15 @@ where
 /// Drive the shared service lifecycle with injected stdin and signal futures.
 /// Production calls this through [`run_with_setup`]; tests can use deterministic
 /// events to exercise the same graceful-drain orchestration.
+///
+/// Listener-loss policy: fail fast. The first listener task that ends
+/// with a fatal accept error or panics ends the whole run — `drive`
+/// stops the remaining accept loops, completes the mandatory
+/// connection teardown, and then returns the original cause. Declared
+/// transports are never restored in-process: client listeners bind
+/// ephemeral ports already announced to the parent via `CMETHOD`, and
+/// the PT spec provides no re-announcement, so a restarted process
+/// re-runs the full PT setup instead.
 /// cancel-safe: NO — dropping this future skips orderly task shutdown.
 pub(super) async fn drive<I, S, SF>(
     ctx: RunTasks,
@@ -74,7 +85,22 @@ where
         tokio::select! {
             maybe = listeners.join_next() => match maybe {
                 None => break ExitKind::ProxyClosed,
-                Some(res) => log_listener_result(res),
+                Some(Ok(Ok(()))) => info!("listener stopped"),
+                // Fail fast: keep the original cause for the caller; it
+                // must survive the mandatory cleanup below and reach main.
+                Some(Ok(Err(e))) => {
+                    error!("listener failed fatally: {e:#}");
+                    break ExitKind::ListenerFailed(e);
+                }
+                // Listener tasks are never aborted by this code, so a
+                // JoinError here is a task panic (or an unexpected external
+                // abort); either way the transport is lost.
+                Some(Err(join)) => {
+                    error!("listener task aborted: {join}");
+                    break ExitKind::ListenerFailed(
+                        anyhow::Error::from(join).context("listener task failed"),
+                    );
+                }
             },
             sig = signal() => {
                 if sig.is_terminate() {
@@ -93,7 +119,7 @@ where
     };
 
     ctx.stop_accepting();
-    match exit {
+    let outcome = match exit {
         ExitKind::Interrupt => {
             info!("received interrupt, shutting down");
             join_accept_loops(&mut listeners).await;
@@ -114,6 +140,7 @@ where
             if !drained {
                 cancel_connections(&ctx).await;
             }
+            Ok(())
         }
         ExitKind::ProxyClosed => {
             info!("proxy closed");
@@ -132,27 +159,56 @@ where
                 info!("drain budget elapsed; cancelling remaining connections");
                 cancel_connections(&ctx).await;
             }
+            Ok(())
+        }
+        ExitKind::ListenerFailed(cause) => {
+            // A declared transport was lost. The teardown is mandatory and
+            // identical to the "proxy closed" case — surviving accept loops
+            // and every in-flight connection must be stopped and joined
+            // before the failure is reported — but the run ends in `Err`
+            // carrying the original cause.
+            info!("shutting down after listener loss");
+            join_accept_loops(&mut listeners).await;
+            let drained = tokio::select! {
+                drained = drain_connections(&ctx, DRAIN_GRACE) => drained,
+                _ = signal() => false,
+                stdin = &mut stdin_wait => {
+                    if let Err(e) = stdin {
+                        warn!("stdin watcher failed during shutdown: {e}");
+                    }
+                    false
+                }
+            };
+            if !drained {
+                info!("drain budget elapsed; cancelling remaining connections");
+                cancel_connections(&ctx).await;
+            }
+            Err(cause)
         }
         ExitKind::Terminate | ExitKind::ParentClosedStdin => {
             join_accept_loops(&mut listeners).await;
             cancel_connections(&ctx).await;
+            Ok(())
         }
-    }
+    };
     join_connection_tasks(&ctx).await;
     debug_assert_eq!(
         ctx.lifecycle.available_permits(),
         MAX_CONCURRENT_CONNS,
         "connection tasks still in flight after shutdown"
     );
-    Ok(())
+    outcome
 }
 
-#[derive(Clone, Copy)]
 enum ExitKind {
     ProxyClosed,
     Interrupt,
     Terminate,
     ParentClosedStdin,
+    /// A declared transport was lost — a fatal accept error or a listener
+    /// task panic. The payload is the original cause, returned to the
+    /// caller after cleanup.
+    ListenerFailed(anyhow::Error),
 }
 
 /// Shared ownership and cancellation state for one service run.
@@ -299,6 +355,10 @@ pub(super) async fn join_connection_tasks(ctx: &RunTasks) {
     }
 }
 
+/// Log a listener result joined during teardown. The primary failure is
+/// captured in `drive` before cleanup starts; a result surfacing here can
+/// only be a clean stop or a secondary error racing the shutdown, so it
+/// is logged, not propagated.
 fn log_listener_result(res: std::result::Result<Result<()>, tokio::task::JoinError>) {
     match res {
         Ok(Ok(())) => info!("listener stopped"),
