@@ -4,6 +4,30 @@ use serial_test::serial;
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
+struct EnvGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+impl EnvGuard {
+    fn new(names: &[&'static str]) -> Self {
+        Self(
+            names
+                .iter()
+                .map(|name| (*name, env::var_os(name)))
+                .collect(),
+        )
+    }
+}
+
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        for (name, value) in &self.0 {
+            match value {
+                Some(value) => env::set_var(name, value),
+                None => env::remove_var(name),
+            }
+        }
+    }
+}
+
 #[test]
 #[serial]
 fn is_client_from_env() -> Result<(), Error> {
@@ -180,6 +204,46 @@ fn server_bindaddrs() -> Result<(), Error> {
 
         assert_eq!(out.unwrap(), trial.3);
     }
+    Ok(())
+}
+
+#[test]
+#[serial]
+fn server_info_accepts_empty_extended_port() -> Result<(), Error> {
+    let _env = EnvGuard::new(&[
+        constants::MANAGED_VER,
+        constants::SERVER_BINDADDR,
+        constants::SERVER_TRANSPORTS,
+        constants::SERVER_TRANSPORT_OPTIONS,
+        constants::ORPORT,
+        constants::EXTENDED_SERVER_PORT,
+        constants::AUTH_COOKIE_FILE,
+    ]);
+    env::set_var(constants::MANAGED_VER, "1");
+    env::set_var(constants::SERVER_BINDADDR, "alpha-127.0.0.1:1234");
+    env::set_var(constants::SERVER_TRANSPORTS, "alpha");
+    env::set_var(constants::SERVER_TRANSPORT_OPTIONS, "");
+    env::set_var(constants::ORPORT, "127.0.0.1:9001");
+    env::set_var(constants::EXTENDED_SERVER_PORT, "");
+    env::remove_var(constants::AUTH_COOKIE_FILE);
+
+    let info = ServerInfo::new()?;
+
+    assert_eq!(info.or_addr, Some("127.0.0.1:9001".parse().unwrap()));
+    assert_eq!(info.extended_or_addr, None);
+    assert_eq!(info.bind_addrs.len(), 1);
+
+    // An explicit ExtORPort remains parsed when ORPort is absent.
+    env::remove_var(constants::ORPORT);
+    env::set_var(constants::EXTENDED_SERVER_PORT, "127.0.0.1:9002");
+    env::set_var(constants::AUTH_COOKIE_FILE, "cookie");
+    let info = ServerInfo::new()?;
+    assert_eq!(info.or_addr, None);
+    assert_eq!(
+        info.extended_or_addr,
+        Some("127.0.0.1:9002".parse().unwrap())
+    );
+
     Ok(())
 }
 

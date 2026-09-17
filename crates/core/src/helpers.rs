@@ -432,6 +432,8 @@ impl ServerInfo {
         let auth_cookie_path = env::var(constants::AUTH_COOKIE_FILE).ok();
 
         let extended_or_addr = match env::var(constants::EXTENDED_SERVER_PORT) {
+            // Tor sets this to an empty string when ExtORPort is disabled.
+            Ok(ext_or_addr_env) if ext_or_addr_env.is_empty() => None,
             Ok(ext_or_addr_env) => Some(resolve_addr(ext_or_addr_env).map_err(|e| {
                 to_io_other(format!("cannot resolve TOR_PT_EXTENDED_SERVER_PORT: {e}"))
             })?),
