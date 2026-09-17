@@ -6,6 +6,19 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use std::cmp::Ordering;
 use std::time::Duration;
 
+/// Guard against a wedged transfer in the echo tests below — a ceiling, never
+/// an assertion about latency. None of these tests claims anything about how
+/// fast a read completes; the timeout exists only so a genuinely stuck stream
+/// fails instead of hanging the suite forever.
+///
+/// It is deliberately generous. The budget used to be 1s (2s in one test), and
+/// on a loaded machine the very first read of `transfer_10k_x3` missed it —
+/// "client failed to read after 0 iterations: timeout" — failing a transfer
+/// that was merely slow to get scheduled, not broken. A tight wall-clock bound
+/// in a test that does not measure time is a flake generator, so every echo
+/// test now shares this one.
+const READ_STALL_GUARD: Duration = Duration::from_secs(30);
+
 #[tokio::test]
 async fn public_handshake() -> Result<()> {
     init_subscriber();
@@ -105,6 +118,15 @@ async fn transfer_10k_x1() -> Result<()> {
     let mut buf = vec![0_u8; 1024 * 11];
     let mut received: usize = 0;
     for i in 0..8 {
+        // The loop bound is a ceiling on how many reads the payload may take,
+        // not a required count: how many frames a read returns is up to the
+        // transport, and once the whole payload has arrived no further data is
+        // coming, so another read would block until the timeout arm below
+        // fired and failed a perfectly healthy transfer. Same shape as
+        // `transfer_512k_x1`'s `while received < expected_total`.
+        if received >= expected_total {
+            break;
+        }
         debug!("client read: {i}");
         tokio::select! {
             res = r.read(&mut buf) => {
@@ -112,7 +134,7 @@ async fn transfer_10k_x1() -> Result<()> {
                 received += n;
                 trace!("received: {n}: total:{received}");
             }
-            _ = tokio::time::sleep(std::time::Duration::from_millis(1000)) => {
+            _ = tokio::time::sleep(READ_STALL_GUARD) => {
                 panic!("client failed to read after {i} iterations: timeout");
             }
         }
@@ -159,6 +181,10 @@ async fn transfer_10k_x3() -> Result<()> {
     let mut buf = vec![0_u8; 1024 * 32];
     let mut received: usize = 0;
     for i in 0..24 {
+        // Ceiling, not a required read count — see `transfer_10k_x1`.
+        if received >= expected_total {
+            break;
+        }
         // debug!("client read: {i}");
         tokio::select! {
             res = r.read(&mut buf) => {
@@ -166,7 +192,7 @@ async fn transfer_10k_x3() -> Result<()> {
                 received += n;
                 trace!("received: {n}: total:{received}");
             }
-            _ = tokio::time::sleep(std::time::Duration::from_millis(1000)) => {
+            _ = tokio::time::sleep(READ_STALL_GUARD) => {
                 panic!("client failed to read after {i} iterations: timeout");
             }
         }
@@ -214,12 +240,16 @@ async fn transfer_1M_1024x1024() -> Result<()> {
     let mut buf = vec![0_u8; 1024 * 1024];
     let mut received: usize = 0;
     for i in 0..1024 {
+        // Ceiling, not a required read count — see `transfer_10k_x1`.
+        if received >= expected_total {
+            break;
+        }
         // debug!("client read: {i}");
         tokio::select! {
             res = r.read(&mut buf) => {
                 received += res?;
             }
-            _ = tokio::time::sleep(std::time::Duration::from_secs(10)) => {
+            _ = tokio::time::sleep(READ_STALL_GUARD) => {
                 panic!("client failed to read after {i} iterations: timeout");
             }
         }
@@ -264,7 +294,7 @@ async fn transfer_512k_x1() -> Result<()> {
                 res = r.read(&mut buf) => {
                     received += res.unwrap();
                 }
-                _ = tokio::time::sleep(std::time::Duration::from_millis(2000)) => {
+                _ = tokio::time::sleep(READ_STALL_GUARD) => {
                     panic!("client failed to read after {i} iterations: timeout");
                 }
             }
