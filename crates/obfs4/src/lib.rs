@@ -159,11 +159,80 @@ pub use pt::{Obfs4PT, Transport};
 mod error;
 pub use error::{Error, Result};
 
+/// Why an atomic state-file write failed, and what that leaves on disk.
+///
+/// After `persist` replaced the target, the new contents are what every
+/// reader observes — an error from the parent-directory sync that follows is
+/// a durability-confirmation failure, not a failed write: only the rename's
+/// survival across a crash is unconfirmed. The two cases must not be
+/// conflated:
+///
+/// * [`AtomicWriteError::NotPublished`] — the target was never replaced;
+///   on-disk state is unchanged, so pre-write expectations (a cached
+///   observation of the previous contents) stay valid and a plain retry
+///   redoes the whole write.
+/// * [`AtomicWriteError::PublishedButNotDurable`] — the target now holds the
+///   bytes this call published. A caller that keeps stale pre-write
+///   expectations would misread its own file as an external change. It must
+///   adopt the publication: record the published bytes as its own
+///   observation, keep the rest of any cached configuration verbatim (for
+///   `ServerBuilder::try_build`: resolved identity, DRBG seed and manual
+///   overrides are NOT re-resolved, so client parameters already published
+///   from them stay valid), and leave persistence pending so a retry
+///   re-validates against the builder's own file and re-attempts the
+///   durability sync. The error is still propagated: until the directory
+///   sync succeeds a crash may lose the rename, so the operation has not
+///   succeeded.
+#[derive(Debug)]
+pub(crate) enum AtomicWriteError {
+    /// The target name was never replaced: on-disk state is unchanged, so
+    /// pre-write expectations (a cached observation of the previous
+    /// contents) remain valid and a plain retry redoes the whole write.
+    NotPublished(Error),
+    /// `persist` already replaced the target with the bytes this call
+    /// published; only the parent-directory durability sync failed. The
+    /// new contents are what every reader now observes; a crash before a
+    /// successful directory sync may still lose the rename.
+    PublishedButNotDurable {
+        /// The durability-sync error.
+        error: Error,
+        /// The exact bytes published to the target path.
+        published_contents: Vec<u8>,
+    },
+}
+
+impl From<std::io::Error> for AtomicWriteError {
+    fn from(error: std::io::Error) -> Self {
+        AtomicWriteError::NotPublished(error.into())
+    }
+}
+
+/// Any failure a caller hits while *preparing* the write -- serialising the
+/// state, resolving a missing field -- happens before `persist` replaces the
+/// target, so it is `NotPublished` by construction. Only the directory sync
+/// inside `atomic_write_json` can produce the published-but-not-durable case,
+/// and it builds that variant directly.
+impl From<Error> for AtomicWriteError {
+    fn from(error: Error) -> Self {
+        AtomicWriteError::NotPublished(error)
+    }
+}
+
+impl From<AtomicWriteError> for Error {
+    fn from(failure: AtomicWriteError) -> Self {
+        match failure {
+            AtomicWriteError::NotPublished(error)
+            | AtomicWriteError::PublishedButNotDurable { error, .. } => error,
+        }
+    }
+}
+
 pub(crate) fn atomic_write_json<T: serde::Serialize>(
     path: &std::path::Path,
     value: &T,
-) -> Result<()> {
-    let bytes = serde_json::to_vec_pretty(value).map_err(|e| Error::Other(Box::new(e)))?;
+) -> std::result::Result<(), AtomicWriteError> {
+    let bytes = serde_json::to_vec_pretty(value)
+        .map_err(|e| AtomicWriteError::NotPublished(Error::Other(Box::new(e))))?;
     let parent = parent_directory_of(path);
     let mut temporary = tempfile::NamedTempFile::new_in(parent)?;
     std::io::Write::write_all(&mut temporary, &bytes)?;
@@ -175,16 +244,22 @@ pub(crate) fn atomic_write_json<T: serde::Serialize>(
             .as_file()
             .set_permissions(std::fs::Permissions::from_mode(0o600))?;
     }
+    // persist() is the publication point: past this call the target name is
+    // replaced by our bytes, so any later failure is post-publication.
     temporary
         .persist(path)
-        .map_err(|error| Error::IOError(error.error))?;
-    // Directory-sync failures propagate as write errors on purpose: persist()
-    // has replaced the target name, but until the parent directory is synced a
-    // crash may still lose the rename, and every caller publishes client
-    // parameters derived from this state right after the write returns.
-    // Returning Err keeps published parameters and durable state consistent;
-    // a retry reloads the already-persisted file, so identity is preserved.
-    sync_parent_directory(parent)?;
+        .map_err(|error| AtomicWriteError::NotPublished(Error::IOError(error.error)))?;
+    // Directory-sync failures after publication propagate as errors on
+    // purpose: persist() has replaced the target name, but until the parent
+    // directory is synced a crash may still lose the rename. They are typed
+    // as `PublishedButNotDurable` carrying the published bytes, so the caller
+    // can adopt its own write instead of mistaking it for an external change.
+    if let Err(error) = sync_parent_directory(parent) {
+        return Err(AtomicWriteError::PublishedButNotDurable {
+            error,
+            published_contents: bytes,
+        });
+    }
     Ok(())
 }
 
@@ -209,16 +284,24 @@ fn parent_directory_of(path: &std::path::Path) -> &std::path::Path {
 /// NOT guaranteed by this mechanism there — a documented platform limitation,
 /// not a silent no-op: file data stays durable, only the rename does not.
 fn sync_parent_directory(directory: &std::path::Path) -> Result<()> {
+    // Recorded on every platform, not just where the fsync happens: the seam
+    // also has to prove that this call site is wired into atomic_write_json at
+    // all, and that the parent path handed to it was normalized. For the same
+    // reason the injected one-shot failure below must fire on every platform:
+    // on Windows the real fsync is a documented no-op, and the durability step
+    // still has to be failable for the post-publication regression test.
+    #[cfg(test)]
+    {
+        record_synced_parent_directory(directory);
+        if take_pending_parent_directory_sync_failure(directory) {
+            return Err(std::io::Error::other("injected parent-directory sync failure").into());
+        }
+    }
     #[cfg(unix)]
     {
         let handle = std::fs::File::open(directory)?;
         handle.sync_all()?;
     }
-    // Recorded on every platform, not just where the fsync happens: the seam
-    // also has to prove that this call site is wired into atomic_write_json at
-    // all, and that the parent path handed to it was normalized.
-    #[cfg(test)]
-    record_synced_parent_directory(directory);
     #[cfg(not(any(unix, test)))]
     {
         let _ = directory;
@@ -244,6 +327,39 @@ pub(crate) fn synced_parent_directories() -> Vec<std::path::PathBuf> {
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone()
+}
+
+#[cfg(test)]
+static PENDING_PARENT_DIRECTORY_SYNC_FAILURES: std::sync::Mutex<Vec<std::path::PathBuf>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// Arm a one-shot failure for the next `sync_parent_directory` call on
+/// `directory`: it returns an injected error instead of syncing. Consumed on
+/// first use. Armed by exact path, so tests using distinct temp directories
+/// do not interfere.
+#[cfg(test)]
+pub(crate) fn fail_next_parent_directory_sync(directory: &std::path::Path) {
+    PENDING_PARENT_DIRECTORY_SYNC_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(directory.to_path_buf());
+}
+
+#[cfg(test)]
+fn take_pending_parent_directory_sync_failure(directory: &std::path::Path) -> bool {
+    let mut pending = PENDING_PARENT_DIRECTORY_SYNC_FAILURES
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    match pending
+        .iter()
+        .position(|pending_path| pending_path == directory)
+    {
+        Some(position) => {
+            pending.remove(position);
+            true
+        }
+        None => false,
+    }
 }
 
 /// The transport name string.

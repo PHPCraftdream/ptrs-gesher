@@ -238,41 +238,45 @@ impl<T> ServerBuilder<T> {
         if let Some(error) = &self.config_error {
             return Err(error.clone().into());
         }
-        let effective = self.effective_configuration()?;
-        let EffectiveServerConfiguration {
-            identity_keys,
-            iat_mode,
-            drbg_seed,
-            persist_statefile,
-            statefile_observation,
-        } = effective;
+        let mut effective = self.effective_configuration()?;
         let server = Server(Arc::new(ServerInner {
-            identity_keys,
-            iat_mode,
+            identity_keys: effective.identity_keys.clone(),
+            iat_mode: effective.iat_mode,
             biased: false,
             handshake_timeout: self.handshake_timeout.clone(),
-            drbg_seed: Some(drbg_seed),
+            drbg_seed: Some(effective.drbg_seed.clone()),
             configuration_error: None,
             replay_filter: ReplayFilter::new(REPLAY_TTL),
         }));
-        if persist_statefile {
-            let observation = statefile_observation
+        if effective.persist_statefile {
+            let observation = effective
+                .statefile_observation
                 .as_ref()
                 .ok_or_else(|| Error::from("missing state-file persistence target"))?;
             self.ensure_statefile_unchanged(observation)?;
-            server.write_statefile_to(&observation.path)?;
-            let drbg_seed = server
-                .0
-                .drbg_seed
-                .clone()
-                .ok_or_else(|| Error::from("server DRBG seed is unavailable"))?;
-            self.remember_effective_configuration(EffectiveServerConfiguration {
-                identity_keys: server.0.identity_keys.clone(),
-                iat_mode: server.0.iat_mode,
-                drbg_seed,
-                persist_statefile: false,
-                statefile_observation: None,
-            });
+            match server.try_write_statefile_to(&observation.path) {
+                Ok(()) => {}
+                Err(AtomicWriteError::NotPublished(error)) => return Err(error),
+                Err(AtomicWriteError::PublishedButNotDurable {
+                    error,
+                    published_contents,
+                }) => {
+                    // Post-publication failure: persist() already replaced the
+                    // target with our own state, so adopt it as this builder's
+                    // own observation and keep persistence pending — a retry
+                    // then validates against our file and re-attempts the sync.
+                    let path = observation.path.clone();
+                    effective.statefile_observation = Some(StatefileObservation {
+                        path,
+                        contents: Some(published_contents),
+                    });
+                    self.remember_effective_configuration(effective.clone());
+                    return Err(error);
+                }
+            }
+            effective.persist_statefile = false;
+            effective.statefile_observation = None;
+            self.remember_effective_configuration(effective);
         }
         Ok(server)
     }
@@ -677,16 +681,22 @@ impl Server {
 
     /// Persist this server's identity and deterministic traffic seed.
     pub fn write_statefile_to(&self, path: impl AsRef<Path>) -> Result<()> {
-        let path = path.as_ref();
+        self.try_write_statefile_to(path.as_ref())
+            .map_err(Error::from)
+    }
+
+    /// Atomically publish the server state, distinguishing failures before the
+    /// target file is replaced from post-publication durability failures.
+    pub(crate) fn try_write_statefile_to(
+        &self,
+        path: &Path,
+    ) -> std::result::Result<(), AtomicWriteError> {
         let target = if path.is_dir() {
             path.join(STATE_FILENAME)
         } else {
             path.to_path_buf()
         };
-        let parent = target
-            .parent()
-            .filter(|parent| !parent.as_os_str().is_empty())
-            .unwrap_or_else(|| Path::new("."));
+        let parent = crate::parent_directory_of(&target);
         std::fs::create_dir_all(parent)?;
         let state = JsonServerState {
             node_id: Some(hex::encode(self.0.identity_keys.pk.id.as_bytes())),
@@ -701,8 +711,7 @@ impl Server {
             ),
             iat_mode: Some(self.0.iat_mode),
         };
-        crate::atomic_write_json(&target, &state)?;
-        Ok(())
+        crate::atomic_write_json(&target, &state)
     }
 
     /// Return a [`ClientBuilder`] pre-configured with this server's public parameters.

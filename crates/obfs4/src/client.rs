@@ -392,7 +392,7 @@ impl ClientBuilder {
             public_key: None,
             iat_mode: Some(self.iat_mode),
         };
-        crate::atomic_write_json(target, &state)
+        crate::atomic_write_json(target, &state).map_err(Error::from)
     }
 }
 

@@ -446,3 +446,67 @@ fn statefile_permissions_remain_owner_only() -> Result<()> {
     assert_eq!(mode, 0o600);
     Ok(())
 }
+
+/// On Unix the injected failure fires instead of the real directory fsync; on
+/// Windows, where directory fsync is a documented no-op, the seam still fails
+/// the durability step — the test exercises the same post-publication error
+/// path on every platform.
+#[test]
+fn try_build_retries_after_directory_sync_failure_after_publish() -> Result<()> {
+    use ptrs::ServerBuilder as _;
+
+    let temporary = tempfile::tempdir()?;
+    let state_dir = temporary.path().join("server");
+    std::fs::create_dir_all(&state_dir)?;
+
+    let mut builder = ServerBuilder::<TcpStream>::default();
+    builder.statefile_path(state_dir.to_string_lossy().as_ref());
+    let advertised = builder.try_client_params()?;
+    assert!(!advertised.is_empty());
+
+    crate::fail_next_parent_directory_sync(&state_dir);
+    assert!(
+        builder.try_build().is_err(),
+        "the durability failure must propagate as an error"
+    );
+
+    let state_path = state_dir.join(STATE_FILENAME);
+    assert!(
+        state_path.is_file(),
+        "persist() must already have published the state file when the error surfaced"
+    );
+    let persisted = std::fs::read(&state_path)?;
+    let synced = crate::synced_parent_directories();
+    assert_eq!(
+        synced
+            .iter()
+            .filter(|directory| **directory == state_dir)
+            .count(),
+        1,
+        "exactly one durability sync attempt expected after the failed build, synced={synced:?}"
+    );
+
+    let server = builder
+        .try_build()
+        .expect("retry after a transient directory-sync failure must succeed");
+    assert_eq!(builder.try_client_params()?, advertised);
+    assert_eq!(
+        ptrs::args::Args::parse_client_parameters(&server.client_params().as_opts()).unwrap(),
+        ptrs::args::Args::parse_smethod_args(&advertised).unwrap()
+    );
+    assert_eq!(
+        std::fs::read(&state_path)?,
+        persisted,
+        "the retry must not rewrite the already-published state file"
+    );
+    let synced = crate::synced_parent_directories();
+    assert_eq!(
+        synced
+            .iter()
+            .filter(|directory| **directory == state_dir)
+            .count(),
+        2,
+        "the retry must re-attempt the durability sync, synced={synced:?}"
+    );
+    Ok(())
+}
