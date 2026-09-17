@@ -84,6 +84,17 @@ async fn public_iface() -> Result<()> {
     Ok(())
 }
 
+/// Deterministic payload: the byte at offset `i` is a function of `i`, so an
+/// echoed stream that loses, duplicates, reorders, or corrupts any byte fails
+/// the content check in the test below, not only the length check.
+fn payload_byte(offset: usize) -> u8 {
+    (offset.wrapping_mul(31) ^ (offset >> 3)) as u8
+}
+
+fn payload(total: usize) -> Vec<u8> {
+    (0..total).map(payload_byte).collect()
+}
+
 #[allow(non_snake_case)]
 #[tokio::test]
 async fn transfer_10k_x1() -> Result<()> {
@@ -95,54 +106,88 @@ async fn transfer_10k_x1() -> Result<()> {
     let o4_server = Server::new_from_random(&mut rng);
     let client_config = o4_server.client_params();
 
-    tokio::spawn(async move {
-        let o4s_stream = o4_server.wrap(&mut s).await.unwrap();
+    // Keep the handle: a panic or error inside the echo task must surface in
+    // the test result, and the task must be joined instead of dangling.
+    let echo: tokio::task::JoinHandle<Result<u64>> = tokio::spawn(async move {
+        let o4s_stream = o4_server.wrap(&mut s).await?;
         let (mut r, mut w) = tokio::io::split(o4s_stream);
-        tokio::io::copy(&mut r, &mut w).await.unwrap();
+        let copied = tokio::io::copy(&mut r, &mut w).await?;
+        w.flush().await?;
+        Ok(copied)
     });
 
     let o4_client = client_config.build();
     let o4c_stream = o4_client.wrap(c).await?;
 
-    let (mut r, mut w) = tokio::io::split(o4c_stream);
-
-    tokio::spawn(async move {
-        let msg = [0_u8; 10240];
-        w.write_all(&msg)
-            .await
-            .unwrap_or_else(|e| panic!("failed on write {e}"));
-        w.flush().await.unwrap();
-    });
-
     let expected_total = 10240;
-    let mut buf = vec![0_u8; 1024 * 11];
-    let mut received: usize = 0;
-    for i in 0..8 {
-        // The loop bound is a ceiling on how many reads the payload may take,
-        // not a required count: how many frames a read returns is up to the
-        // transport, and once the whole payload has arrived no further data is
-        // coming, so another read would block until the timeout arm below
-        // fired and failed a perfectly healthy transfer. Same shape as
-        // `transfer_512k_x1`'s `while received < expected_total`.
-        if received >= expected_total {
-            break;
-        }
-        debug!("client read: {i}");
-        tokio::select! {
-            res = r.read(&mut buf) => {
-                let n = res?;
-                received += n;
-                trace!("received: {n}: total:{received}");
-            }
-            _ = tokio::time::sleep(READ_STALL_GUARD) => {
-                panic!("client failed to read after {i} iterations: timeout");
-            }
-        }
-    }
+    let expected = payload(expected_total);
 
-    if received != expected_total {
-        panic!("incorrect amount received {received} != {expected_total}");
-    }
+    // Writer and reader poll concurrently on the split halves, and the whole
+    // observable transfer sits under one deadline — a sleep recreated per
+    // read only bounds that single read, not the transfer. Both halves live
+    // in this test task, so the oracle below is observed by the test itself;
+    // nothing is delegated to a detached task.
+    let transfer = tokio::time::timeout(READ_STALL_GUARD, async move {
+        let (mut r, mut w) = tokio::io::split(o4c_stream);
+
+        let writer = async {
+            w.write_all(&expected).await?;
+            w.flush().await?;
+            Ok::<_, std::io::Error>(())
+        };
+
+        let mut received = vec![0_u8; expected_total];
+        let reader = async {
+            let mut off = 0;
+            while off < received.len() {
+                let n = r.read(&mut received[off..]).await?;
+                if n == 0 {
+                    // EOF before the full echo: fail now with the progress
+                    // made instead of looping on zero-byte reads.
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        format!("echo ended after {off}/{} bytes", received.len()),
+                    ));
+                }
+                off += n;
+                trace!("received: {n}: total:{off}");
+            }
+            Ok::<_, std::io::Error>(())
+        };
+
+        tokio::try_join!(writer, reader)?;
+
+        if let Some(off) = received
+            .iter()
+            .zip(expected.iter())
+            .position(|(got, want)| got != want)
+        {
+            panic!(
+                "echo content mismatch at offset {off}: sent {}, got {}",
+                expected[off], received[off]
+            );
+        }
+        Ok::<_, std::io::Error>(())
+    })
+    .await;
+
+    let transfer = match transfer {
+        Ok(result) => result,
+        // The deadline fired on a wedged transfer, so the echo task is wedged
+        // with it: panic without joining and let runtime teardown drop it.
+        Err(_) => panic!("transfer did not finish within {READ_STALL_GUARD:?}"),
+    };
+
+    // The echo task sees EOF once the split halves above are dropped at the
+    // end of the transfer block, so this join cannot hang on any path that
+    // reaches it.
+    let echoed = echo.await.expect("echo task panicked")?;
+    assert_eq!(
+        echoed, expected_total as u64,
+        "echo task copied {echoed} bytes, expected {expected_total}"
+    );
+
+    transfer?;
     Ok(())
 }
 
@@ -156,51 +201,79 @@ async fn transfer_10k_x3() -> Result<()> {
     let o4_server = Server::getrandom();
     let client_config = o4_server.client_params();
 
-    tokio::spawn(async move {
-        let o4s_stream = o4_server.wrap(&mut s).await.unwrap();
+    // Keep the handle: see `transfer_10k_x1`.
+    let echo: tokio::task::JoinHandle<Result<u64>> = tokio::spawn(async move {
+        let o4s_stream = o4_server.wrap(&mut s).await?;
         let (mut r, mut w) = tokio::io::split(o4s_stream);
-        tokio::io::copy(&mut r, &mut w).await.unwrap();
+        let copied = tokio::io::copy(&mut r, &mut w).await?;
+        w.flush().await?;
+        Ok(copied)
     });
 
     let o4_client = client_config.build();
     let o4c_stream = o4_client.wrap(c).await?;
 
-    let (mut r, mut w) = tokio::io::split(o4c_stream);
-
-    tokio::spawn(async move {
-        for _ in 0..3 {
-            let msg = [0_u8; 10240];
-            w.write_all(&msg)
-                .await
-                .unwrap_or_else(|e| panic!("failed on write {e}"));
-            w.flush().await.unwrap();
-        }
-    });
-
     let expected_total = 10240 * 3;
-    let mut buf = vec![0_u8; 1024 * 32];
-    let mut received: usize = 0;
-    for i in 0..24 {
-        // Ceiling, not a required read count — see `transfer_10k_x1`.
-        if received >= expected_total {
-            break;
-        }
-        // debug!("client read: {i}");
-        tokio::select! {
-            res = r.read(&mut buf) => {
-                let n = res?;
-                received += n;
-                trace!("received: {n}: total:{received}");
-            }
-            _ = tokio::time::sleep(READ_STALL_GUARD) => {
-                panic!("client failed to read after {i} iterations: timeout");
-            }
-        }
-    }
+    let expected = payload(expected_total);
 
-    if received != expected_total {
-        panic!("incorrect amount received {received} != {expected_total}");
-    }
+    // Same shape as `transfer_10k_x1`, but the payload goes out as three
+    // separately flushed messages, so every message carries different bytes.
+    let transfer = tokio::time::timeout(READ_STALL_GUARD, async move {
+        let (mut r, mut w) = tokio::io::split(o4c_stream);
+
+        let writer = async {
+            for chunk in expected.chunks(10240) {
+                w.write_all(chunk).await?;
+                w.flush().await?;
+            }
+            Ok::<_, std::io::Error>(())
+        };
+
+        let mut received = vec![0_u8; expected_total];
+        let reader = async {
+            let mut off = 0;
+            while off < received.len() {
+                let n = r.read(&mut received[off..]).await?;
+                if n == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        format!("echo ended after {off}/{} bytes", received.len()),
+                    ));
+                }
+                off += n;
+                trace!("received: {n}: total:{off}");
+            }
+            Ok::<_, std::io::Error>(())
+        };
+
+        tokio::try_join!(writer, reader)?;
+
+        if let Some(off) = received
+            .iter()
+            .zip(expected.iter())
+            .position(|(got, want)| got != want)
+        {
+            panic!(
+                "echo content mismatch at offset {off}: sent {}, got {}",
+                expected[off], received[off]
+            );
+        }
+        Ok::<_, std::io::Error>(())
+    })
+    .await;
+
+    let transfer = match transfer {
+        Ok(result) => result,
+        Err(_) => panic!("transfer did not finish within {READ_STALL_GUARD:?}"),
+    };
+
+    let echoed = echo.await.expect("echo task panicked")?;
+    assert_eq!(
+        echoed, expected_total as u64,
+        "echo task copied {echoed} bytes, expected {expected_total}"
+    );
+
+    transfer?;
     Ok(())
 }
 
@@ -215,49 +288,79 @@ async fn transfer_1M_1024x1024() -> Result<()> {
     let o4_server = Server::new_from_random(&mut rng);
     let client_config = o4_server.client_params();
 
-    tokio::spawn(async move {
-        let o4s_stream = o4_server.wrap(&mut s).await.unwrap();
+    // Keep the handle: see `transfer_10k_x1`.
+    let echo: tokio::task::JoinHandle<Result<u64>> = tokio::spawn(async move {
+        let o4s_stream = o4_server.wrap(&mut s).await?;
         let (mut r, mut w) = tokio::io::split(o4s_stream);
-        tokio::io::copy(&mut r, &mut w).await.unwrap();
+        let copied = tokio::io::copy(&mut r, &mut w).await?;
+        w.flush().await?;
+        Ok(copied)
     });
 
     let o4_client = client_config.build();
     let o4c_stream = o4_client.wrap(c).await?;
 
-    let (mut r, mut w) = tokio::io::split(o4c_stream);
-
-    tokio::spawn(async move {
-        let msg = [0_u8; 1024];
-        for i in 0..1024 {
-            w.write_all(&msg)
-                .await
-                .unwrap_or_else(|e| panic!("failed on write #{i}: {e}"));
-            w.flush().await.unwrap();
-        }
-    });
-
     let expected_total = 1024 * 1024;
-    let mut buf = vec![0_u8; 1024 * 1024];
-    let mut received: usize = 0;
-    for i in 0..1024 {
-        // Ceiling, not a required read count — see `transfer_10k_x1`.
-        if received >= expected_total {
-            break;
-        }
-        // debug!("client read: {i}");
-        tokio::select! {
-            res = r.read(&mut buf) => {
-                received += res?;
-            }
-            _ = tokio::time::sleep(READ_STALL_GUARD) => {
-                panic!("client failed to read after {i} iterations: timeout");
-            }
-        }
-    }
+    let expected = payload(expected_total);
 
-    if received != expected_total {
-        panic!("incorrect amount received {received} != {expected_total}");
-    }
+    // Same shape as `transfer_10k_x1`, but written as 1024 separately flushed
+    // 1 KiB writes, so successive writes carry different bytes.
+    let transfer = tokio::time::timeout(READ_STALL_GUARD, async move {
+        let (mut r, mut w) = tokio::io::split(o4c_stream);
+
+        let writer = async {
+            for chunk in expected.chunks(1024) {
+                w.write_all(chunk).await?;
+                w.flush().await?;
+            }
+            Ok::<_, std::io::Error>(())
+        };
+
+        let mut received = vec![0_u8; expected_total];
+        let reader = async {
+            let mut off = 0;
+            while off < received.len() {
+                let n = r.read(&mut received[off..]).await?;
+                if n == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        format!("echo ended after {off}/{} bytes", received.len()),
+                    ));
+                }
+                off += n;
+                trace!("received: {n}: total:{off}");
+            }
+            Ok::<_, std::io::Error>(())
+        };
+
+        tokio::try_join!(writer, reader)?;
+
+        if let Some(off) = received
+            .iter()
+            .zip(expected.iter())
+            .position(|(got, want)| got != want)
+        {
+            panic!(
+                "echo content mismatch at offset {off}: sent {}, got {}",
+                expected[off], received[off]
+            );
+        }
+        Ok::<_, std::io::Error>(())
+    })
+    .await;
+
+    let transfer = match transfer {
+        Ok(result) => result,
+        Err(_) => panic!("transfer did not finish within {READ_STALL_GUARD:?}"),
+    };
+
+    let echoed = echo.await.expect("echo task panicked")?;
+    assert_eq!(
+        echoed, expected_total as u64,
+        "echo task copied {echoed} bytes, expected {expected_total}"
+    );
+
+    transfer?;
     Ok(())
 }
 
@@ -272,50 +375,82 @@ async fn transfer_512k_x1() -> Result<()> {
     let o4_server = Server::new_from_random(&mut rng);
     let client_config = o4_server.client_params();
 
-    tokio::spawn(async move {
-        let o4s_stream = o4_server.wrap(&mut s).await.unwrap();
+    // Keep the handle: see `transfer_10k_x1`.
+    let echo: tokio::task::JoinHandle<Result<u64>> = tokio::spawn(async move {
+        let o4s_stream = o4_server.wrap(&mut s).await?;
         let (mut r, mut w) = tokio::io::split(o4s_stream);
-        tokio::io::copy(&mut r, &mut w).await.unwrap();
+        let copied = tokio::io::copy(&mut r, &mut w).await?;
+        w.flush().await?;
+        Ok(copied)
     });
 
     let o4_client = client_config.build();
     let o4c_stream = o4_client.wrap(c).await?;
 
-    let (mut r, mut w) = tokio::io::split(o4c_stream);
+    let expected_total = 1024 * 512;
+    let expected = payload(expected_total);
 
-    tokio::spawn(async move {
-        let expected_total = 1024 * 512;
-        let mut buf = vec![0_u8; 1024 * 513];
-        let mut received: usize = 0;
-        let mut i = 0;
-        while received < expected_total {
-            debug!("client read: {i} / {received}");
-            tokio::select! {
-                res = r.read(&mut buf) => {
-                    received += res.unwrap();
+    // The reader is part of the observed transfer, not a detached task. The
+    // duplex buffer is no larger than the payload and obfs4 framing makes the
+    // ciphertext bigger, so a sequential write-then-read would deadlock and
+    // the halves must be polled concurrently — but under `try_join!`, in this
+    // test task, where the oracle is observed and reader panics propagate.
+    let transfer = tokio::time::timeout(READ_STALL_GUARD, async move {
+        let (mut r, mut w) = tokio::io::split(o4c_stream);
+
+        let writer = async {
+            w.write_all(&expected).await?;
+            w.flush().await?;
+            Ok::<_, std::io::Error>(())
+        };
+
+        let mut received = vec![0_u8; expected_total];
+        let reader = async {
+            let mut off = 0;
+            while off < received.len() {
+                let n = r.read(&mut received[off..]).await?;
+                if n == 0 {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::UnexpectedEof,
+                        format!("echo ended after {off}/{} bytes", received.len()),
+                    ));
                 }
-                _ = tokio::time::sleep(READ_STALL_GUARD) => {
-                    panic!("client failed to read after {i} iterations: timeout");
-                }
+                off += n;
+                trace!("received: {n}: total:{off}");
             }
-            i += 1;
+            Ok::<_, std::io::Error>(())
+        };
+
+        tokio::try_join!(writer, reader)?;
+
+        if let Some(off) = received
+            .iter()
+            .zip(expected.iter())
+            .position(|(got, want)| got != want)
+        {
+            panic!(
+                "echo content mismatch at offset {off}: sent {}, got {}",
+                expected[off], received[off]
+            );
         }
+        Ok::<_, std::io::Error>(())
+    })
+    .await;
 
-        assert_eq!(
-            received, expected_total,
-            "incorrect amount received {received} != {expected_total}"
-        );
-    });
+    let transfer = match transfer {
+        Ok(result) => result,
+        Err(_) => panic!("transfer did not finish within {READ_STALL_GUARD:?}"),
+    };
 
-    let msg = [0_u8; 1024 * 512];
-    w.write_all(&msg)
-        .await
-        .unwrap_or_else(|_| panic!("failed on write"));
-    w.flush().await?;
+    let echoed = echo.await.expect("echo task panicked")?;
+    assert_eq!(
+        echoed, expected_total as u64,
+        "echo task copied {echoed} bytes, expected {expected_total}"
+    );
 
+    transfer?;
     Ok(())
 }
-
 // Repro for the tor-socks5 cold-consensus stall: a ~3 MiB one-directional
 // transfer over a REAL TCP loopback socket (not an in-memory `duplex`, which
 // has no real backpressure / partial-frame boundaries). The server sends, the
