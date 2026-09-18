@@ -85,7 +85,10 @@ jobs:
           workspaces: source
       - uses: taiki-e/install-action@v2
         with:
-          tools: cargo-semver-checks,cargo-deny
+          tool: cargo-semver-checks
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-deny
       - name: Verify source and versions
         run: python3 ../automation/.github/scripts/release_source.py verify --version "$RELEASE_VERSION" --source-sha "$RELEASE_SHA"
       - name: Validate release tooling
