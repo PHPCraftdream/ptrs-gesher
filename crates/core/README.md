@@ -32,22 +32,22 @@ concrete transport (`obfs4`, `webtunnel`, etc.) implements:
 
 ## Status
 
-Version `0.3.0` -- not yet published to crates.io. Interface subject to
-change.
+Version `0.6.0` requires Rust 1.89 or newer. See the
+[migration guide](https://github.com/PHPCraftdream/ptrs-gesher/blob/v0.6.0/docs/MIGRATING-0.6.md)
+for the separate SOCKS and SMETHOD argument formats.
 
 ## Example
 
 ```rust ignore
-use ptrs::{Args, ClientBuilder as _};
+use ptrs::Args;
 use obfs4;
 
 let mut args = Args::new();
 args.add("cert", "AAAA...");
 args.add("iat-mode", "0");
 
-let mut builder = obfs4::ClientBuilder::default();
-builder.options(&args)?;
-let client = builder.build();
+let builder = obfs4::ClientBuilder::from_params(vec![args.encode_client_parameters().into_bytes()])?;
+let client = builder.try_build()?;
 // client.establish(...) or client.wrap(...) to create the tunnel.
 ```
 

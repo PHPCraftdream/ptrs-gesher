@@ -10,6 +10,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  release-tools:
+    name: Release tooling regressions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest discover -s .github/scripts/tests -v
+
   fmt:
     runs-on: ubuntu-latest
     steps:

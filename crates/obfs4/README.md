@@ -18,8 +18,10 @@ providing both client and server sides. Part of the
 
 ## Status
 
-Version `0.3.0` -- not yet published to crates.io. Interface subject to
-change. Not production ready; do not rely on this for security-critical
+Version `0.6.0` requires Rust 1.89 or newer. See the
+[migration guide](https://github.com/PHPCraftdream/ptrs-gesher/blob/v0.6.0/docs/MIGRATING-0.6.md)
+for state-file and fallible configuration APIs.
+Not production ready; do not rely on this for security-critical
 applications.
 
 ## Example
@@ -27,14 +29,15 @@ applications.
 Client example using the `ptrs-gesher-core` trait framework:
 
 ```rust ignore
-use ptrs::{Args, ClientBuilder as _, ClientTransport as _};
+use ptrs::Args;
 use obfs4;
 use tokio::net::TcpStream;
 
-let args = Args::from_str("")?;
-let client = obfs4::ClientBuilder::default()
-    .options(&args)?
-    .build();
+let mut args = Args::new();
+args.add("cert", "<certificate from the bridge line>");
+args.add("iat-mode", "0");
+let client = obfs4::ClientBuilder::from_params(vec![args.encode_client_parameters().into_bytes()])?
+    .try_build()?;
 
 // future that opens a tcp connection when awaited
 let conn_future = TcpStream::connect("127.0.0.1:9000");

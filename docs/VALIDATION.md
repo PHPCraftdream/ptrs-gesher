@@ -32,8 +32,10 @@ python .github/scripts/release-check.py
 
 The release gate requires `cargo-deny` and `cargo-semver-checks`. Use
 `--skip-deny` or `--skip-semver` only when recording an explicitly incomplete
-local result. Trusted publishing and registry credentials remain external
-release configuration.
+local result. The release workflow uses Trusted Publishing; the one-time
+per-crate settings and GitHub environment are listed in [RELEASING.md](RELEASING.md).
+Release checks accept `--root` so updated automation can validate the immutable
+source checkout, and use the baseline version recorded in workspace metadata.
 
 ## Recovery API changes
 

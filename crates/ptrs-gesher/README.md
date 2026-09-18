@@ -35,9 +35,11 @@ convenience, and also exposes the underlying crate modules (`ptrs`,
 
 ## Status
 
-Version `0.3.0` — not yet published to crates.io. Interface subject to
-change. Not production ready; do not rely on this for security-critical
-applications.
+Version `0.6.0` requires Rust 1.89 or newer. It introduces breaking changes
+from 0.5.x, including WebTunnel carrier output types and argument parsing.
+Read the [0.6 migration guide](https://github.com/PHPCraftdream/ptrs-gesher/blob/v0.6.0/docs/MIGRATING-0.6.md)
+before upgrading. The managed server remains experimental and disabled by default.
+Not production ready; do not rely on this for security-critical applications.
 
 ## Example
 
@@ -59,7 +61,7 @@ for (k, v) in &bridge.params {
 }
 
 // Look up the transport name.
-assert_eq!(Obfs4PT::name(), "obfs4");
+assert_eq!(<Obfs4PT as PluggableTransport<tokio::net::TcpStream>>::name(), "obfs4");
 ```
 
 ## License

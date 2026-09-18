@@ -33,8 +33,9 @@ standalone without pulling in the rest of the `ptrs-gesher` framework.
 
 ## Status
 
-Version `0.3.0` — not yet published to crates.io. Interface subject to
-change.
+Version `0.6.0` requires Rust 1.89 or newer. Transport names follow
+`[A-Za-z_][A-Za-z0-9_]*`; see the
+[migration guide](https://github.com/PHPCraftdream/ptrs-gesher/blob/v0.6.0/docs/MIGRATING-0.6.md).
 
 ## Example
 

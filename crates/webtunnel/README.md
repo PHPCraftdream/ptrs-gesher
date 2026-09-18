@@ -38,16 +38,17 @@ censoring middleboxes.
 
 ## Status
 
-Version `0.3.0` — not yet published to crates.io. Interface subject to
-change. Not production ready; do not rely on this for security-critical
+Version `0.6.0` requires Rust 1.89 or newer. See the
+[migration guide](https://github.com/PHPCraftdream/ptrs-gesher/blob/v0.6.0/docs/MIGRATING-0.6.md).
+Not production ready; do not rely on this for security-critical
 applications.
 
 ## Example
 
 ```rust ignore
 use ptrs::args::Args;
-use ptrs::ClientBuilder as _;
-use webtunnel::{WebTunnelBuilder, WebTunnelConfig};
+use ptrs::ClientBuilder;
+use webtunnel::WebTunnelBuilder;
 use tokio::net::TcpStream;
 
 // Build configuration from bridge-line key=value args.
@@ -56,15 +57,13 @@ args.add("url", "https://example.com/secretPath");
 
 // Configure the builder.
 let mut builder = WebTunnelBuilder::default();
-builder.options(&args).expect("invalid webtunnel args");
+<WebTunnelBuilder as ClientBuilder<TcpStream>>::options(&mut builder, &args)?;
 
 // Build the client transport.
-let client = builder.build();
+let client = <WebTunnelBuilder as ClientBuilder<TcpStream>>::build(&builder);
 
-// The client can now establish a tunnel. In a real application the
-// TCP future comes from lyrebird's SOCKS5 accept loop:
-//   let tunnel = client.establish(Box::pin(tcp_future)).await?;
-// The returned tunnel implements AsyncRead + AsyncWrite.
+let tunnel = client.connect_url().await?;
+// Alternatively, ClientTransport::wrap/establish use a supplied carrier.
 ```
 
 ## License

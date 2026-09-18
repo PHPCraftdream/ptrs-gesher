@@ -2,130 +2,171 @@ name: Release
 
 on:
   push:
-    tags:
-      - 'v*'
-  # Manual re-trigger from the Actions UI.  Pick this when a tagged release
-  # half-succeeded (e.g. crates.io rate-limited the last crate) and you need
-  # the workflow to retry with the latest main-branch logic, not the workflow
-  # frozen at the tag's commit.  The version input must match the versions in
-  # Cargo.toml; idempotent steps will skip crates already on the registry.
+    tags: ['v*']
   workflow_dispatch:
     inputs:
       version:
-        description: 'Version to (re-)publish, without the v prefix (e.g. 0.1.0)'
+        description: 'Existing release tag version, without v'
+        required: true
+        type: string
+      source_sha:
+        description: 'Full 40-character commit SHA of the original release tag'
         required: true
         type: string
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
+  CARGO_BUILD_JOBS: 2
+  PYTHONDONTWRITEBYTECODE: 1
 
 jobs:
-  # Release gate added after 0.5.3, where the semver comparison was done by
-  # hand. Runs only at release cadence (tag push / manual dispatch), since
-  # rustdoc-JSON builds of every crate are too expensive for every push.
-  semver-checks:
-    name: Semver checks
+  source:
+    name: Resolve immutable release source
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+      version: ${{ steps.resolve.outputs.version }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      - name: Install cargo-semver-checks
-        uses: taiki-e/install-action@cargo-semver-checks
-      # Compares each workspace crate against its currently published version
-      # on crates.io and fails the release if the public API breaks without
-      # the required version bump (major for 1.x, minor for 0.x crates).
-      - name: Check public API against the last published release
-        run: cargo semver-checks check-release
-
-  publish:
-    name: Publish to crates.io
-    needs: semver-checks
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: dtolnay/rust-toolchain@stable
-
-      - uses: Swatinem/rust-cache@v2
-
-      - name: Verify tag matches crate versions
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify original tag and SHA
+        id: resolve
         env:
-          RELEASE_VERSION: ${{ inputs.version }}
+          INPUT_VERSION: ${{ inputs.version }}
+          INPUT_SHA: ${{ inputs.source_sha }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="$RELEASE_VERSION"
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            version="$INPUT_VERSION"
+            sha="$INPUT_SHA"
           else
-            TAG="${GITHUB_REF_NAME#v}"
+            version="${GITHUB_REF_NAME#v}"
+            sha="$(git rev-parse "$GITHUB_SHA^{commit}")"
           fi
-          echo "target version: $TAG"
-          mismatch=0
-          for crate in core bridge-line obfs4 webtunnel lyrebird ptrs-gesher; do
-            v=$(cargo metadata --no-deps --format-version 1 \
-                 | jq -r ".packages[] | select(.manifest_path | endswith(\"crates/$crate/Cargo.toml\")) | .version")
-            echo "$crate: $v"
-            if [ "$v" != "$TAG" ]; then
-              echo "::error::crates/$crate version $v != tag $TAG"
-              mismatch=1
-            fi
-          done
-          exit $mismatch
+          python3 .github/scripts/release_source.py resolve --version "$version" --source-sha "$sha"
 
-      - name: Build workspace
-        run: cargo build --workspace --all-targets --locked
+  checks:
+    name: Release checks
+    needs: source
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: source
+    env:
+      RELEASE_VERSION: ${{ needs.source.outputs.version }}
+      RELEASE_SHA: ${{ needs.source.outputs.sha }}
+    steps:
+      # Workflow fixes may come from the dispatch ref; package sources may not.
+      - uses: actions/checkout@v4
+        with:
+          path: automation
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          path: source
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.89
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: source/tools/interop/go/go.sum
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: source
+      - uses: taiki-e/install-action@v2
+        with:
+          tools: cargo-semver-checks,cargo-deny
+      - name: Verify source and versions
+        run: python3 ../automation/.github/scripts/release_source.py verify --version "$RELEASE_VERSION" --source-sha "$RELEASE_SHA"
+      - name: Validate release tooling
+        working-directory: automation
+        run: python3 -m unittest discover -s .github/scripts/tests -v
+      - name: Run local release gates against pinned source
+        run: python3 ../automation/.github/scripts/release-check.py --root "$PWD"
 
-      - name: Run tests
-        run: cargo test --workspace --locked --no-fail-fast
-
-      # Release-profile tests, also only at release cadence: proptest-heavy
-      # suites run their recommended 10k iterations under --release (see
-      # CONTRIBUTING.md), and the thin-LTO/codegen-units=1 release profile is
-      # too slow to pay for on every push. Until 0.5.3 this was manual, too.
-      - name: Run tests (release profile)
-        run: cargo test --workspace --release --locked --no-fail-fast
-
-      - name: Make publish script executable
-        run: chmod +x .github/scripts/publish.sh
-
-      # Each publish step is idempotent:
-      #   - "already exists" -> skip with success (re-runs of partial releases work)
-      #   - "429 Too Many Requests" -> retry with backoff (crates.io rate-limits
-      #     new crate names at ~1 per 10 min for fresh accounts; 600s waits the
-      #     window out)
-      # Cargo >=1.66 itself blocks on the registry index until the freshly-
-      # published crate is discoverable (default 60s), so no sleep between
-      # steps is needed for dependency ordering.
-      - name: Publish ptrs-gesher-core
-        run: .github/scripts/publish.sh ptrs-gesher-core
+  publish:
+    name: Publish pinned release
+    needs: [source, checks]
+    runs-on: ubuntu-latest
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: publish-${{ needs.source.outputs.version }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: source
+    env:
+      RELEASE_VERSION: ${{ needs.source.outputs.version }}
+      RELEASE_SHA: ${{ needs.source.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: automation
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/checkout@v4
+        with:
+          path: source
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: source
+      - name: Reject mismatched partial releases before any upload
+        run: python3 ../automation/.github/scripts/publish.py check-existing --version "$RELEASE_VERSION" --source-sha "$RELEASE_SHA"
+      - name: Authenticate core
+        id: auth-core
+        uses: rust-lang/crates-io-auth-action@v1
+      - name: Publish core
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Publish ptrs-gesher-bridge-line
-        run: .github/scripts/publish.sh ptrs-gesher-bridge-line
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth-core.outputs.token }}
+        run: python3 ../automation/.github/scripts/publish.py ptrs-gesher-core --version "$RELEASE_VERSION" --source-sha "$RELEASE_SHA"
+      - name: Authenticate bridge-line
+        id: auth-bridge-line
+        uses: rust-lang/crates-io-auth-action@v1
+      - name: Publish bridge-line
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Publish ptrs-gesher-obfs4
-        run: .github/scripts/publish.sh ptrs-gesher-obfs4
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth-bridge-line.outputs.token }}
+        run: python3 ../automation/.github/scripts/publish.py ptrs-gesher-bridge-line --version "$RELEASE_VERSION" --source-sha "$RELEASE_SHA"
+      - name: Authenticate obfs4
+        id: auth-obfs4
+        uses: rust-lang/crates-io-auth-action@v1
+      - name: Publish obfs4
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Publish ptrs-gesher-webtunnel
-        run: .github/scripts/publish.sh ptrs-gesher-webtunnel
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth-obfs4.outputs.token }}
+        run: python3 ../automation/.github/scripts/publish.py ptrs-gesher-obfs4 --version "$RELEASE_VERSION" --source-sha "$RELEASE_SHA"
+      - name: Authenticate webtunnel
+        id: auth-webtunnel
+        uses: rust-lang/crates-io-auth-action@v1
+      - name: Publish webtunnel
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Publish ptrs-gesher-lyrebird
-        run: .github/scripts/publish.sh ptrs-gesher-lyrebird
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth-webtunnel.outputs.token }}
+        run: python3 ../automation/.github/scripts/publish.py ptrs-gesher-webtunnel --version "$RELEASE_VERSION" --source-sha "$RELEASE_SHA"
+      - name: Authenticate lyrebird
+        id: auth-lyrebird
+        uses: rust-lang/crates-io-auth-action@v1
+      - name: Publish lyrebird
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-
-      - name: Publish ptrs-gesher (umbrella)
-        run: .github/scripts/publish.sh ptrs-gesher
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth-lyrebird.outputs.token }}
+        run: python3 ../automation/.github/scripts/publish.py ptrs-gesher-lyrebird --version "$RELEASE_VERSION" --source-sha "$RELEASE_SHA"
+      - name: Authenticate umbrella
+        id: auth-umbrella
+        uses: rust-lang/crates-io-auth-action@v1
+      - name: Publish umbrella
         env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth-umbrella.outputs.token }}
+        run: python3 ../automation/.github/scripts/publish.py ptrs-gesher --version "$RELEASE_VERSION" --source-sha "$RELEASE_SHA"

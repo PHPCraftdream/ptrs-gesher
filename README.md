@@ -41,18 +41,18 @@ project.
 
 All crates are dual-licensed `MIT OR Apache-2.0`.
 
-## Source compatibility with `jmwample/ptrs`
+## Crate names and migration
 
 Cross-crate dependencies use Cargo's `package =` rename so consumers continue
-to `use ptrs::...`, `use obfs4::...`, etc. — no source-code migration is
-needed when moving from `jmwample/ptrs` to `ptrs-gesher`. Adjust only the
-`Cargo.toml`:
+to `use ptrs::...`, `use obfs4::...`, etc. Version 0.6.0 includes API and
+behavior changes; see [the migration guide](docs/MIGRATING-0.6.md) when updating
+from 0.5.x or upstream. Dependency names can remain unchanged:
 
 ```toml
 [dependencies]
-ptrs    = { package = "ptrs-gesher-core",   version = "0.5.3" }
-obfs4   = { package = "ptrs-gesher-obfs4",  version = "0.5.3" }
-webtunnel = { package = "ptrs-gesher-webtunnel", version = "0.5.3" }
+ptrs    = { package = "ptrs-gesher-core",   version = "0.6.0" }
+obfs4   = { package = "ptrs-gesher-obfs4",  version = "0.6.0" }
+webtunnel = { package = "ptrs-gesher-webtunnel", version = "0.6.0" }
 ```
 
 ## Differences from upstream
@@ -69,7 +69,7 @@ webtunnel = { package = "ptrs-gesher-webtunnel", version = "0.5.3" }
 
 - Workspace builds on stable Rust ≥ 1.89.
 - Unit, integration, property, and protocol tests run in CI.
-- All six published crates are versioned in lockstep; the workspace is at 0.5.3.
+- All six crates are versioned in lockstep; the workspace is prepared for 0.6.0.
 - Real Tor HTTPS smoke tests complement the offline protocol tests. They measure
   functional connectivity, not long-term availability under every network condition.
 
@@ -77,7 +77,6 @@ webtunnel = { package = "ptrs-gesher-webtunnel", version = "0.5.3" }
 
 ```rust ignore
 use ptrs_gesher::{Args, BridgeLine};
-use ptrs::ClientBuilder;
 
 // Parse a torrc bridge line:
 let bridge: BridgeLine =
@@ -89,9 +88,8 @@ let mut args = Args::new();
 for (k, v) in &bridge.params { args.add(k, v); }
 
 // Build the obfs4 client:
-let mut builder = obfs4::ClientBuilder::default();
-builder.options(&args)?;
-let client = builder.build();
+let builder = obfs4::ClientBuilder::from_params(vec![args.encode_client_parameters().into_bytes()])?;
+let client = builder.try_build()?;
 // client.establish(tcp_future).await yields an AsyncRead+AsyncWrite tunnel.
 ```
 

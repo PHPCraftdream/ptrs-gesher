@@ -7,19 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-18
+
+Prepared locally; publication is pending. All six published crates move to 0.6.0
+in lockstep; Rust 1.89 remains the minimum supported version.
+
+### Breaking changes
+
+- **webtunnel**: `ClientTransport::wrap` and `establish` now use the supplied
+  carrier instead of discarding it and dialing the configured URL. Use
+  `WebTunnelClient::connect_url()` for direct URL connections. For non-TCP
+  carriers, `OutRW` is now `PrefixStream<WebTunnelStream<Carrier>>`, rather than
+  the TCP specialization. Typed consumers must update their output types.
+- **core**: client/SOCKS argument parsing, including `Args::from_str`, treats
+  only `;` as a separator. SMETHOD parsing uses the explicit
+  `Args::parse_smethod_args` API and `,` separator. Commas inside SOCKS URL
+  values and semicolons inside SMETHOD values are preserved.
+- **bridge-line**: transport names must match `[A-Za-z_][A-Za-z0-9_]*`;
+  names beginning with digits or containing hyphens are rejected.
+- Unsupported obfs4 bind setters and WebTunnel persistent-state configuration
+  return errors. WebTunnel bind addresses apply only to `connect_url`; combining
+  them with a supplied carrier is rejected instead of silently ignored.
+
+See [migration to 0.6.0](docs/MIGRATING-0.6.md) for updated call sites and state-file rules.
+
+### Added
+
+- **core**: paired `parse_smethod_args`/`encode_smethod_args` and
+  `parse_client_parameters`/`encode_client_parameters` APIs.
+- **obfs4**: fallible `try_build`, `try_node_keys`, `try_statefile_path`,
+  `try_client_params`, and `try_get_args` APIs; explicit
+  `Server::new_from_statefile_at` and `write_statefile_to` operations.
+- **lyrebird**: `run_from_env()` lets embedding applications own CLI and logging
+  setup while retaining the managed-transport lifecycle.
+
 ### Fixed
 
+- **obfs4**: schedule actual ciphertext writes according to IAT mode, rather
+  than delaying only plaintext buffering. Flush and shutdown drain accepted
+  data; partial writes, Interrupted and terminal errors preserve byte accounting
+  and I/O error kinds without duplicating an accepted prefix.
+- **obfs4**: implement client parameter parsing, serialization and transactional
+  argument updates. Legacy infallible APIs defer configuration errors until
+  handshake; their fallible counterparts return errors immediately.
+- **obfs4**: apply state-file setters and preserve fieldwise overrides. Go numeric
+  IAT values and legacy string values are accepted. Validate supplied key pairs,
+  retain configured traffic seeds, and keep advertised client parameters aligned
+  with the effective server identity used by subsequent builds.
+- **obfs4**: use unique temporary files and atomic state replacement with Unix
+  permissions 0600. Sync the parent directory on Unix; a failed durability sync
+  after publication can be retried without treating our own write as an external
+  replacement or changing the advertised identity.
+- **obfs4/webtunnel**: reject overflowing handshake timeouts before polling dial
+  futures or starting handshake I/O.
+- **webtunnel**: apply IPv4/IPv6 bind addresses to the corresponding URL dial.
+  Lyrebird uses explicit URL dialing and does not resolve or connect to the
+  cosmetic SOCKS target for this transport.
+- **lyrebird**: cancel owned listeners and connections when the run future is
+  dropped or aborted, including registration races. Retry transient accept
+  errors; a lost listener or listener panic propagates after cleanup.
+- **lyrebird**: reconfigure owned logging destinations and filters, including
+  active spans and existing callsites, while preserving foreign subscribers,
+  external logger levels and safe-logging guard lifetimes.
+- **core**: retain explicit default proxy ports after URL normalization; treat
+  an empty `TOR_PT_EXTENDED_SERVER_PORT` as absent.
+- **bridge-line**: round-trip a transport named `Bridge` with an explicit prefix.
+- **obfs4**: convert existing seed bytes without consulting the random source;
+  make echo-test content and byte-count assertions observable by the parent test.
 - **obfs4**: preserve replay history when caller timestamps arrive out of order;
   checking a duplicate at capacity no longer evicts an unexpired entry.
 - **lyrebird**: bound SOCKS5 negotiation to ten seconds, retain the safe-logging
   guard, honor log levels, and preserve an embedding application's subscriber.
-  The additive `run_from_env()` entry point leaves CLI and logging configuration
-  to the embedding application.
 - **webtunnel**: give later addresses a chance after a stalled dial and reserve
   time for system-DNS fallback within the overall handshake deadline.
 - **obfs4**: accept the maximum valid message body consistently and leave the
   destination unchanged when message construction fails.
-- Update locked `rustls` to 0.23.45 to address
+- Require `rustls >=0.23.45` within the 0.23 series, including downstream consumers,
+  to address
   [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285.html).
 - **lyrebird**: keep stdin EOF detection active during graceful shutdown and
   cancel it without leaving a blocking reader behind. Join owned connection
@@ -37,6 +101,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Reduce temporary allocations in argument parsing and SMETHOD encoding.
 - Measure obfs4 throughput on an established tunnel, with concurrent reads and
   writes and fully awaited cleanup. No new performance baseline is claimed.
+- Track connection abort handles by task ID instead of rescanning active handles
+  for each new connection.
+- Pin release sources to an explicit tag/SHA across checks and partial retries;
+  verify existing registry versions, archive checksums and VCS revision before
+  reporting publish success. Local filesystem errors cannot masquerade as a
+  package already present on crates.io.
+- Use crates.io Trusted Publishing for all six crates, with fresh short-lived
+  OIDC credentials for each publication and no stored registry-token secret.
+  One-time configuration is documented in [RELEASING.md](docs/RELEASING.md).
+- Add release-tooling regressions and bounded Rust/Go interoperability checks
+  in both directions for all IAT modes, including malformed handshake replies.
 
 ## [0.5.3] - 2026-09-08
 

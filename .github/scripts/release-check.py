@@ -17,7 +17,9 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--root", type=Path, default=ROOT, help="source checkout to verify")
     parser.add_argument("--cargo", default="cargo")
+    parser.add_argument("--go", default="go", help="Go executable for local interoperability")
     parser.add_argument("--deny", default="cargo-deny")
     parser.add_argument("--semver", default="cargo-semver-checks")
     parser.add_argument("--msrv", default="1.89", help="rustup toolchain for the MSRV check")
@@ -26,6 +28,7 @@ def main() -> int:
     parser.add_argument("--skip-deny", action="store_true")
     parser.add_argument("--skip-package", action="store_true")
     args = parser.parse_args()
+    root = args.root.resolve()
     if args.jobs < 1:
         parser.error("--jobs must be positive")
 
@@ -47,19 +50,24 @@ def main() -> int:
     checks: list[tuple[str, list[str], Optional[dict[str, str]]]] = [
         ("format", [cargo, "fmt", "--all", "--", "--check"], None),
         ("clippy", cargo_command("clippy", "--locked", "--workspace", "--all-targets", "--all-features", "--", "-D", "warnings"), None),
-        ("tests", cargo_command("test", "--locked", "--workspace"), None),
-        ("release tests", cargo_command("test", "--locked", "--workspace", "--release"), None),
+        ("tests", cargo_command("test", "--locked", "--workspace", "--all-features"), None),
+        ("release tests", cargo_command("test", "--locked", "--workspace", "--all-features", "--release"), None),
         ("lyrebird experimental server", cargo_command("test", "--locked", "-p", "ptrs-gesher-lyrebird", "--features", "experimental-server"), None),
-        (f"MSRV {args.msrv}", cargo_command("check", "--workspace", "--locked", toolchain=args.msrv), None),
+        (f"MSRV {args.msrv}", cargo_command("check", "--workspace", "--all-features", "--locked", toolchain=args.msrv), None),
+        ("Go interoperability", [sys.executable, str(root / "tools/interop/run.py"), "--go", args.go, "--cargo", cargo], None),
         ("no default features", cargo_command("check", "--locked", "--workspace", "--no-default-features"), None),
     ]
 
     metadata_command = cargo_command("metadata", "--locked", "--no-deps", "--format-version", "1", jobs=False)
-    metadata_result = subprocess.run(metadata_command, cwd=ROOT, capture_output=True, text=True)
+    metadata_result = subprocess.run(metadata_command, cwd=root, capture_output=True, text=True)
     if metadata_result.returncode:
         print(metadata_result.stderr, file=sys.stderr)
         return metadata_result.returncode
     metadata = json.loads(metadata_result.stdout)
+    baseline = metadata.get("metadata", {}).get("release", {}).get("baseline-version")
+    if not baseline:
+        print("missing workspace.metadata.release.baseline-version", file=sys.stderr)
+        return 2
     for package in metadata["packages"]:
         checks.append((
             f"no default features {package['name']}",
@@ -93,7 +101,7 @@ def main() -> int:
         print(f"missing {args.semver}; use --skip-semver only when recording an incomplete result", file=sys.stderr)
         return 2
     else:
-        checks.append(("semver release", [args.semver, "check-release", "--workspace", "--all-features"], None))
+        checks.append(("semver release", [args.semver, "check-release", "--workspace", "--all-features", "--baseline-version", baseline], None))
 
     if args.skip_package:
         skipped.append("package archives")
@@ -106,11 +114,10 @@ def main() -> int:
 
     for name, command, extra_env in checks:
         print(f"==> {name}: {' '.join(command)}", flush=True)
-        env = None
+        env = {**os.environ, "CARGO_BUILD_JOBS": str(args.jobs)}
         if extra_env:
-            env = dict(os.environ)
             env.update(extra_env)
-        result = subprocess.run(command, cwd=ROOT, env=env)
+        result = subprocess.run(command, cwd=root, env=env)
         if result.returncode:
             print(f"FAILED: {name} (exit {result.returncode})", file=sys.stderr)
             return result.returncode
