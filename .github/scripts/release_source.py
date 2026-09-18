@@ -14,12 +14,14 @@ PACKAGES = {
 
 
 def stable_version(value):
+    value = value.strip()
     if not re.fullmatch(r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", value):
         raise ValueError("expected a stable version X.Y.Z")
     return value
 
 
 def full_sha(value):
+    value = value.strip()
     if not re.fullmatch(r"[0-9a-fA-F]{40}", value):
         raise ValueError("source SHA must contain all 40 hexadecimal characters")
     return value.lower()
