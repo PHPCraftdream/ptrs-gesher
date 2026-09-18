@@ -9,8 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.6.0] - 2026-09-18
 
-Prepared locally; publication is pending. All six published crates move to 0.6.0
-in lockstep; Rust 1.89 remains the minimum supported version.
+Published through crates.io Trusted Publishing from the pinned source release;
+all six crates move to 0.6.0 in lockstep. Rust 1.89 remains the minimum
+supported version.
 
 ### Breaking changes
 
