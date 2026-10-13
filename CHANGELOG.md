@@ -9,7 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.7.0] - 2026-10-14
 
-All six crates move to 0.7.0 in lockstep.
+Published through crates.io Trusted Publishing from the pinned source release;
+all six crates move to 0.7.0 in lockstep.
 
 ### Breaking changes
 
