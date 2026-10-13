@@ -5,7 +5,7 @@ and publication require the maintainer's authorization.
 
 ## Prepare and verify
 
-1. Review source and dependency changes. Keep the declared Rust 1.89 minimum.
+1. Review source and dependency changes. Keep the declared Rust 1.92 minimum.
 2. Move the changelog entries into a dated release section and leave a new
    `[Unreleased]` section above it.
    Before the approved release commit, set the final date and remove any local
@@ -16,7 +16,7 @@ and publication require the maintainer's authorization.
    Refresh `Cargo.lock`; the private examples package keeps its own version.
    Set `workspace.metadata.release.baseline-version` to the previous published
    version (0.5.3 for the 0.6.0 release).
-4. Run the release-tool tests and complete local gates. Rust stable, Rust 1.89,
+4. Run the release-tool tests and complete local gates. Rust stable, Rust 1.92,
    Go, Python 3.9+, cargo-deny and cargo-semver-checks are required:
 
 ```sh

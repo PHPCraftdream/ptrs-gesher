@@ -71,15 +71,15 @@ jobs:
       - run: cargo test --locked -p ptrs-gesher-lyrebird --features experimental-server --no-fail-fast
 
   msrv:
-    name: MSRV (1.89)
+    name: MSRV (1.92)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # rust-version in every manifest is 1.89; verify the dependency tree
+      # rust-version in every manifest is 1.92; verify the dependency tree
       # still resolves and the workspace builds on it. No --all-targets:
       # criterion/proptest dev-deps carry higher MSRVs and would flag failures
       # unrelated to the declared library MSRV.
-      - uses: dtolnay/rust-toolchain@1.89
+      - uses: dtolnay/rust-toolchain@1.92
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --locked
 

@@ -1,7 +1,8 @@
 # Migrating from 0.5.x to 0.6.0
 
 All six crates move to 0.6.0 together. Update their dependency requirements;
-the Rust minimum stays at 1.89. The old crate aliases (`ptrs`, `obfs4`,
+the 0.6.0 release kept the Rust minimum at 1.89. Current development requires
+Rust 1.92 or newer. The old crate aliases (`ptrs`, `obfs4`,
 `webtunnel`) remain usable through Cargo's `package` rename.
 
 ## WebTunnel carrier and URL dialing

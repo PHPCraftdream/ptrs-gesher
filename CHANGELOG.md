@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- tor-* 0.47 (Arti 2.7.0), MSRV 1.92.
+
 ## [0.6.0] - 2026-09-18
 
 Published through crates.io Trusted Publishing from the pinned source release;

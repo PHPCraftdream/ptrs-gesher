@@ -67,7 +67,7 @@ webtunnel = { package = "ptrs-gesher-webtunnel", version = "0.6.0" }
 
 ## Status
 
-- Workspace builds on stable Rust ≥ 1.89.
+- Workspace builds on stable Rust ≥ 1.92.
 - Unit, integration, property, and protocol tests run in CI.
 - All six crates are versioned in lockstep; the workspace is prepared for 0.6.0.
 - Real Tor HTTPS smoke tests complement the offline protocol tests. They measure

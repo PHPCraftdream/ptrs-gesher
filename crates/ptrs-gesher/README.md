@@ -35,7 +35,7 @@ convenience, and also exposes the underlying crate modules (`ptrs`,
 
 ## Status
 
-Version `0.6.0` requires Rust 1.89 or newer. It introduces breaking changes
+The current crate requires Rust 1.92 or newer. It introduces breaking changes
 from 0.5.x, including WebTunnel carrier output types and argument parsing.
 Read the [0.6 migration guide](https://github.com/PHPCraftdream/ptrs-gesher/blob/v0.6.0/docs/MIGRATING-0.6.md)
 before upgrading. The managed server remains experimental and disabled by default.

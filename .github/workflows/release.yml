@@ -72,7 +72,7 @@ jobs:
           path: source
           ref: ${{ needs.source.outputs.sha }}
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@1.89
+      - uses: dtolnay/rust-toolchain@1.92
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy

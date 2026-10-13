@@ -18,7 +18,7 @@ providing both client and server sides. Part of the
 
 ## Status
 
-Version `0.6.0` requires Rust 1.89 or newer. See the
+The current crate requires Rust 1.92 or newer. See the
 [migration guide](https://github.com/PHPCraftdream/ptrs-gesher/blob/v0.6.0/docs/MIGRATING-0.6.md)
 for state-file and fallible configuration APIs.
 Not production ready; do not rely on this for security-critical

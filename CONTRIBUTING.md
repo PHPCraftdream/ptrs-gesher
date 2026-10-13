@@ -9,7 +9,7 @@ practicalities of building, testing, and submitting changes.
 cargo build --workspace
 ```
 
-The workspace requires stable Rust ≥ 1.89.
+The workspace requires stable Rust ≥ 1.92.
 
 ## Testing
 

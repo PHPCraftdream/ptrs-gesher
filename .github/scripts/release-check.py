@@ -22,7 +22,7 @@ def main() -> int:
     parser.add_argument("--go", default="go", help="Go executable for local interoperability")
     parser.add_argument("--deny", default="cargo-deny")
     parser.add_argument("--semver", default="cargo-semver-checks")
-    parser.add_argument("--msrv", default="1.89", help="rustup toolchain for the MSRV check")
+    parser.add_argument("--msrv", default="1.92", help="rustup toolchain for the MSRV check")
     parser.add_argument("-j", "--jobs", type=int, default=2)
     parser.add_argument("--skip-semver", action="store_true")
     parser.add_argument("--skip-deny", action="store_true")

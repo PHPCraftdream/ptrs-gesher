@@ -32,7 +32,7 @@ concrete transport (`obfs4`, `webtunnel`, etc.) implements:
 
 ## Status
 
-Version `0.6.0` requires Rust 1.89 or newer. See the
+The current crate requires Rust 1.92 or newer. See the
 [migration guide](https://github.com/PHPCraftdream/ptrs-gesher/blob/v0.6.0/docs/MIGRATING-0.6.md)
 for the separate SOCKS and SMETHOD argument formats.
 
