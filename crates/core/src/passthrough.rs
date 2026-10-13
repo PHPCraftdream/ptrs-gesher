@@ -206,6 +206,7 @@ mod design_tests {
         });
     }
 
+    #[rustfmt::skip]
     async fn establish_using_pt<T, E, P>(
         t_fut: Pin<FutureResult<T, E>>,
     ) -> Result<
@@ -351,6 +352,7 @@ mod design_tests {
         Ok(())
     }
 
+    #[rustfmt::skip]
     async fn wrap_using_pt<T, E, P>(
         t: T,
     ) -> Result<
@@ -490,7 +492,7 @@ mod design_tests {
         Ok(())
     }
 
-
+    #[rustfmt::skip]
     async fn wrap_server_using_pt<T, P>(
         t: T,
     ) -> Result<
