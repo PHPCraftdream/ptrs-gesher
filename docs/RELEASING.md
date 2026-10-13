@@ -15,7 +15,7 @@ and publication require the maintainer's authorization.
 3. Update all six package versions and their internal dependency requirements.
    Refresh `Cargo.lock`; the private examples package keeps its own version.
    Set `workspace.metadata.release.baseline-version` to the previous published
-   version (0.5.3 for the 0.6.0 release).
+   version (0.6.0 for the 0.7.0 release).
 4. Run the release-tool tests and complete local gates. Rust stable, Rust 1.92,
    Go, Python 3.9+, cargo-deny and cargo-semver-checks are required:
 

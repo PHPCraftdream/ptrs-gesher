@@ -19,7 +19,7 @@ repository = "https://github.com/PHPCraftdream/ptrs-gesher"
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 
 [workspace.metadata.release]
-baseline-version = "0.5.3"
+baseline-version = "0.6.0"
 
 [profile.release]
 lto = "thin"

@@ -7,9 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-14
+
+All six crates move to 0.7.0 in lockstep.
+
+### Breaking changes
+
+- **obfs4**: the public `Error` and its `From` conversions expose `tor_error::Bug`
+  and `tor_cell::Error`; these now come from tor-* 0.47 (Arti 2.7.0), so
+  consumers passing tor-* 0.43 types must move to 0.47 as well.
+- Minimum supported Rust version is now **1.92** (was 1.89).
+
 ### Changed
 
-- tor-* 0.47 (Arti 2.7.0), MSRV 1.92.
+- tor-* 0.47 (Arti 2.7.0): `tor-cell`, `tor-llcrypto`, `tor-error`, `tor-bytes`.
 
 ## [0.6.0] - 2026-09-18
 
