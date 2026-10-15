@@ -35,7 +35,9 @@ applications.
 For embedding, set the managed-transport environment and call
 `lyrebird::run_from_env().await`. This preserves the application's arguments,
 tracing subscriber and safelog policy. The existing `lyrebird::run()` entry point
-continues to parse the standalone CLI options and configure its logging policy.
+parses standalone CLI options and configures its logging policy. The binary
+supports only the options shown below; it does not provide a general-purpose
+configuration-file interface.
 
 ## Usage (binary)
 
@@ -76,10 +78,13 @@ ServerTransportPlugin obfs4 exec /usr/local/bin/lyrebird
 
 ## Usage (library)
 
-```rust ignore
-// Embed the PT-manager loop in your own async application:
-lyrebird::run().await;
+```text
+Embed the PT-manager loop in your own async application:
+
+lyrebird::run_from_env().await?;
 ```
+
+Call this from an async context after setting the managed-transport environment.
 
 ## License
 

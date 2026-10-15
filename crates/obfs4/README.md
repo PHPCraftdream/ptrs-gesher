@@ -29,7 +29,9 @@ applications.
 Client example using the `ptrs-gesher-core` trait framework:
 
 ```rust ignore
-use ptrs::Args;
+// Illustrative only: placeholder certificate and omitted async runtime / crate
+// prerequisites; replace with a real bridge certificate in an async application.
+use ptrs::args::Args;
 use obfs4;
 use tokio::net::TcpStream;
 
@@ -47,25 +49,29 @@ let conn_future = TcpStream::connect("127.0.0.1:9000");
 let obfs4_conn = client.establish(Box::pin(conn_future)).await?;
 ```
 
-Server example:
+The snippet illustrates a server handler; a client must complete the obfs4 handshake before data is exchanged.
 
-```rust ignore
-let message = b"Hello universe";
-let (mut c, mut s) = tokio::io::duplex(65_536);
-let mut rng = rand::thread_rng();
+```rust no_run
+use obfs4::Server;
+use rand::thread_rng;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
-let o4_server = obfs4::Server::new_from_random(&mut rng);
+#[tokio::main]
+async fn main() -> std::io::Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:9000").await?;
+    let mut rng = thread_rng();
+    let server = Server::new_from_random(&mut rng);
 
-tokio::spawn(async move {
-    let mut o4s_stream = o4_server.wrap(&mut s).await.unwrap();
-
-    let mut buf = [0_u8; 50];
-    let n = o4s_stream.read(&mut buf).await.unwrap();
-
-    // echo the message back over the tunnel
-    o4s_stream.write_all(&buf[..n]).await.unwrap();
-});
+    let (mut socket, _) = listener.accept().await?;
+    let mut stream = server.wrap(&mut socket).await?;
+    let mut buf = [0_u8; 1024];
+    let n = stream.read(&mut buf).await?;
+    stream.write_all(&buf[..n]).await?;
+    Ok(())
+}
 ```
+
 
 ## License
 

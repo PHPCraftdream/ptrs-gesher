@@ -22,4 +22,4 @@ snippets or commands. -->
 
 - **Rust version:** `rustc --version`
 - **OS:**
-- **Crate and version:** e.g. `ptrs-gesher-obfs4 0.1.0`
+- **Crate and version:** e.g. `ptrs-gesher-obfs4 0.7.0`

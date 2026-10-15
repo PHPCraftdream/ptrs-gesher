@@ -75,8 +75,9 @@ disabled when reusing the immutable client configuration.
      `options(&Args)`.
    - `ClientTransport<InRW, InErr>` — `establish()` and `wrap()` return
      a pinned future that yields the tunnel stream.
-   - `ServerBuilder<InRW>` and `ServerTransport<InRW>` — mirror of the
-     client side.
+   - `ServerBuilder<InRW>` configures server-side transport settings, and
+     `ServerTransport<InRW>` exposes `reveal()` to process the inbound handshake;
+     unlike the client side, it does not provide `wrap()` or `establish()`.
 3. **Add a feature flag** to `crates/ptrs-gesher/Cargo.toml`.
 4. **Register in lyrebird** — add a match arm in
    `lyrebird::client_setup` that dispatches on your transport name and

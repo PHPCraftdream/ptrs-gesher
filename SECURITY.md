@@ -10,11 +10,11 @@ issues.
 
 | Version | Status              | Security fixes |
 |---------|---------------------|----------------|
-| 0.1.x   | Active development  | Yes            |
-| < 0.1   | Pre-release / yanked | No            |
+| 0.7.x   | Active development  | Yes            |
+| < 0.7   | Unsupported         | No             |
 
 While the project is on the `0.x` line we backport fixes only to the most
-recent published `0.1.x` minor; downstream consumers are expected to track
+recent published `0.x` minor; downstream consumers are expected to track
 the latest release.
 
 ## Reporting a vulnerability
