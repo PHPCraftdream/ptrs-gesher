@@ -36,7 +36,7 @@ project.
 | [`ptrs-gesher-core`](./crates/core) | Core traits: `ClientBuilder`, `ClientTransport`, `Args`. |
 | [`ptrs-gesher-obfs4`](./crates/obfs4) | obfs4 transport. |
 | [`ptrs-gesher-webtunnel`](./crates/webtunnel) | WebTunnel transport — TLS + HTTP/1.1 Upgrade. |
-| [`ptrs-gesher-lyrebird`](./crates/lyrebird) | PT-manager loop; usable as a library (`lyrebird::run()`) or as a binary. |
+| [`ptrs-gesher-lyrebird`](./crates/lyrebird) | PT-manager loop; usable as a library (`lyrebird::run_from_env()`) or as a binary. |
 | [`ptrs-gesher-bridge-line`](./crates/bridge-line) | torrc `Bridge` directive parser, transport-agnostic. |
 
 All crates are dual-licensed `MIT OR Apache-2.0`.
@@ -60,7 +60,7 @@ webtunnel = { package = "ptrs-gesher-webtunnel", version = "0.7.0" }
 | Change | Why |
 |---|---|
 | New crate `ptrs-gesher-webtunnel` | Adds WebTunnel transport — TLS + HTTP/1.1 Upgrade, no WebSocket framing. Hostnames resolve via DNS-over-HTTPS (`doh-mode=fallback` default; `strict` / `off` available); literal IP addresses bypass DNS. |
-| `lyrebird` refactored: `lib.rs` with `pub async fn run()` + thin `main.rs` | Lets parent applications embed the PT loop in-process (busybox-style PT dispatch). |
+| `lyrebird` refactored: `lib.rs` with `pub async fn run_from_env()` + thin `main.rs` | Lets parent applications embed the PT loop in-process (busybox-style PT dispatch). |
 | `lyrebird::client_setup` dispatches by transport name (`obfs4` / `webtunnel`) | Single PT-manager process serves multiple transports. |
 | Dropped: `o5`, `o7`, lyrebird `fwd/` forward-proxy binary | Upstream-WIP / scope unrelated to bridge transport. |
 | New crate `ptrs-gesher-bridge-line` | torrc bridge-line parser usable by the transports themselves. |
@@ -69,13 +69,15 @@ webtunnel = { package = "ptrs-gesher-webtunnel", version = "0.7.0" }
 
 - Workspace builds on stable Rust ≥ 1.92.
 - Unit, integration, property, and protocol tests run in CI.
-- All six crates are versioned in lockstep; the workspace is prepared for 0.7.0.
+- All six crates are versioned in lockstep at 0.7.0 (published 2026-10-14).
 - Real Tor HTTPS smoke tests complement the offline protocol tests. They measure
   functional connectivity, not long-term availability under every network condition.
 
 ## Quickstart
 
 ```rust ignore
+// Ignored: illustrative bridge certificate and async embedding context; use a
+// real bridge line and an async runtime in an application with these crates.
 use ptrs_gesher::{Args, BridgeLine};
 
 // Parse a torrc bridge line:

@@ -28,9 +28,17 @@ can carry Tor cells.
 
 The crate integrates with the `ptrs-gesher-core` trait framework
 (`ClientBuilder`, `ClientTransport`). Configuration is provided via the
-standard `Args` key-value bag — the only required parameter is `url=`. A
-`WebTunnelConfig` struct extracts and validates all recognised parameters
-(`url`, `ver`, `servername`, `addr`, `utls`) from the bridge line.
+standard `Args` key-value bag — the only required parameter is `url=`. Recognized
+keys include `url` (required HTTP(S) URL), `ver` (optional protocol version),
+`servername` (optional TLS SNI/Host override; defaults to URL hostname), `addr`
+(optional TCP host:port override; defaults to URL host and scheme port), and
+`doh-mode` (`fallback` by default, or `strict` / `off`; literal IPs bypass DNS).
+Hostname resolution honors that mode, including hostnames supplied via `addr`.
+`utls` is accepted but currently ignored; TLS fingerprint emulation is not
+implemented. The `ClientBuilder::timeout` API takes an optional `Duration`; its
+handshake timeout defaults to 30 seconds. `doh-mode=off` uses system DNS only,
+`strict` uses DoH only (failure aborts resolution), and `fallback` (the default)
+tries DoH first, then system DNS if DoH fails.
 
 This transport is designed to make Tor traffic blend in with ordinary
 HTTPS traffic to a web server, resisting deep-packet-inspection by

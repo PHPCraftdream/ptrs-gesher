@@ -38,18 +38,16 @@ for the separate SOCKS and SMETHOD argument formats.
 
 ## Example
 
-```rust ignore
-use ptrs::Args;
-use obfs4;
+```rust
+use ptrs::args::Args;
 
 let mut args = Args::new();
 args.add("cert", "AAAA...");
 args.add("iat-mode", "0");
-
-let builder = obfs4::ClientBuilder::from_params(vec![args.encode_client_parameters().into_bytes()])?;
-let client = builder.try_build()?;
-// client.establish(...) or client.wrap(...) to create the tunnel.
+assert_eq!(args.retrieve("iat-mode").as_deref(), Some("0"));
 ```
+
+The illustrative certificate is a placeholder, not a usable bridge credential. See the obfs4 crate for transport construction.
 
 ## Notes / Resources
 

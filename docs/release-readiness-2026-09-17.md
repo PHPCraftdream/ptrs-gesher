@@ -101,7 +101,7 @@ WebTunnel выполнен `cargo update -p rustls --precise 0.23.44`: resolver 
 
 ### RR19-03 — P2: publish.sh превращает посторонний отказ в успех
 
-Место: [обработка already exists](../.github/scripts/publish.sh#L36).
+Место: [обработка already exists](https://github.com/PHPCraftdream/ptrs-gesher/blob/9ecf4d4b5da8e606fe9c8122a6ab39481953478e/.github/scripts/publish.sh#L36) (снимок исторической ревизии аудита).
 
 Широкий regex принимает любую строку `already exists` и завершает скрипт с 0,
 не проверяя наличие конкретной версии конкретного пакета в registry.
