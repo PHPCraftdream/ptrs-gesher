@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-04
+
+All six crates move to 0.8.0 in lockstep.
+
+### Breaking changes
+
+- **lyrebird**: `resolve_target_addr` now takes `impl Display` (an IP-literal
+  `host:port`) instead of `&fast_socks5::util::target_addr::TargetAddr`.
+  Hostnames are still rejected without DNS.
+- **lyrebird**: `fast-socks5` is replaced by `resocks5-net` 0.4.1; no
+  `fast-socks5` type remains in the public API.
+
+### Added
+
+- **lyrebird**: `TOR_PT_PROXY` support for `socks5://IP:port` and
+  `http://IP:port` (HTTP CONNECT), with optional percent-encoded
+  `username:password@`. Both carriers (obfs4, WebTunnel) dial through the
+  proxy and never fall back to a direct connection. Setup answers
+  `PROXY DONE`; invalid or unsupported values (`socks4a`, `https`, hostname
+  endpoints) get `PROXY-ERROR` before any listener starts.
+- **lyrebird**: managed client listeners accept HTTP CONNECT as well as SOCKS5
+  on the same loopback socket. Credential fields still carry per-bridge PT
+  arguments, and pipelined payload bytes are forwarded once.
+- **lyrebird**: the parent receives a failure reply (SOCKS5 REP=4 or HTTP 502)
+  when the transport or upstream proxy cannot be established, instead of a bare
+  close. A success reply is still sent only after the transport handshake.
+- **core**: `ClientInfo::without_proxy()` reads version and transports and
+  leaves `TOR_PT_PROXY` to the caller.
+- **webtunnel**: `WebTunnelClient::carrier_destination()` returns the validated
+  carrier host and port without resolving it, so a caller can dial through a
+  proxy.
+
+### Changed
+
+- **lyrebird**: a configured `TOR_PT_PROXY` is no longer refused with
+  `PROXY-ERROR`; supported values are used for every carrier.
+- **lyrebird**: sockets to an upstream proxy get the same `TCP_NODELAY` and
+  15 s keepalive as direct bridge dials.
+
 ## [0.7.0] - 2026-10-14
 
 Published through crates.io Trusted Publishing from the pinned source release;

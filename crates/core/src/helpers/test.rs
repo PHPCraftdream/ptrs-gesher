@@ -385,6 +385,28 @@ fn client_transports() -> Result<(), Error> {
 
 #[test]
 #[serial]
+fn client_info_without_proxy_ignores_proxy_variable() -> Result<(), Error> {
+    let _guard = EnvGuard::new(&[
+        constants::MANAGED_VER,
+        constants::CLIENT_TRANSPORTS,
+        constants::PROXY,
+    ]);
+    env::set_var(constants::MANAGED_VER, "1");
+    env::set_var(constants::CLIENT_TRANSPORTS, "obfs4,webtunnel");
+    env::set_var(constants::PROXY, "socks4a://not-an-ip:1080");
+
+    assert!(ClientInfo::new().is_err());
+    let info = ClientInfo::without_proxy()?;
+    assert_eq!(info.methods, vec!["obfs4", "webtunnel"]);
+    assert!(info.uri.is_none());
+
+    env::set_var(constants::MANAGED_VER, "2");
+    assert!(ClientInfo::without_proxy().is_err());
+    Ok(())
+}
+
+#[test]
+#[serial]
 fn resolve() -> Result<(), Error> {
     let bad = vec![
         "",

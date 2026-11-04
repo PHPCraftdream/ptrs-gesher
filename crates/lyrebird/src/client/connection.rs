@@ -69,7 +69,18 @@ where
     // placeholder and must never become a direct dial target.
     let pt_client = builder.build();
     let mut pt_conn =
-        C::managed_connect_with_proxy(pt_client, target_addr, client_addr, proxy).await?;
+        match C::managed_connect_with_proxy(pt_client, target_addr, client_addr, proxy).await {
+            Ok(conn) => conn,
+            Err(error) => {
+                // Best effort: report failure instead of a bare close.
+                let _ = tokio::time::timeout(
+                    SOCKS5_SETUP_TIMEOUT,
+                    request.reply(&mut parent, Reply::UpstreamUnavailable),
+                )
+                .await;
+                return Err(error);
+            }
+        };
 
     // Reply only after the actual transport handshake succeeds.
     tokio::time::timeout(

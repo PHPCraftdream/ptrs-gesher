@@ -422,12 +422,18 @@ pub fn resolve_target_addr(addr: impl std::fmt::Display) -> Result<SocketAddr> {
 async fn dial_bridge(remote_addr: SocketAddr) -> std::io::Result<TcpStream> {
     let stream = TcpStream::connect(remote_addr).await?;
     // Best-effort: failure to set an option must not abort the dial.
+    tune_outgoing(&stream);
+    Ok(stream)
+}
+
+/// Best-effort nodelay and keepalive for every outgoing carrier socket
+/// (direct bridge dial and the connection to an upstream proxy).
+fn tune_outgoing(stream: &TcpStream) {
     let _ = stream.set_nodelay(true);
     let keepalive = socket2::TcpKeepalive::new()
         .with_time(std::time::Duration::from_secs(15))
         .with_interval(std::time::Duration::from_secs(15));
-    let _ = socket2::SockRef::from(&stream).set_tcp_keepalive(&keepalive);
-    Ok(stream)
+    let _ = socket2::SockRef::from(stream).set_tcp_keepalive(&keepalive);
 }
 
 /// Run the lyrebird pluggable transport. Expects the standard
@@ -589,19 +595,8 @@ async fn client_setup(_statedir: &str, ctx: RunTasks) -> Result<JoinSet<Result<(
             return Err(anyhow!("invalid or unsupported upstream proxy"));
         }
     };
-    let methods = if proxy.is_none() {
-        ptrs::ClientInfo::new()?.methods
-    } else {
-        // Core's legacy reader rejects proxies; retain its version/method validation.
-        let versions = std::env::var(ptrs::constants::MANAGED_VER)?;
-        if !versions.split(',').any(|version| version == "1") {
-            return Err(anyhow!("unsupported managed transport version"));
-        }
-        std::env::var(ptrs::constants::CLIENT_TRANSPORTS)?
-            .split(',')
-            .map(str::to_owned)
-            .collect::<Vec<_>>()
-    };
+    // The proxy is already validated above; core reads only version and transports.
+    let methods = ptrs::ClientInfo::without_proxy()?.methods;
     if proxy.is_some() {
         pt_proto::print_proxy_done();
     }

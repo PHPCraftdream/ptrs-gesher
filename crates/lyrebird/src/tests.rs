@@ -506,20 +506,26 @@ async fn client_handle_connection_no_success_reply_when_bridge_not_obfs4() {
 
     socks5_client_connect(&mut parent, &arg_string, bridge_addr).await;
 
-    // No success reply: the handler returns Err before writing one, so its
-    // side of the duplex drops and the parent's read hits EOF rather than a
-    // 10-byte success frame.
+    // No success reply: the handler fails before writing one and answers with
+    // a SOCKS5 failure frame (REP=4), then drops its side so the parent sees EOF.
     let mut reply = [0u8; 10];
-    let read = tokio::time::timeout(
+    tokio::time::timeout(
         std::time::Duration::from_secs(5),
         parent.read_exact(&mut reply),
     )
     .await
-    .expect("the read should resolve (EOF), not hang");
-    assert!(
-        read.is_err(),
-        "no SOCKS5 success reply must be sent when the obfs4 handshake fails"
+    .expect("the failure reply should arrive, not hang")
+    .expect("read SOCKS5 failure reply");
+    assert_eq!(
+        reply,
+        [0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0],
+        "a failed obfs4 handshake must produce a failure reply, never success"
     );
+    let mut eof = [0u8; 1];
+    let read = tokio::time::timeout(std::time::Duration::from_secs(5), parent.read(&mut eof))
+        .await
+        .expect("the parent must see EOF after the failure reply");
+    assert_eq!(read.expect("read after failure reply"), 0);
 
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), handler)
         .await
@@ -533,17 +539,60 @@ async fn client_handle_connection_no_success_reply_when_bridge_not_obfs4() {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), bridge).await;
 }
 
-// -- TOR_PT_PROXY fail-closed (PT-spec §3.3.2) --
+#[tokio::test]
+async fn unreachable_upstream_proxy_never_falls_back_to_direct_dial() {
+    // The bridge would accept a direct dial; the upstream proxy is a closed port.
+    let bridge = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bridge_addr = bridge.local_addr().unwrap();
+    let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = closed.local_addr().unwrap();
+    drop(closed);
+    let proxy = proxy::Proxy::parse(&format!("socks5://{proxy_addr}")).unwrap();
+    let arg_string = obfs4::ServerBuilder::<TcpStream>::default().client_params();
+
+    let (mut parent, lyrebird_side) = tokio::io::duplex(65_536);
+    let handler = tokio::spawn(client_handle_connection_with_proxy(
+        lyrebird_side,
+        Obfs4PT::client_builder(),
+        "127.0.0.1:9050".parse().unwrap(),
+        Some(Arc::new(proxy)),
+    ));
+    socks5_client_connect(&mut parent, &arg_string, bridge_addr).await;
+
+    let mut reply = [0u8; 10];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        parent.read_exact(&mut reply),
+    )
+    .await
+    .expect("the failure reply should arrive, not hang")
+    .expect("read SOCKS5 failure reply");
+    assert_eq!(reply, [0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), handler)
+        .await
+        .expect("handler should finish")
+        .expect("handler task panicked");
+    assert!(
+        outcome.is_err(),
+        "a dead upstream proxy must fail the connection"
+    );
+
+    // A direct dial would already be queued in the bridge's accept backlog.
+    let direct = tokio::time::timeout(std::time::Duration::from_millis(100), bridge.accept()).await;
+    assert!(
+        direct.is_err(),
+        "the bridge must never be dialed directly when the proxy fails"
+    );
+}
+
+// -- TOR_PT_PROXY (PT-spec §3.3.2) --
 //
 // `TOR_PT_PROXY` is a parent requirement: every outgoing connection must
-// be routed through that upstream proxy. The transport stack has no proxy
-// dialer (`dial_bridge` connects directly), so a configured proxy must be
-// rejected via `PROXY-ERROR` with setup aborting before any listener is
-// bound or any dial can happen -- never silently ignored (the parent
-// would believe the route is honored) and never answered with
-// `PROXY DONE` (the route would not actually be used). The exact
-// control-channel wire sequence is asserted end to end by
-// `tests/proxy_error.rs`, which spawns the real binary.
+// be routed through that upstream proxy. A supported SOCKS5 or HTTP CONNECT
+// endpoint is acknowledged with `PROXY DONE` and used for every carrier,
+// with no direct fallback. Anything else is rejected via `PROXY-ERROR`
+// before any listener is bound. The exact control-channel wire sequence is
+// asserted end to end by `tests/proxy_error.rs`, which spawns the real binary.
 
 /// Serialize the env-mutating tests below: `TOR_PT_*` variables are
 /// process-global state, and `ClientInfo::new()` reads them. A tokio
@@ -628,6 +677,33 @@ async fn client_setup_without_proxy_spawns_owned_listener_tasks() {
     assert_no_connection_tasks(&ctx);
 
     clear_client_env();
+}
+
+#[tokio::test]
+async fn client_setup_with_supported_proxy_spawns_owned_listener_tasks() {
+    let _guard = ENV_LOCK.lock().await;
+    // TEST-NET-2 endpoint: setup only validates and acknowledges it, never dials.
+    set_client_env(Some("socks5://user:pass@198.51.100.10:19050"));
+    let ctx = RunTasks::new();
+    let outcome = client_setup("unused-test-state-dir", ctx.clone()).await;
+    clear_client_env();
+    let mut listeners = outcome.expect("a supported TOR_PT_PROXY must not abort client_setup");
+    assert!(
+        !listeners.is_empty(),
+        "client_setup must return its accept loops for run() to own"
+    );
+
+    ctx.accept.cancel();
+    while let Some(res) = tokio::time::timeout(TEST_STEP, listeners.join_next())
+        .await
+        .expect("accept loops must exit promptly after cancel")
+    {
+        assert!(
+            matches!(res, Ok(Ok(()))),
+            "accept loops must exit cleanly on cancel, got {res:?}"
+        );
+    }
+    assert_no_connection_tasks(&ctx);
 }
 
 // -- run() task-lifecycle regression (unified ownership + cancel paths) --

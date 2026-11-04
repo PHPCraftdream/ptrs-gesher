@@ -26,7 +26,7 @@ impl Proxy {
         }
     }
 
-    fn parse(input: &str) -> Result<Self, ()> {
+    pub(crate) fn parse(input: &str) -> Result<Self, ()> {
         let (protocol, scheme, authority) = if let Some(authority) = input.strip_prefix("socks5://")
         {
             (ProxyProtocol::Socks5, "socks5", authority)
@@ -104,6 +104,7 @@ impl Proxy {
             let mut stream = TcpStream::connect(self.address)
                 .await
                 .map_err(|_| failure())?;
+            super::tune_outgoing(&stream);
             match self.protocol {
                 ProxyProtocol::Socks5 => {
                     let auth = self
@@ -251,6 +252,43 @@ mod tests {
                 .await
                 .expect("carrier exchange must finish");
             }
+        }
+    }
+
+    #[tokio::test]
+    async fn sdk_carrier_formats_ipv6_targets_and_tunes_socket() {
+        use resocks5_net::server::{accept, Reply, ServerOptions};
+
+        for (scheme, protocol) in [
+            ("socks5", resocks5_net::server::Protocol::Socks5),
+            ("http", resocks5_net::server::Protocol::Http),
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let proxy =
+                Proxy::parse(&format!("{scheme}://{}", listener.local_addr().unwrap())).unwrap();
+            let server = async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let options =
+                    ServerOptions::new(Instant::now() + Duration::from_secs(5), true, false);
+                let request = accept(&mut stream, &options, |_| std::future::ready(false))
+                    .await
+                    .unwrap();
+                assert_eq!(request.protocol(), protocol);
+                assert_eq!(request.target(), "[2001:db8::1]:443");
+                request
+                    .reply(&mut stream, Reply::Established)
+                    .await
+                    .unwrap();
+            };
+            let client = async {
+                let stream = proxy.connect("2001:db8::1", 443).await.unwrap();
+                assert!(stream.nodelay().unwrap());
+            };
+            tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(server, client)
+            })
+            .await
+            .expect("IPv6 carrier exchange must finish");
         }
     }
 

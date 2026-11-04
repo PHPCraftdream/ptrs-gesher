@@ -2542,7 +2542,7 @@ dependencies = [
 
 [[package]]
 name = "ptrs-gesher"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "criterion",
  "ptrs-gesher-bridge-line",
@@ -2555,7 +2555,7 @@ dependencies = [
 
 [[package]]
 name = "ptrs-gesher-bridge-line"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "criterion",
  "proptest",
@@ -2564,7 +2564,7 @@ dependencies = [
 
 [[package]]
 name = "ptrs-gesher-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "criterion",
  "futures",
@@ -2595,7 +2595,7 @@ dependencies = [
 
 [[package]]
 name = "ptrs-gesher-lyrebird"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2625,7 +2625,7 @@ dependencies = [
 
 [[package]]
 name = "ptrs-gesher-obfs4"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "base64",
  "bytes",
@@ -2667,7 +2667,7 @@ dependencies = [
 
 [[package]]
 name = "ptrs-gesher-webtunnel"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "base64",
  "criterion",
@@ -2941,6 +2941,8 @@ dependencies = [
 [[package]]
 name = "resocks5-net"
 version = "0.4.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ccc654697444876723a347f724d1b9fd40619ff831975fdc760779bcceb4a840"
 dependencies = [
  "base64",
  "socket2",
