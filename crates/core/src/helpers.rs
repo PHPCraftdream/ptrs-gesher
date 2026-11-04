@@ -184,6 +184,19 @@ impl ClientInfo {
             uri: get_proxy_url()?,
         })
     }
+
+    /// Read version and transports, leaving `TOR_PT_PROXY` unparsed (`uri` is `None`).
+    ///
+    /// For callers that validate and consume the upstream proxy themselves.
+    pub fn without_proxy() -> Result<Self, Error> {
+        let _ver = get_managed_transport_ver()?;
+        debug!("VERSION {_ver}");
+
+        Ok(Self {
+            methods: get_client_transports()?,
+            uri: None,
+        })
+    }
 }
 
 pub(crate) fn get_client_transports() -> Result<Vec<String>, Error> {

@@ -110,7 +110,7 @@ fn logging_filters_levels_targets_and_rust_log_override() {
     let error_output = capture_events(default_log_filter(Level::ERROR), || {
         tracing::error!(target: "ordinary", "error-visible");
         tracing::warn!(target: "ordinary", "warn-hidden");
-        tracing::info!(target: "fast_socks5", "info-hidden");
+        tracing::info!(target: "resocks5_net", "info-hidden");
     });
     assert!(error_output.contains("error-visible"));
     assert!(!error_output.contains("warn-hidden"));
@@ -118,15 +118,15 @@ fn logging_filters_levels_targets_and_rust_log_override() {
 
     let debug_output = capture_events(default_log_filter(Level::DEBUG), || {
         tracing::debug!(target: "ordinary", "debug-visible");
-        tracing::info!(target: "fast_socks5", "info-visible");
+        tracing::info!(target: "resocks5_net", "info-visible");
     });
     assert!(debug_output.contains("debug-visible"));
     assert!(debug_output.contains("info-visible"));
 
     drop(default_env);
-    let _override_env = RustLogGuard::set(Some("error,fast_socks5=debug"));
+    let _override_env = RustLogGuard::set(Some("error,resocks5_net=debug"));
     let override_output = capture_events(default_log_filter(Level::ERROR), || {
-        tracing::debug!(target: "fast_socks5", "target-override-visible");
+        tracing::debug!(target: "resocks5_net", "target-override-visible");
         tracing::debug!(target: "ordinary", "ordinary-debug-hidden");
     });
     assert!(override_output.contains("target-override-visible"));

@@ -1,6 +1,6 @@
 [package]
 name = "ptrs-gesher-lyrebird"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2021"
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"
@@ -33,9 +33,9 @@ bench = false
 
 [dependencies]
 ## internal crates
-ptrs = { package = "ptrs-gesher-core", path = "../core", version = "0.7.0" }
-obfs4 = { package = "ptrs-gesher-obfs4", path = "../obfs4", version = "0.7.0" }
-webtunnel = { package = "ptrs-gesher-webtunnel", path = "../webtunnel", version = "0.7.0" }
+ptrs = { package = "ptrs-gesher-core", path = "../core", version = "0.8.0" }
+obfs4 = { package = "ptrs-gesher-obfs4", path = "../obfs4", version = "0.8.0" }
+webtunnel = { package = "ptrs-gesher-webtunnel", path = "../webtunnel", version = "0.8.0" }
 
 # shared deps
 
@@ -43,14 +43,16 @@ webtunnel = { package = "ptrs-gesher-webtunnel", path = "../webtunnel", version 
 anyhow = "1.0"
 async-trait = "0.1"
 clap = { version = "4.5", features = ["derive"]}
-fast-socks5 = "0.10.0"
+resocks5-net = { version = "0.4.1", default-features = false }
+url = "2.5.8"
+percent-encoding = "2.3.2"
 log = "0.4.34"
 # TCP keepalive on the outgoing bridge dial (already in-tree via tokio).
 socket2 = "0.6"
 futures = "0.3.31"
 safelog = "0.4.2"
 thiserror = "2.0.9"
-tokio = { version = "1.42", features = ["io-util", "net", "macros", "sync", "signal", "time"] }
+tokio = { version = "1.53.3", features = ["io-util", "net", "macros", "sync", "signal", "time"] }
 tokio-util = "0.7.13"
 tracing = "0.1.41"
 tracing-core = "0.1.36"
@@ -73,6 +75,7 @@ windows-sys = { version = "0.61.2", features = [
 # lyrebird deps
 
 [dev-dependencies]
+base64 = "0.22"
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "test-util"] }
 

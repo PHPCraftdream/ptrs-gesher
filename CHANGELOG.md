@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-04
+
+All six crates move to 0.8.0 in lockstep.
+
+### Breaking changes
+
+- **lyrebird**: `resolve_target_addr` now takes `impl Display` (an IP-literal
+  `host:port`) instead of `&fast_socks5::util::target_addr::TargetAddr`;
+  it is also reachable through the umbrella crate's `lyrebird` re-export.
+  Hostnames are still rejected without DNS. Callers passing a `Display` value
+  keep compiling; callers constructing `TargetAddr` must drop it.
+- **lyrebird**: `fast-socks5` is replaced by `resocks5-net` 0.4.1; no
+  `fast-socks5` type remains in the public API.
+
+### Added
+
+- **lyrebird**: `TOR_PT_PROXY` support for `socks5://IP:port` and
+  `http://IP:port` (HTTP CONNECT), with optional percent-encoded
+  `username:password@`. Both carriers (obfs4, WebTunnel) dial through the
+  proxy and never fall back to a direct connection. Setup answers
+  `PROXY DONE`; invalid or unsupported values (`socks4a`, `https`, hostname
+  endpoints) get `PROXY-ERROR` before any listener starts.
+- **lyrebird**: managed client listeners accept HTTP CONNECT as well as SOCKS5
+  on the same loopback socket. Credential fields still carry per-bridge PT
+  arguments; over HTTP Basic, send `base64(<PT arguments>:)` (one trailing
+  `:`): parsers split at the first `:`, so lyrebird rejoins the halves and
+  strips that marker, which preserves colons such as `url=https://…`.
+  Payload already consumed during request parsing is delivered first, once,
+  and then shares the tunnel's normal backpressure.
+- **lyrebird**: the parent receives a failure reply instead of a bare close:
+  SOCKS5 REP=4 / HTTP 502 when the transport or upstream proxy cannot be
+  established, and REP=1 when the PT arguments are invalid. A success reply is
+  still sent only after the transport handshake.
+- **core**: `ClientInfo::without_proxy()` reads version and transports and
+  leaves `TOR_PT_PROXY` to the caller.
+- **webtunnel**: `WebTunnelClient::carrier_destination()` returns the validated
+  carrier host and port without resolving it, so a caller can dial through a
+  proxy.
+
+### Changed
+
+- **lyrebird**: a configured `TOR_PT_PROXY` is no longer refused with
+  `PROXY-ERROR`; supported values are used for every carrier.
+- **lyrebird**: requires tokio 1.53.3 or newer and registers the stdin
+  watcher with `AsyncFd::register_with_interest`, replacing the deprecated,
+  unsound `AsyncFd::with_interest` (RUSTSEC-2026-0386).
+- **lyrebird**: sockets to an upstream proxy get the same `TCP_NODELAY` and
+  15 s keepalive as direct bridge dials.
+- **lyrebird**: errors for invalid PT arguments no longer include the
+  submitted values, so bridge secrets stay out of logs.
+- **lyrebird**: `http://` upstream credentials follow HTTP Basic rules (empty
+  password allowed, no 255-byte limit); `socks5://` keeps RFC 1929 limits.
+- `Cargo.lock`: rustls 0.23.46 (RUSTSEC-2026-0346..0349) and webpki-roots
+  1.0.11 (RUSTSEC-2026-0381), rustls-webpki 0.103.16 (RUSTSEC-2026-0382) and
+  tokio 1.54.1 (RUSTSEC-2026-0386).
+
 ## [0.7.0] - 2026-10-14
 
 Published through crates.io Trusted Publishing from the pinned source release;
