@@ -71,7 +71,9 @@ mod imp {
             return wait_immediate(watched).await;
         }
 
-        let async_fd = AsyncFd::with_interest(watched, Interest::READABLE)?;
+        // SAFETY: `watched` owns a duplicated descriptor that stays open, and
+        // `as_raw_fd` returns the same value, for the whole life of `async_fd`.
+        let async_fd = unsafe { AsyncFd::register_with_interest(watched, Interest::READABLE)? };
         let mut buffer = [0_u8; READ_BUFFER_LEN];
         loop {
             let read = loop {

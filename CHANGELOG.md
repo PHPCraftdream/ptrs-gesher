@@ -50,6 +50,9 @@ All six crates move to 0.8.0 in lockstep.
 
 - **lyrebird**: a configured `TOR_PT_PROXY` is no longer refused with
   `PROXY-ERROR`; supported values are used for every carrier.
+- **lyrebird**: requires tokio 1.53.3 or newer and registers the stdin
+  watcher with `AsyncFd::register_with_interest`, replacing the deprecated,
+  unsound `AsyncFd::with_interest` (RUSTSEC-2026-0386).
 - **lyrebird**: sockets to an upstream proxy get the same `TCP_NODELAY` and
   15 s keepalive as direct bridge dials.
 - **lyrebird**: errors for invalid PT arguments no longer include the

@@ -52,7 +52,7 @@ socket2 = "0.6"
 futures = "0.3.31"
 safelog = "0.4.2"
 thiserror = "2.0.9"
-tokio = { version = "1.42", features = ["io-util", "net", "macros", "sync", "signal", "time"] }
+tokio = { version = "1.53.3", features = ["io-util", "net", "macros", "sync", "signal", "time"] }
 tokio-util = "0.7.13"
 tracing = "0.1.41"
 tracing-core = "0.1.36"
