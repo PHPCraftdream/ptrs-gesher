@@ -434,6 +434,49 @@ async fn unreachable_upstream_proxy_never_falls_back_to_direct_dial() {
     );
 }
 
+#[tokio::test]
+async fn invalid_pt_arguments_get_failure_reply_without_dialing() {
+    let bridge = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bridge_addr = bridge.local_addr().unwrap();
+    let (mut parent, lyrebird_side) = tokio::io::duplex(65_536);
+    let handler = tokio::spawn(client_handle_connection(
+        lyrebird_side,
+        Obfs4PT::client_builder(),
+        "127.0.0.1:9050".parse().unwrap(),
+    ));
+    socks5_client_connect(
+        &mut parent,
+        "cert=not-a-valid-certificate-secret",
+        bridge_addr,
+    )
+    .await;
+
+    let mut reply = [0u8; 10];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        parent.read_exact(&mut reply),
+    )
+    .await
+    .expect("the failure reply should arrive, not hang")
+    .expect("read SOCKS5 failure reply");
+    assert_eq!(
+        reply,
+        [0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0],
+        "invalid PT arguments must get a general-failure reply"
+    );
+    let error = tokio::time::timeout(std::time::Duration::from_secs(5), handler)
+        .await
+        .expect("handler should finish")
+        .expect("handler task panicked")
+        .expect_err("invalid PT arguments must fail the connection");
+    assert!(
+        !format!("{error:#}").contains("secret"),
+        "the error must not echo submitted values"
+    );
+    let direct = tokio::time::timeout(std::time::Duration::from_millis(100), bridge.accept()).await;
+    assert!(direct.is_err(), "the bridge must not be dialed");
+}
+
 // -- TOR_PT_PROXY (PT-spec §3.3.2) --
 //
 // `TOR_PT_PROXY` is a parent requirement: every outgoing connection must

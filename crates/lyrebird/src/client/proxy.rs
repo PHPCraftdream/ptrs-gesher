@@ -204,6 +204,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn http_upstream_credentials_follow_basic_rules_not_rfc1929() {
+        let long = "p".repeat(300);
+        assert!(Proxy::parse(&format!("http://user:{long}@127.0.0.1:8080")).is_ok());
+        assert!(Proxy::parse("http://user:@127.0.0.1:8080").is_ok());
+        assert!(Proxy::parse(&format!("socks5://user:{long}@127.0.0.1:1080")).is_err());
+        assert!(Proxy::parse("socks5://user:@127.0.0.1:1080").is_err());
+    }
+
     #[tokio::test]
     async fn sdk_carrier_preserves_remote_hostname_and_payload() {
         use resocks5_net::server::{accept, Reply, ServerOptions};

@@ -186,3 +186,44 @@ fn http_credentials_rejoin_basic_halves_and_strip_marker() {
         ("url=https://x".to_owned(), String::new())
     );
 }
+
+#[tokio::test]
+async fn prefixed_reader_serves_prefix_first_then_inner_and_passes_writes() {
+    let (mut peer, inner) = tokio::io::duplex(64);
+    let mut prefixed = connection::Prefixed::new(b"head".to_vec(), inner);
+    peer.write_all(b"-tail").await.unwrap();
+
+    let mut first = [0u8; 3];
+    prefixed.read_exact(&mut first).await.unwrap();
+    assert_eq!(&first, b"hea");
+    let mut rest = [0u8; 6];
+    prefixed.read_exact(&mut rest).await.unwrap();
+    assert_eq!(&rest, b"d-tail");
+
+    prefixed.write_all(b"echo").await.unwrap();
+    let mut echoed = [0u8; 4];
+    peer.read_exact(&mut echoed).await.unwrap();
+    assert_eq!(&echoed, b"echo");
+}
+
+#[test]
+fn invalid_pt_arguments_error_never_echoes_submitted_values() {
+    for creds in [
+        // Parse failure: empty key.
+        ("=secret-token", "\0"),
+        // Transport rejection: not a valid obfs4 certificate.
+        ("cert=not-a-valid-certificate-secret-token;iat-mode=0", "\0"),
+    ] {
+        let mut builder = Obfs4PT::client_builder();
+        let error = connection::configure_builder(
+            &mut builder,
+            Some((creds.0.to_owned(), creds.1.to_owned())),
+        )
+        .expect_err("invalid PT arguments must be rejected");
+        let text = format!("{error:#}");
+        assert!(
+            !text.contains("secret-token"),
+            "error must not echo submitted values: {text}"
+        );
+    }
+}

@@ -89,11 +89,7 @@ where
     // unread, and shares the tunnel's ordinary backpressure policy.
     let pipeline = request.take_pipeline();
     drop(request);
-    let mut parent = Prefixed {
-        prefix: pipeline,
-        offset: 0,
-        inner: parent,
-    };
+    let mut parent = Prefixed::new(pipeline, parent);
     if let Err(e) = copy_bidirectional(&mut parent, &mut pt_conn).await {
         warn!(
             addres = sensitive(client_addr).to_string(),
@@ -115,7 +111,7 @@ pub(super) fn http_credentials(username: String, password: String) -> (String, S
 
 /// Apply the parent's PT arguments to `builder`. Errors never carry the
 /// submitted values, which may include bridge secrets.
-fn configure_builder<B>(builder: &mut B, creds: Option<(String, String)>) -> Result<()>
+pub(super) fn configure_builder<B>(builder: &mut B, creds: Option<(String, String)>) -> Result<()>
 where
     B: ptrs::ClientBuilder<TcpStream>,
 {
@@ -140,10 +136,20 @@ async fn reply_failure<S: AsyncWrite + Unpin>(
 }
 
 /// Serves `prefix` before reading from `inner`; writes pass straight through.
-struct Prefixed<S> {
+pub(super) struct Prefixed<S> {
     prefix: Vec<u8>,
     offset: usize,
     inner: S,
+}
+
+impl<S> Prefixed<S> {
+    pub(super) fn new(prefix: Vec<u8>, inner: S) -> Self {
+        Self {
+            prefix,
+            offset: 0,
+            inner,
+        }
+    }
 }
 
 impl<S: AsyncRead + Unpin> AsyncRead for Prefixed<S> {
