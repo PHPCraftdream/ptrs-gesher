@@ -57,7 +57,8 @@ All six crates move to 0.8.0 in lockstep.
 - **lyrebird**: `http://` upstream credentials follow HTTP Basic rules (empty
   password allowed, no 255-byte limit); `socks5://` keeps RFC 1929 limits.
 - `Cargo.lock`: rustls 0.23.46 (RUSTSEC-2026-0346..0349) and webpki-roots
-  1.0.11 (RUSTSEC-2026-0381).
+  1.0.11 (RUSTSEC-2026-0381), rustls-webpki 0.103.16 (RUSTSEC-2026-0382) and
+  tokio 1.54.1 (RUSTSEC-2026-0386).
 
 ## [0.7.0] - 2026-10-14
 
