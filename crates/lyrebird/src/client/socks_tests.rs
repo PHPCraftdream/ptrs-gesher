@@ -126,6 +126,14 @@ async fn http_connect_preserves_pipelined_payload_through_transport() {
         assert_eq!(received.as_slice(), payload);
         stream.write_all(&received).await.unwrap();
         stream.flush().await.unwrap();
+        // The payload must have been forwarded exactly once: nothing follows it.
+        let mut extra = [0u8; 64];
+        let tail =
+            tokio::time::timeout(std::time::Duration::from_secs(2), stream.read(&mut extra)).await;
+        assert!(
+            !matches!(tail, Ok(Ok(count)) if count > 0),
+            "unexpected bytes after the forwarded payload"
+        );
     };
     let handler = client_handle_connection(
         connection,
@@ -149,6 +157,7 @@ async fn http_connect_preserves_pipelined_payload_through_transport() {
         let mut echoed = vec![0; payload.len()];
         parent.read_exact(&mut echoed).await.unwrap();
         assert_eq!(echoed.as_slice(), payload);
+        parent.shutdown().await.unwrap();
     };
     let ((), handler_result, ()) =
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -157,4 +166,23 @@ async fn http_connect_preserves_pipelined_payload_through_transport() {
         .await
         .expect("HTTP CONNECT and pipelined payload must finish");
     handler_result.unwrap();
+}
+
+#[test]
+fn http_credentials_rejoin_basic_halves_and_strip_marker() {
+    // Basic parsers split `url=https://x:` at its first ':'.
+    assert_eq!(
+        connection::http_credentials("url=https".into(), "//x:".into()),
+        ("url=https://x".to_owned(), String::new())
+    );
+    // Plain arguments followed by the empty-password marker.
+    assert_eq!(
+        connection::http_credentials("cert=AAA;iat-mode=0".into(), String::new()),
+        ("cert=AAA;iat-mode=0".to_owned(), String::new())
+    );
+    // Arguments sent without the marker keep their interior colons.
+    assert_eq!(
+        connection::http_credentials("url=https".into(), "//x".into()),
+        ("url=https://x".to_owned(), String::new())
+    );
 }

@@ -16,13 +16,13 @@ fn main() {
 
     // resolve_target_addr: IP address passes through.
     let addr = "127.0.0.1:9000";
-    let resolved = resolve_target_addr(&addr).expect("IP should resolve");
+    let resolved = resolve_target_addr(addr).expect("IP should resolve");
     assert_eq!(resolved.to_string(), "127.0.0.1:9000");
     println!("resolved: {resolved}");
 
     // Domain address fails (PT does not do DNS).
     let domain = "example.com:443";
-    let err = resolve_target_addr(&domain);
+    let err = resolve_target_addr(domain);
     assert!(err.is_err(), "domain should fail");
     println!("domain correctly rejected: {err:?}");
 }

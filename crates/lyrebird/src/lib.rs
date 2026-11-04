@@ -930,6 +930,8 @@ mod pt_proto;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod unit_tests;
 
 #[cfg(test)]
 mod lifecycle_tests;

@@ -14,8 +14,10 @@ All six crates move to 0.8.0 in lockstep.
 ### Breaking changes
 
 - **lyrebird**: `resolve_target_addr` now takes `impl Display` (an IP-literal
-  `host:port`) instead of `&fast_socks5::util::target_addr::TargetAddr`.
-  Hostnames are still rejected without DNS.
+  `host:port`) instead of `&fast_socks5::util::target_addr::TargetAddr`;
+  it is also reachable through the umbrella crate's `lyrebird` re-export.
+  Hostnames are still rejected without DNS. Callers passing a `Display` value
+  keep compiling; callers constructing `TargetAddr` must drop it.
 - **lyrebird**: `fast-socks5` is replaced by `resocks5-net` 0.4.1; no
   `fast-socks5` type remains in the public API.
 
@@ -29,10 +31,15 @@ All six crates move to 0.8.0 in lockstep.
   endpoints) get `PROXY-ERROR` before any listener starts.
 - **lyrebird**: managed client listeners accept HTTP CONNECT as well as SOCKS5
   on the same loopback socket. Credential fields still carry per-bridge PT
-  arguments, and pipelined payload bytes are forwarded once.
-- **lyrebird**: the parent receives a failure reply (SOCKS5 REP=4 or HTTP 502)
-  when the transport or upstream proxy cannot be established, instead of a bare
-  close. A success reply is still sent only after the transport handshake.
+  arguments; over HTTP Basic, send `base64(<PT arguments>:)` (one trailing
+  `:`): parsers split at the first `:`, so lyrebird rejoins the halves and
+  strips that marker, which preserves colons such as `url=https://…`.
+  Payload already consumed during request parsing is delivered first, once,
+  and then shares the tunnel's normal backpressure.
+- **lyrebird**: the parent receives a failure reply instead of a bare close:
+  SOCKS5 REP=4 / HTTP 502 when the transport or upstream proxy cannot be
+  established, and REP=1 when the PT arguments are invalid. A success reply is
+  still sent only after the transport handshake.
 - **core**: `ClientInfo::without_proxy()` reads version and transports and
   leaves `TOR_PT_PROXY` to the caller.
 - **webtunnel**: `WebTunnelClient::carrier_destination()` returns the validated
@@ -45,6 +52,11 @@ All six crates move to 0.8.0 in lockstep.
   `PROXY-ERROR`; supported values are used for every carrier.
 - **lyrebird**: sockets to an upstream proxy get the same `TCP_NODELAY` and
   15 s keepalive as direct bridge dials.
+- **lyrebird**: errors for invalid PT arguments no longer include the
+  submitted values, so bridge secrets stay out of logs.
+- **lyrebird**: `http://` upstream credentials follow HTTP Basic rules (empty
+  password allowed, no 255-byte limit); `socks5://` keeps RFC 1929 limits.
+- `Cargo.lock`: rustls 0.23.46 (RUSTSEC-2026-0346..0349).
 
 ## [0.7.0] - 2026-10-14
 

@@ -72,15 +72,20 @@ impl Proxy {
                 let (username, password) = info.split_once(':').ok_or(())?;
                 let username = decode(username)?;
                 let password = decode(password)?;
-                if username.is_empty()
-                    || password.is_empty()
-                    || username.len() > 255
-                    || password.len() > 255
-                    || (protocol == ProxyProtocol::Http
-                        && (username.contains(':')
-                            || username.bytes().any(|byte| byte.is_ascii_control())
-                            || password.bytes().any(|byte| byte.is_ascii_control())))
-                {
+                // RFC 1929 limits SOCKS5 fields; HTTP Basic (RFC 7617) only
+                // forbids ':' in the user-id and control characters.
+                let invalid = if protocol == ProxyProtocol::Http {
+                    username.is_empty()
+                        || username.contains(':')
+                        || username.bytes().any(|byte| byte.is_ascii_control())
+                        || password.bytes().any(|byte| byte.is_ascii_control())
+                } else {
+                    username.is_empty()
+                        || password.is_empty()
+                        || username.len() > 255
+                        || password.len() > 255
+                };
+                if invalid {
                     return Err(());
                 }
                 Some((username, password))
@@ -177,6 +182,7 @@ mod tests {
             "http://127.0.0.1:80",
             "http://127.0.0.1:80/",
             "http://user:p%40ss@[::1]:8080",
+            "http://user:@127.0.0.1:8080",
         ] {
             assert!(Proxy::parse(input).is_ok());
         }
@@ -313,10 +319,7 @@ mod tests {
                     if matches!(
                         error.kind(),
                         io::ErrorKind::ConnectionReset | io::ErrorKind::ConnectionAborted
-                    ) =>
-                {
-                    ()
-                }
+                    ) => {}
                 other => panic!("rejected HTTP carrier was not closed: {other:?}"),
             }
         };

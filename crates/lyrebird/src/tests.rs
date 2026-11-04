@@ -1,161 +1,5 @@
 use super::*;
 
-#[test]
-fn arg_string_uname_only_when_passwd_is_nul() {
-    let creds = Some(("cert=AAA;iat-mode=0".to_string(), "\0".to_string()));
-    assert_eq!(arg_string_from_creds(creds), "cert=AAA;iat-mode=0");
-}
-
-#[test]
-fn arg_string_concat_when_passwd_nonempty() {
-    let creds = Some(("cert=".to_string(), "AAA;iat-mode=0".to_string()));
-    assert_eq!(arg_string_from_creds(creds), "cert=AAA;iat-mode=0");
-}
-
-#[test]
-fn arg_string_empty_when_no_creds() {
-    assert_eq!(arg_string_from_creds(None), "");
-}
-
-#[test]
-fn arg_string_then_parse_yields_kv_map() {
-    // 300-char value split across the two SOCKS5 fields (uname=255,
-    // passwd=remainder) — the canonical case the spec is written for.
-    let big = "cert=".to_string() + &"A".repeat(250);
-    let tail = ";iat-mode=0".to_string();
-    let creds = Some((big.clone(), tail.clone()));
-    let arg_string = arg_string_from_creds(creds);
-    assert_eq!(arg_string, big + &tail);
-
-    let args = ptrs::args::Args::from_str(&arg_string).expect("parse");
-    assert!(args.retrieve("cert").is_some());
-    assert_eq!(args.retrieve("iat-mode").as_deref(), Some("0"));
-}
-
-#[test]
-fn accept_error_policy_retries_transient_failures() {
-    assert!(is_transient_accept_error(&std::io::Error::from(
-        std::io::ErrorKind::WouldBlock,
-    )));
-    assert!(is_transient_accept_error(&std::io::Error::from(
-        std::io::ErrorKind::ConnectionAborted,
-    )));
-    assert!(!is_transient_accept_error(&std::io::Error::from(
-        std::io::ErrorKind::PermissionDenied,
-    )));
-    assert!(!is_transient_accept_error(&std::io::Error::from(
-        std::io::ErrorKind::Other,
-    )));
-
-    #[cfg(unix)]
-    assert!(is_transient_accept_error(
-        &std::io::Error::from_raw_os_error(libc::EMFILE,)
-    ));
-
-    assert!(accept_retry_delay(0) < accept_retry_delay(1));
-    assert_eq!(accept_retry_delay(100), std::time::Duration::from_secs(1));
-}
-
-#[tokio::test]
-async fn webtunnel_managed_path_ignores_socks_target() {
-    let client = <webtunnel::WebTunnelBuilder as ptrs::ClientBuilder<TcpStream>>::build(
-        &webtunnel::WebTunnelBuilder::default(),
-    );
-    let result = client
-        .managed_connect(
-            "invalid.example:443".to_owned(),
-            "127.0.0.1:1".parse().unwrap(),
-        )
-        .await;
-    let error = match result {
-        Ok(_) => panic!("unconfigured WebTunnel must fail before dialing"),
-        Err(error) => error,
-    };
-    assert!(error
-        .to_string()
-        .contains("missing required parameter: url"));
-}
-
-// -- dial_bridge socket options ----------------------------------------
-//
-// The carrier-resilience options (TCP_NODELAY + TCP keepalive) are silent
-// safeguards: if the `set_*` lines disappear, nothing breaks at build or
-// unit-test time, but the bridge channel becomes susceptible to the same
-// mid-bootstrap 10053/10054 tear-downs that motivated `dial_bridge` in
-// the first place. These compliance tests catch a regression that drops
-// either option.
-
-#[tokio::test]
-async fn dial_bridge_sets_tcp_nodelay() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let _accept = tokio::spawn(async move { listener.accept().await });
-
-    let stream = dial_bridge(addr).await.expect("dial_bridge");
-    assert!(
-        stream.nodelay().expect("nodelay() readback"),
-        "dial_bridge must enable TCP_NODELAY on the carrier socket"
-    );
-}
-
-#[tokio::test]
-async fn dial_bridge_arms_tcp_keepalive() {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let addr = listener.local_addr().unwrap();
-    let _accept = tokio::spawn(async move { listener.accept().await });
-
-    let stream = dial_bridge(addr).await.expect("dial_bridge");
-    // `keepalive()` returns whether SO_KEEPALIVE is on. Setting the
-    // per-keepalive intervals via `socket2::TcpKeepalive` also flips
-    // the SO_KEEPALIVE flag, so its presence is the read-back signal
-    // that `set_tcp_keepalive(&keepalive)` was actually called.
-    let sock = socket2::SockRef::from(&stream);
-    assert!(
-        sock.keepalive().expect("SO_KEEPALIVE readback"),
-        "dial_bridge must arm TCP keepalive on the carrier socket"
-    );
-}
-
-// -- resolve_target_addr --
-
-#[test]
-fn resolve_target_addr_ip() {
-    let addr = "127.0.0.1:9050";
-    let resolved = resolve_target_addr(&addr).unwrap();
-    assert_eq!(resolved.to_string(), "127.0.0.1:9050");
-}
-
-#[test]
-fn resolve_target_addr_ipv6() {
-    let addr = "[::1]:443";
-    let resolved = resolve_target_addr(&addr).unwrap();
-    assert_eq!(resolved.to_string(), "[::1]:443");
-}
-
-#[test]
-fn resolve_target_addr_domain_fails() {
-    let addr = "example.com:443";
-    let err = resolve_target_addr(&addr);
-    assert!(
-        err.is_err(),
-        "domain resolution should fail (PT doesn't do DNS)"
-    );
-}
-
-// -- arg_string edge cases --
-
-#[test]
-fn arg_string_empty_uname_and_passwd() {
-    let creds = Some((String::new(), String::new()));
-    assert_eq!(arg_string_from_creds(creds), "");
-}
-
-#[test]
-fn arg_string_passwd_is_nul_only() {
-    let creds = Some((String::new(), "\0".to_string()));
-    assert_eq!(arg_string_from_creds(creds), "");
-}
-
 // -- establish_pt_conn (outgoing-dial seam) --
 //
 // These exercise the client outgoing-connection path
@@ -541,12 +385,16 @@ async fn client_handle_connection_no_success_reply_when_bridge_not_obfs4() {
 
 #[tokio::test]
 async fn unreachable_upstream_proxy_never_falls_back_to_direct_dial() {
-    // The bridge would accept a direct dial; the upstream proxy is a closed port.
+    // The bridge would accept a direct dial; the upstream proxy accepts and
+    // hangs up at once, so negotiation fails fast without a reusable-port race.
     let bridge = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let bridge_addr = bridge.local_addr().unwrap();
-    let closed = TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let proxy_addr = closed.local_addr().unwrap();
-    drop(closed);
+    let dead_proxy = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let proxy_addr = dead_proxy.local_addr().unwrap();
+    let hangup = tokio::spawn(async move {
+        let (stream, _) = dead_proxy.accept().await.unwrap();
+        drop(stream);
+    });
     let proxy = proxy::Proxy::parse(&format!("socks5://{proxy_addr}")).unwrap();
     let arg_string = obfs4::ServerBuilder::<TcpStream>::default().client_params();
 
@@ -576,6 +424,7 @@ async fn unreachable_upstream_proxy_never_falls_back_to_direct_dial() {
         outcome.is_err(),
         "a dead upstream proxy must fail the connection"
     );
+    hangup.await.expect("proxy hangup task panicked");
 
     // A direct dial would already be queued in the bridge's accept backlog.
     let direct = tokio::time::timeout(std::time::Duration::from_millis(100), bridge.accept()).await;
@@ -610,15 +459,40 @@ fn set_client_env(proxy: Option<&str>) {
     }
 }
 
-fn clear_client_env() {
-    std::env::remove_var("TOR_PT_MANAGED_TRANSPORT_VER");
-    std::env::remove_var("TOR_PT_CLIENT_TRANSPORTS");
-    std::env::remove_var("TOR_PT_PROXY");
+/// Restores the `TOR_PT_*` variables a test touched, even if it panics.
+struct ClientEnvGuard(Vec<(&'static str, Option<std::ffi::OsString>)>);
+
+impl ClientEnvGuard {
+    fn new() -> Self {
+        let names = [
+            "TOR_PT_MANAGED_TRANSPORT_VER",
+            "TOR_PT_CLIENT_TRANSPORTS",
+            "TOR_PT_PROXY",
+        ];
+        Self(
+            names
+                .iter()
+                .map(|name| (*name, std::env::var_os(name)))
+                .collect(),
+        )
+    }
+}
+
+impl Drop for ClientEnvGuard {
+    fn drop(&mut self) {
+        for (name, value) in &self.0 {
+            match value {
+                Some(value) => std::env::set_var(name, value),
+                None => std::env::remove_var(name),
+            }
+        }
+    }
 }
 
 #[tokio::test]
 async fn client_setup_rejects_unsupported_upstream_proxy_without_disclosure() {
     let _guard = ENV_LOCK.lock().await;
+    let _env = ClientEnvGuard::new();
     for uri in [
         "https://user:pass@127.0.0.1:9050",
         "socks5://user:pass@proxy.invalid:9050",
@@ -626,7 +500,6 @@ async fn client_setup_rejects_unsupported_upstream_proxy_without_disclosure() {
     ] {
         set_client_env(Some(uri));
         let outcome = client_setup("unused-test-state-dir", RunTasks::new()).await;
-        clear_client_env();
 
         let err = outcome.expect_err("unsupported TOR_PT_PROXY must abort client_setup");
         let msg = format!("{err:#}");
@@ -643,6 +516,7 @@ async fn client_setup_rejects_unsupported_upstream_proxy_without_disclosure() {
 #[tokio::test]
 async fn client_setup_without_proxy_spawns_owned_listener_tasks() {
     let _guard = ENV_LOCK.lock().await;
+    let _env = ClientEnvGuard::new();
     set_client_env(None);
 
     // Without TOR_PT_PROXY the fail-closed path must not trigger: the
@@ -675,18 +549,16 @@ async fn client_setup_without_proxy_spawns_owned_listener_tasks() {
 
     // No connection task can remain: every lifecycle permit is back.
     assert_no_connection_tasks(&ctx);
-
-    clear_client_env();
 }
 
 #[tokio::test]
 async fn client_setup_with_supported_proxy_spawns_owned_listener_tasks() {
     let _guard = ENV_LOCK.lock().await;
+    let _env = ClientEnvGuard::new();
     // TEST-NET-2 endpoint: setup only validates and acknowledges it, never dials.
     set_client_env(Some("socks5://user:pass@198.51.100.10:19050"));
     let ctx = RunTasks::new();
     let outcome = client_setup("unused-test-state-dir", ctx.clone()).await;
-    clear_client_env();
     let mut listeners = outcome.expect("a supported TOR_PT_PROXY must not abort client_setup");
     assert!(
         !listeners.is_empty(),

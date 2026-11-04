@@ -1,6 +1,5 @@
 use super::*;
-use resocks5_net::server::{self as proxy_server, Reply, ServerOptions};
-use tokio::io::AsyncWriteExt;
+use resocks5_net::server::{self as proxy_server, IncomingRequest, Protocol, Reply, ServerOptions};
 
 #[cfg(test)]
 pub(super) async fn client_handle_connection<In, C, B>(
@@ -51,18 +50,18 @@ where
     .await
     .context("proxy negotiation timed out")??;
     let target_addr = request.target().to_owned();
-
-    // Reconstruct the PT-spec argument string from SOCKS5 user/pass and
-    // hand it to the transport's `options(&Args)` so the obfs4
-    // ClientBuilder picks up `cert=...` / `iat-mode=...` etc.
-    let arg_string = arg_string_from_creds(creds);
-    let args = if arg_string.is_empty() {
-        ptrs::args::Args::default()
+    let creds = if request.protocol() == Protocol::Http {
+        creds.map(|(user, password)| http_credentials(user, password))
     } else {
-        ptrs::args::Args::from_str(&arg_string).context("parsing PT arg string")?
+        creds
     };
-    <B as ptrs::ClientBuilder<TcpStream>>::options(&mut builder, &args)
-        .map_err(|e| anyhow::anyhow!("applying PT args to builder: {e}"))?;
+
+    // Hand the reconstructed PT arguments to the transport's `options(&Args)`
+    // so the obfs4 ClientBuilder picks up `cert=...` / `iat-mode=...` etc.
+    if let Err(error) = configure_builder(&mut builder, creds) {
+        reply_failure(&request, &mut parent, Reply::GeneralFailure).await;
+        return Err(error);
+    }
 
     // Build the client and let the transport choose its connection path.
     // WebTunnel owns URL dialing; its SOCKS target is only a PT-spec carrier
@@ -72,12 +71,7 @@ where
         match C::managed_connect_with_proxy(pt_client, target_addr, client_addr, proxy).await {
             Ok(conn) => conn,
             Err(error) => {
-                // Best effort: report failure instead of a bare close.
-                let _ = tokio::time::timeout(
-                    SOCKS5_SETUP_TIMEOUT,
-                    request.reply(&mut parent, Reply::UpstreamUnavailable),
-                )
-                .await;
+                reply_failure(&request, &mut parent, Reply::UpstreamUnavailable).await;
                 return Err(error);
             }
         };
@@ -91,15 +85,15 @@ where
     .context("proxy reply timed out")?
     .context("writing established reply to PT parent")?;
 
+    // Payload the SDK already consumed precedes whatever is still buffered or
+    // unread, and shares the tunnel's ordinary backpressure policy.
     let pipeline = request.take_pipeline();
-    if !pipeline.is_empty() {
-        tokio::time::timeout(SOCKS5_SETUP_TIMEOUT, async {
-            pt_conn.write_all(&pipeline).await?;
-            pt_conn.flush().await
-        })
-        .await
-        .context("initial payload forwarding timed out")??;
-    }
+    drop(request);
+    let mut parent = Prefixed {
+        prefix: pipeline,
+        offset: 0,
+        inner: parent,
+    };
     if let Err(e) = copy_bidirectional(&mut parent, &mut pt_conn).await {
         warn!(
             addres = sensitive(client_addr).to_string(),
@@ -107,4 +101,88 @@ where
         );
     }
     Ok(())
+}
+
+/// HTTP Basic parsers split at the first `:`, so rejoin the halves. Clients
+/// append one `:` (an empty password) after the PT arguments; strip it.
+pub(super) fn http_credentials(username: String, password: String) -> (String, String) {
+    let mut joined = format!("{username}:{password}");
+    if joined.ends_with(':') {
+        joined.pop();
+    }
+    (joined, String::new())
+}
+
+/// Apply the parent's PT arguments to `builder`. Errors never carry the
+/// submitted values, which may include bridge secrets.
+fn configure_builder<B>(builder: &mut B, creds: Option<(String, String)>) -> Result<()>
+where
+    B: ptrs::ClientBuilder<TcpStream>,
+{
+    let arg_string = arg_string_from_creds(creds);
+    let args = if arg_string.is_empty() {
+        ptrs::args::Args::default()
+    } else {
+        ptrs::args::Args::from_str(&arg_string).map_err(|_| anyhow!("invalid PT arguments"))?
+    };
+    <B as ptrs::ClientBuilder<TcpStream>>::options(builder, &args)
+        .map_err(|_| anyhow!("PT arguments rejected by the transport"))?;
+    Ok(())
+}
+
+/// Best-effort terminal failure reply, bounded so teardown is never held up.
+async fn reply_failure<S: AsyncWrite + Unpin>(
+    request: &IncomingRequest,
+    parent: &mut S,
+    reply: Reply,
+) {
+    let _ = tokio::time::timeout(SOCKS5_SETUP_TIMEOUT, request.reply(parent, reply)).await;
+}
+
+/// Serves `prefix` before reading from `inner`; writes pass straight through.
+struct Prefixed<S> {
+    prefix: Vec<u8>,
+    offset: usize,
+    inner: S,
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Prefixed<S> {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = &mut *self;
+        if this.offset < this.prefix.len() {
+            let end = (this.offset + buf.remaining()).min(this.prefix.len());
+            buf.put_slice(&this.prefix[this.offset..end]);
+            this.offset = end;
+            return std::task::Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut this.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Prefixed<S> {
+    fn poll_write(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        mut self: Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        Pin::new(&mut self.inner).poll_shutdown(cx)
+    }
 }

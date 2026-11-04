@@ -10,15 +10,15 @@ Workspace crates and their internal (Cargo `path`) dependencies:
 
 | Crate            | Depends on                                                  |
 |------------------|------------------------------------------------------------|
-| `ptrs-gesher`    | core, obfs4, webtunnel, bridge-line, lyrebird (all optional) |
+| `ptrs-gesher`    | core (always); obfs4, webtunnel, bridge-line, lyrebird (optional) |
 | `lyrebird`       | core, obfs4, webtunnel                                     |
 | `obfs4`          | core                                                       |
 | `webtunnel`      | core                                                       |
 | `bridge-line`    | *(standalone)*                                             |
 | `core`           | *(standalone)*                                             |
 
-`ptrs-gesher` is the umbrella crate: it re-exports the others, each behind an
-optional feature. `core` is published as `ptrs-gesher-core` and consumed
+`ptrs-gesher` is the umbrella crate: it re-exports `core` and, behind optional
+features, the others. `core` is published as `ptrs-gesher-core` and consumed
 internally as `ptrs`. `bridge-line` and `core` have no in-workspace
 dependencies.
 
@@ -26,12 +26,13 @@ dependencies.
 
 | # | Stage | What happens |
 |---|-------|--------------|
-| 1 | SOCKS5 client | parent (arti/tor) opens a SOCKS5 connection |
-| 2 | lyrebird (SOCKS5 accept loop) | extracts PT args from the SOCKS5 username/password |
+| 1 | SOCKS5 / HTTP CONNECT client | parent (arti/tor) opens a connection to the loopback listener |
+| 2 | lyrebird (accept loop) | extracts PT args from the SOCKS5 username/password or HTTP Basic credentials |
 | 3 | `ClientBuilder::options(&args)` | parses `cert=` / `iat-mode=` into `station_pubkey` + `station_id` |
-| 4 | `ClientTransport::establish(tcp_future)` | generates the ephemeral key before TCP connect, then performs the ntor handshake |
-| 5 | `Obfs4Codec` framed tunnel (`AsyncRead` + `AsyncWrite`) | XSalsa20-Poly1305 encryption, optional IAT padding |
-| 6 | Tor relay (via the bridge's ORPort) | — |
+| 4 | upstream proxy (optional, `TOR_PT_PROXY`) | the carrier TCP connection goes through SOCKS5 / HTTP CONNECT; failures never fall back to a direct dial |
+| 5 | `ClientTransport::establish(tcp_future)` | generates the ephemeral key before TCP connect, then performs the ntor handshake |
+| 6 | `Obfs4Codec` framed tunnel (`AsyncRead` + `AsyncWrite`) | XSalsa20-Poly1305 encryption, optional IAT padding |
+| 7 | Tor relay (via the bridge's ORPort) | — |
 
 ## Server data flow (obfs4)
 
@@ -52,14 +53,16 @@ ORPort forwarding not yet wired into its connection handler.
 
 | # | Stage | What happens |
 |---|-------|--------------|
-| 1 | TCP connect to URL `host:port` (or `addr=` override) | dial the bridge front |
+| 1 | TCP connect to URL `host:port` (or `addr=` override) | dial the bridge front; with `TOR_PT_PROXY` the connection goes through the proxy and the hostname is passed to it unresolved |
 | 2 | TLS handshake (tokio-rustls, no ALPN) | SNI = `servername=` or the URL hostname |
 | 3 | HTTP/1.1 Upgrade request | `GET <path> HTTP/1.1`, `Upgrade: websocket`, `Connection: Upgrade` |
 | 4 | Server responds `101 Switching Protocols` | — |
 | 5 | Raw bidirectional byte stream | no WebSocket framing — just bytes |
 | 6 | Tor relay (via the bridge's ORPort) | — |
 
-Builder clones share lazy DNS and TLS state within their client context. DNS
+Builder clones share lazy DNS and TLS state within their client context. The
+DNS behaviour below applies to direct URL dialing only; a proxy-supplied
+carrier performs no local resolution. DNS
 resolution and address attempts share the handshake deadline; earlier address
 attempts are bounded so later addresses can be tried. TLS session resumption is
 disabled when reusing the immutable client configuration.

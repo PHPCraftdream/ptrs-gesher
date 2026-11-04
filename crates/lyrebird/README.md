@@ -94,7 +94,10 @@ compatibility. These are transport-control listeners: RFC 1929 or HTTP Basic
 credential fields carry per-bridge PT arguments, not application user accounts.
 Parsing never opens a plain relay or sends success before the PT handshake.
 If the transport or upstream proxy cannot be established, the parent receives a
-failure reply (SOCKS5 REP=4 or HTTP 502) instead of a bare close.
+failure reply (SOCKS5 REP=4 or HTTP 502); invalid PT arguments get REP=1 /
+HTTP 502. Over HTTP Basic, send `base64(<PT arguments>:)`: the trailing `:` is
+an empty-password marker that lyrebird strips after rejoining the halves, so
+arguments containing `:` (for example WebTunnel `url=https://…`) survive.
 HTTP pipeline bytes are forwarded once, before unread bytes from the socket.
 Bridge-side transport sockets are not HTTP proxy listeners and are unchanged.
 
