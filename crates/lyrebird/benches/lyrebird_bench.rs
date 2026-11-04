@@ -2,7 +2,6 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
-use fast_socks5::util::target_addr::TargetAddr;
 
 fn fast_criterion() -> Criterion {
     Criterion::default()
@@ -52,17 +51,17 @@ fn bench_arg_string_then_parse(c: &mut Criterion) {
 }
 
 fn bench_resolve_target_addr(c: &mut Criterion) {
-    let ipv4 = TargetAddr::Ip("10.0.0.1:9050".parse().unwrap());
+    let ipv4 = "10.0.0.1:9050";
     c.bench_function("resolve_target_addr_ipv4", |b| {
         b.iter(|| lyrebird::resolve_target_addr(black_box(&ipv4)).unwrap());
     });
 
-    let ipv6 = TargetAddr::Ip("[::1]:443".parse().unwrap());
+    let ipv6 = "[::1]:443";
     c.bench_function("resolve_target_addr_ipv6", |b| {
         b.iter(|| lyrebird::resolve_target_addr(black_box(&ipv6)).unwrap());
     });
 
-    let domain = TargetAddr::Domain("example.com".into(), 443);
+    let domain = "example.com:443";
     c.bench_function("resolve_target_addr_domain_rejected", |b| {
         // Always fails — but the failure-path cost is still measurable.
         b.iter(|| {

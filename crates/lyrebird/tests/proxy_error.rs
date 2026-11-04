@@ -140,7 +140,7 @@ async fn assert_rejected(process: &mut ChildGuard, proxy_data: &[&str]) {
         stdout,
         [
             "VERSION 1".to_string(),
-            "PROXY-ERROR upstream proxy dialing is not supported by this transport".to_string(),
+            "PROXY-ERROR invalid or unsupported upstream proxy".to_string(),
         ]
     );
     assert_no_proxy_data(&stdout[1], proxy_data);
@@ -149,8 +149,21 @@ async fn assert_rejected(process: &mut ChildGuard, proxy_data: &[&str]) {
 }
 
 async fn assert_transport_configured(process: &mut ChildGuard) {
+    assert_transport_configured_with_proxy(process, false, &[]).await;
+}
+
+async fn assert_transport_configured_with_proxy(
+    process: &mut ChildGuard,
+    expect_proxy: bool,
+    proxy_data: &[&str],
+) {
     let mut stdout = process.stdout();
     assert_eq!(next_line(&mut stdout, "VERSION").await, "VERSION 1");
+    if expect_proxy {
+        let acknowledgement = next_line(&mut stdout, "PROXY DONE").await;
+        assert_eq!(acknowledgement, "PROXY DONE");
+        assert_no_proxy_data(&acknowledgement, proxy_data);
+    }
     let cmethod = next_line(&mut stdout, "CMETHOD obfs4").await;
     assert!(cmethod.starts_with("CMETHOD obfs4 socks5 127.0.0.1:"));
     assert_eq!(
@@ -171,17 +184,19 @@ async fn assert_transport_configured(process: &mut ChildGuard) {
     let stderr = read_stderr(process.stderr())
         .await
         .expect("read cleanup stderr");
-    assert_stderr_no_proxy_data(&stderr, &[]);
+    assert_stderr_no_proxy_data(&stderr, proxy_data);
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn configured_proxy_is_rejected_without_disclosing_credentials_or_host() {
+async fn configured_proxy_is_acknowledged_without_disclosing_credentials_or_host() {
     let mut process = spawn_pt(Some(OsString::from(
-        "socks5://acct_copper:pw_quartz@127.0.0.1:9050",
+        "socks5://acct_copper:pw_quartz@198.51.100.10:19050",
     )));
-    assert_rejected(
+    // Control-plane acknowledgement only; carrier routing is checked separately.
+    assert_transport_configured_with_proxy(
         &mut process,
-        &["socks5", "acct_copper", "pw_quartz", "127.0.0.1", "9050"],
+        true,
+        &["acct_copper", "pw_quartz", "198.51.100.10", "19050"],
     )
     .await;
 }

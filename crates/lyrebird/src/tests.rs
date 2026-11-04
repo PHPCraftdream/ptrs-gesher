@@ -57,31 +57,13 @@ fn accept_error_policy_retries_transient_failures() {
 }
 
 #[tokio::test]
-async fn pt_args_auth_propagates_creds() {
-    use fast_socks5::server::Authentication;
-    let auth = PtArgsAuth;
-    let got = auth
-        .authenticate(Some(("u".to_string(), "p".to_string())))
-        .await;
-    assert_eq!(got, Some(("u".to_string(), "p".to_string())));
-}
-
-#[tokio::test]
-async fn pt_args_auth_accepts_no_creds() {
-    use fast_socks5::server::Authentication;
-    let auth = PtArgsAuth;
-    let got = auth.authenticate(None).await;
-    assert_eq!(got, Some((String::new(), String::new())));
-}
-
-#[tokio::test]
 async fn webtunnel_managed_path_ignores_socks_target() {
     let client = <webtunnel::WebTunnelBuilder as ptrs::ClientBuilder<TcpStream>>::build(
         &webtunnel::WebTunnelBuilder::default(),
     );
     let result = client
         .managed_connect(
-            TargetAddr::Domain("invalid.example".into(), 443),
+            "invalid.example:443".to_owned(),
             "127.0.0.1:1".parse().unwrap(),
         )
         .await;
@@ -138,21 +120,21 @@ async fn dial_bridge_arms_tcp_keepalive() {
 
 #[test]
 fn resolve_target_addr_ip() {
-    let addr = TargetAddr::Ip("127.0.0.1:9050".parse().unwrap());
+    let addr = "127.0.0.1:9050";
     let resolved = resolve_target_addr(&addr).unwrap();
     assert_eq!(resolved.to_string(), "127.0.0.1:9050");
 }
 
 #[test]
 fn resolve_target_addr_ipv6() {
-    let addr = TargetAddr::Ip("[::1]:443".parse().unwrap());
+    let addr = "[::1]:443";
     let resolved = resolve_target_addr(&addr).unwrap();
     assert_eq!(resolved.to_string(), "[::1]:443");
 }
 
 #[test]
 fn resolve_target_addr_domain_fails() {
-    let addr = TargetAddr::Domain("example.com".into(), 443);
+    let addr = "example.com:443";
     let err = resolve_target_addr(&addr);
     assert!(
         err.is_err(),
@@ -366,17 +348,11 @@ async fn client_accept_loop_exits_on_pre_cancelled_token() {
     );
 }
 
-// -- Bridge-connection regression (fast_socks5 `execute_command`) --
+// -- Bridge-connection regression --
 //
-// `client_handle_connection` must use fast-socks5 only to *parse* the
-// request, never to execute it. With the default `execute_command = true`,
-// `upgrade_to_socks5()` would itself open a *plain* TCP connection to the
-// bridge and send the SOCKS reply — bypassing obfs4, so no bridge could
-// ever be reached through the transport. The fix sets
-// `execute_command(false)` and has lyrebird dial obfs4 itself, replying to
-// the parent only once the tunnel is up. These tests drive the real SOCKS5
-// client protocol against `client_handle_connection` pointed at a real
-// loopback "bridge".
+// The SDK must parse only. Lyrebird opens the actual transport and sends
+// success only after its handshake, never after a bare TCP connection.
+// These tests exchange real SOCKS5 bytes against a loopback obfs4 bridge.
 
 /// Play the SOCKS5 client (as arti/tor would) over `parent`: user/pass
 /// auth carrying the PT arg string, then a CONNECT to `bridge`. Returns
@@ -430,9 +406,7 @@ async fn client_handle_connection_tunnels_through_obfs4_and_replies_itself() {
     // A real loopback "bridge" running an obfs4 *server*. `server.wrap()`
     // completes only if an obfs4 *client* handshake arrives — i.e. the
     // connection that reached the bridge was obfs4, not a plain TCP proxy.
-    // On the buggy `execute_command = true` path the bridge would instead
-    // receive fast-socks5's plain relay and `wrap()` would never complete,
-    // failing this test.
+    // A plain TCP relay would never complete the server's transport handshake.
     let server_builder = obfs4::ServerBuilder::<TcpStream>::default();
     let arg_string = server_builder.client_params();
     let server = server_builder.build();
@@ -462,9 +436,7 @@ async fn client_handle_connection_tunnels_through_obfs4_and_replies_itself() {
 
     socks5_client_connect(&mut parent, &arg_string, bridge_addr).await;
 
-    // The reply is the canonical success frame lyrebird writes itself
-    // (fast-socks5 sends nothing — execute_command is disabled), and it
-    // arrives only because the obfs4 tunnel to the bridge came up.
+    // The SDK emits this reply only after Lyrebird establishes obfs4.
     let mut reply = [0u8; 10];
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
@@ -596,25 +568,27 @@ fn clear_client_env() {
 }
 
 #[tokio::test]
-async fn client_setup_rejects_configured_upstream_proxy() {
+async fn client_setup_rejects_unsupported_upstream_proxy_without_disclosure() {
     let _guard = ENV_LOCK.lock().await;
-    set_client_env(Some("socks5://user:pass@127.0.0.1:9050"));
+    for uri in [
+        "https://user:pass@127.0.0.1:9050",
+        "socks5://user:pass@proxy.invalid:9050",
+        "socks5://user:@127.0.0.1:9050",
+    ] {
+        set_client_env(Some(uri));
+        let outcome = client_setup("unused-test-state-dir", RunTasks::new()).await;
+        clear_client_env();
 
-    let outcome = client_setup("unused-test-state-dir", RunTasks::new()).await;
-
-    clear_client_env();
-
-    // The setup must fail closed without copying proxy credentials or URI
-    // data into a returned error.
-    let err = outcome.expect_err("a configured TOR_PT_PROXY must abort client_setup");
-    let msg = format!("{err:#}");
-    assert!(
-        msg.contains("TOR_PT_PROXY")
-            && msg.contains("upstream proxy dialing is not implemented")
-            && !msg.contains("127.0.0.1:9050")
-            && !msg.contains("user:pass"),
-        "the refusal must be actionable without echoing proxy data, got: {msg}"
-    );
+        let err = outcome.expect_err("unsupported TOR_PT_PROXY must abort client_setup");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("invalid or unsupported upstream proxy")
+                && !msg.contains("127.0.0.1:9050")
+                && !msg.contains("proxy.invalid")
+                && !msg.contains("user:pass"),
+            "proxy rejection must not disclose configuration: {msg}"
+        );
+    }
 }
 
 #[tokio::test]

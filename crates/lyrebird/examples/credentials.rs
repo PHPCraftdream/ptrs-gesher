@@ -1,8 +1,6 @@
 //! Demonstrate lyrebird helper functions without a tor daemon.
 
-use fast_socks5::util::target_addr::TargetAddr;
 use lyrebird::{arg_string_from_creds, resolve_target_addr};
-use std::net::SocketAddr;
 
 fn main() {
     // arg_string_from_creds: join username + password into the PT arg string.
@@ -17,13 +15,13 @@ fn main() {
     println!("empty creds: \"{empty}\"");
 
     // resolve_target_addr: IP address passes through.
-    let addr = TargetAddr::Ip("127.0.0.1:9000".parse::<SocketAddr>().unwrap());
+    let addr = "127.0.0.1:9000";
     let resolved = resolve_target_addr(&addr).expect("IP should resolve");
     assert_eq!(resolved.to_string(), "127.0.0.1:9000");
     println!("resolved: {resolved}");
 
     // Domain address fails (PT does not do DNS).
-    let domain = TargetAddr::Domain("example.com".into(), 443);
+    let domain = "example.com:443";
     let err = resolve_target_addr(&domain);
     assert!(err.is_err(), "domain should fail");
     println!("domain correctly rejected: {err:?}");

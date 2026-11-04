@@ -86,6 +86,28 @@ lyrebird::run_from_env().await?;
 
 Call this from an async context after setting the managed-transport environment.
 
+## Proxy protocols
+
+Each managed client listener accepts both SOCKS5 and HTTP CONNECT on its existing
+loopback socket. PT control announcements still advertise `socks5` for Tor/Arti
+compatibility. These are transport-control listeners: RFC 1929 or HTTP Basic
+credential fields carry per-bridge PT arguments, not application user accounts.
+Parsing never opens a plain relay or sends success before the PT handshake.
+HTTP pipeline bytes are forwarded once, before unread bytes from the socket.
+Bridge-side transport sockets are not HTTP proxy listeners and are unchanged.
+
+`TOR_PT_PROXY` supports `socks5://IP:port` and `http://IP:port`, with optional
+percent-encoded `username:password@` user information. Proxy endpoints must be
+IP literals; destination hostnames are passed to the proxy without local DNS.
+Unsupported configuration fails before listeners are announced. A configured
+proxy error never selects a direct carrier. WebTunnel TLS and its HTTP upgrade
+run unchanged over the proxy-supplied stream.
+
+HTTP CONNECT and SOCKS5 authentication do not encrypt their credential-bearing
+hop. HTTPS-to-proxy is not enabled by this interface. The upstream protocol
+implementation comes from `resocks5-net` 0.4.1; no separate SOCKS/HTTP client
+parser is maintained here.
+
 ## License
 
 Dual-licensed under either:

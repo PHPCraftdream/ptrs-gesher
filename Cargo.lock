@@ -1162,20 +1162,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fast-socks5"
-version = "0.10.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d09fe4a491909a716088083eeb5bcc25427330fdbcd4ecd3dfa5469b3da795df"
-dependencies = [
- "anyhow",
- "async-trait",
- "log",
- "thiserror 1.0.69",
- "tokio",
- "tokio-stream",
-]
-
-[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2613,15 +2599,17 @@ version = "0.7.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "base64",
  "clap",
  "criterion",
- "fast-socks5",
  "futures",
  "libc",
  "log",
+ "percent-encoding",
  "ptrs-gesher-core",
  "ptrs-gesher-obfs4",
  "ptrs-gesher-webtunnel",
+ "resocks5-net",
  "safelog 0.4.8",
  "socket2",
  "thiserror 2.0.20",
@@ -2631,6 +2619,7 @@ dependencies = [
  "tracing-core",
  "tracing-log",
  "tracing-subscriber",
+ "url",
  "windows-sys 0.61.2",
 ]
 
@@ -2947,6 +2936,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ecfc8e855ab517235426ec1290bfb0745e73fa478b29619eb66a2a81be9d8716"
 dependencies = [
  "rand_core 0.10.1",
+]
+
+[[package]]
+name = "resocks5-net"
+version = "0.4.1"
+dependencies = [
+ "base64",
+ "socket2",
+ "tokio",
 ]
 
 [[package]]
@@ -3748,17 +3746,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0c85f2c3ef0b1cd58b36682f4b17aaa995f0e5db534d85692b4903abce21f67"
 dependencies = [
  "rustls",
- "tokio",
-]
-
-[[package]]
-name = "tokio-stream"
-version = "0.1.19"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a3d06f0b082ba57c26b79407372e57cf2a1e28124f78e9479fe80322cf53420b"
-dependencies = [
- "futures-core",
- "pin-project-lite",
  "tokio",
 ]
 

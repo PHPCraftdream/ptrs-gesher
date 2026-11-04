@@ -22,14 +22,14 @@ pub fn print_cmethods_done() {
 /// PT-spec §3.3.2: tell the parent process that the upstream proxy given
 /// in `TOR_PT_PROXY` is malformed/unsupported/unusable.
 ///
-/// The spec requires the PT to terminate immediately after emitting this
-/// line; `client_setup` enforces that by aborting before any transport is
-/// initialized and no listener is bound. A matching `print_proxy_done`
-/// does NOT exist on purpose: there is no upstream proxy dialer below
-/// (`dial_bridge` always connects directly), so this transport must never
-/// claim `PROXY DONE` — that would promise a route the code does not use.
+/// Setup terminates before initializing a transport or binding a listener.
 pub fn print_proxy_error(reason: &str) {
     emit(format!("PROXY-ERROR {reason}"));
+}
+
+/// PT-spec section 3.3.2: configured transports use the validated upstream proxy.
+pub fn print_proxy_done() {
+    emit("PROXY DONE".to_owned());
 }
 
 fn emit(line: String) {

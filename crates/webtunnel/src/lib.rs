@@ -474,6 +474,13 @@ fn reject_bound_carrier(
 }
 
 impl WebTunnelClient {
+    /// Return the validated carrier destination without resolving its hostname.
+    /// The caller can dial through a proxy and supply that stream to `establish`.
+    pub fn carrier_destination(&self) -> Result<(String, u16), Error> {
+        let prepared = self.config.as_ref().ok_or(Error::MissingUrl)?.prepare()?;
+        Ok((prepared.host, prepared.port))
+    }
+
     /// Connect directly to the configured `url=` endpoint.
     ///
     /// This explicit API owns URL dialing. The [`ptrs::ClientTransport`]
