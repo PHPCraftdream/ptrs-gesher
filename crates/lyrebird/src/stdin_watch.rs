@@ -16,8 +16,10 @@ use std::io;
 /// no portable readiness source; those reads can briefly block on unusual
 /// devices and are not the managed-PT path.
 ///
-/// cancel-safe: yes — cancellation only drops the local descriptor/handle
-/// wrapper; no read is left pending elsewhere.
+/// cancel-safe: yes for pipes and sockets — cancellation only drops the local
+/// descriptor/handle wrapper; no read is left pending elsewhere. NO for the
+/// direct-read path (regular files, non-terminal devices): a blocking read
+/// cannot be preempted, so cancellation takes effect only once it returns.
 pub(crate) async fn wait_stdin_close() -> io::Result<()> {
     imp::wait_stdin_close().await
 }
@@ -71,6 +73,8 @@ mod imp {
             return wait_immediate(watched).await;
         }
 
+        // `with_interest` is deprecated as of tokio 1.54; its replacement is
+        // `unsafe` and needs the contract below.
         // SAFETY: `watched` owns a duplicated descriptor that stays open, and
         // `as_raw_fd` returns the same value, for the whole life of `async_fd`.
         let async_fd = unsafe { AsyncFd::register_with_interest(watched, Interest::READABLE)? };

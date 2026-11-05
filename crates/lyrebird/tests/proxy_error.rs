@@ -37,6 +37,11 @@ impl ChildGuard {
 }
 
 fn spawn_pt(proxy: Option<OsString>) -> ChildGuard {
+    spawn_pt_with(proxy, |_| {})
+}
+
+/// Like [`spawn_pt`], with a hook to break the parent environment further.
+fn spawn_pt_with(proxy: Option<OsString>, customize: impl FnOnce(&mut Command)) -> ChildGuard {
     let state_id = NEXT_STATE_ID.fetch_add(1, Ordering::Relaxed);
     let statedir = std::env::temp_dir().join(format!(
         "lyrebird-proxy-error-test-{}-{state_id}",
@@ -61,6 +66,7 @@ fn spawn_pt(proxy: Option<OsString>) -> ChildGuard {
     if let Some(proxy) = proxy {
         cmd.env("TOR_PT_PROXY", proxy);
     }
+    customize(&mut cmd);
 
     let mut child = cmd.spawn().expect("spawn lyrebird binary");
     let stdin = child.stdin.take();
@@ -242,6 +248,93 @@ async fn non_unicode_proxy_is_rejected_without_echoing_bytes() {
             "9050",
             "INJECTED",
         ],
+    )
+    .await;
+}
+
+/// The PT must exit with an error status after exactly these control lines.
+async fn assert_control_failure(process: &mut ChildGuard, expected: &[&str]) {
+    let stdout = process.stdout();
+    let stderr = process.stderr();
+    let joined = tokio::time::timeout(Duration::from_secs(5), async {
+        let status = process.child.wait();
+        let stdout = read_stdout(stdout);
+        let stderr = read_stderr(stderr);
+        tokio::join!(status, stdout, stderr)
+    })
+    .await
+    .expect("a bad launch must terminate while stdin remains open");
+    assert!(
+        !joined.0.expect("wait for the PT").success(),
+        "a bad launch must return an error status"
+    );
+    let lines = joined.1.expect("read control channel");
+    assert_eq!(lines, expected);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn version_mismatch_is_reported_as_version_error() {
+    for offered in ["2", "2,3", "", "1x", "v1"] {
+        let mut process = spawn_pt_with(None, |cmd| {
+            cmd.env("TOR_PT_MANAGED_TRANSPORT_VER", offered);
+        });
+        // No `VERSION 1` may precede the error: nothing was negotiated.
+        assert_control_failure(&mut process, &["VERSION-ERROR no-version"]).await;
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn version_list_containing_one_is_accepted() {
+    let mut process = spawn_pt_with(None, |cmd| {
+        cmd.env("TOR_PT_MANAGED_TRANSPORT_VER", "2,1");
+    });
+    assert_transport_configured(&mut process).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_version_variable_is_reported_as_env_error() {
+    let mut process = spawn_pt_with(None, |cmd| {
+        cmd.env_remove("TOR_PT_MANAGED_TRANSPORT_VER");
+    });
+    assert_control_failure(
+        &mut process,
+        &["ENV-ERROR TOR_PT_MANAGED_TRANSPORT_VER is not set"],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn conflicting_or_missing_transport_variables_are_env_errors() {
+    let mut both = spawn_pt_with(None, |cmd| {
+        cmd.env("TOR_PT_SERVER_TRANSPORTS", "obfs4");
+    });
+    assert_control_failure(
+        &mut both,
+        &[
+            "VERSION 1",
+            "ENV-ERROR TOR_PT_CLIENT_TRANSPORTS and TOR_PT_SERVER_TRANSPORTS both set",
+        ],
+    )
+    .await;
+
+    let mut neither = spawn_pt_with(None, |cmd| {
+        cmd.env_remove("TOR_PT_CLIENT_TRANSPORTS");
+    });
+    assert_control_failure(
+        &mut neither,
+        &["VERSION 1", "ENV-ERROR not launched as a managed transport"],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn missing_state_location_is_reported_as_env_error() {
+    let mut process = spawn_pt_with(None, |cmd| {
+        cmd.env_remove("TOR_PT_STATE_LOCATION");
+    });
+    assert_control_failure(
+        &mut process,
+        &["ENV-ERROR TOR_PT_STATE_LOCATION is not set"],
     )
     .await;
 }

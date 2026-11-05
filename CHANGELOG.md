@@ -63,6 +63,27 @@ All six crates move to 0.8.0 in lockstep.
   1.0.11 (RUSTSEC-2026-0381), rustls-webpki 0.103.16 (RUSTSEC-2026-0382) and
   tokio 1.54.1 (RUSTSEC-2026-0386).
 
+### Fixed
+
+- **lyrebird / webtunnel**: a bridge-line `addr=` host containing whitespace or
+  control bytes (CR/LF) can no longer reach an upstream HTTP proxy's `CONNECT`
+  request line; `addr=` validation rejects it and `Proxy::connect` refuses such
+  hosts as defence in depth.
+- **lyrebird**: version negotiation and launch errors are reported on the
+  control channel as PT-spec §3.1/§3.2 require: `VERSION-ERROR no-version` when
+  no offered version is supported (previously `VERSION 1` was printed and the
+  process exited silently), and `ENV-ERROR <reason>` for a missing
+  `TOR_PT_MANAGED_TRANSPORT_VER` or `TOR_PT_STATE_LOCATION`, both or neither of
+  the client/server transport variables.
+- **lyrebird**: the "tunnel closed with error" log event used the field name
+  `addres`; it is now `address`, like every other event.
+- **core**: a malformed `TOR_PT_PROXY` no longer echoes the raw value (which may
+  carry `user:password@`) in `ClientInfo::new()` errors; `is_client()` no longer
+  embeds an `ENV-ERROR` prefix in its message.
+- **obfs4**: trace/debug logs (with the `debug` feature or in tests) no longer
+  dump nonce prefixes, length masks, ciphertext or handshake MACs; the received
+  payload buffer is allocated once at its exact size.
+
 ## [0.7.0] - 2026-10-14
 
 Published through crates.io Trusted Publishing from the pinned source release;

@@ -207,6 +207,186 @@ async fn prefixed_reader_serves_prefix_first_then_inner_and_passes_writes() {
 }
 
 #[test]
+fn tunnel_closed_event_uses_the_address_field_name() {
+    use std::sync::Mutex;
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+
+    #[derive(Default)]
+    struct Fields(Arc<Mutex<Vec<String>>>);
+    struct Collect<'a>(&'a mut Vec<String>);
+    impl tracing::field::Visit for Collect<'_> {
+        fn record_debug(&mut self, field: &tracing::field::Field, _: &dyn std::fmt::Debug) {
+            self.0.push(field.name().to_owned());
+        }
+    }
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Fields {
+        fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+            event.record(&mut Collect(&mut self.0.lock().unwrap()));
+        }
+    }
+
+    let fields = Fields::default();
+    let seen = fields.0.clone();
+    let subscriber = tracing_subscriber::registry().with(fields);
+    tracing::subscriber::with_default(subscriber, || {
+        connection::log_tunnel_closed(
+            "127.0.0.1:9050".parse().unwrap(),
+            &std::io::Error::other("boom"),
+        );
+    });
+    let seen = seen.lock().unwrap();
+    assert!(seen.iter().any(|name| name == "address"), "{seen:?}");
+    assert!(!seen.iter().any(|name| name == "addres"), "{seen:?}");
+}
+
+#[test]
+fn http_credentials_trailing_colon_ambiguity_is_pinned() {
+    // Basic carries `user:password`; clients append one ':' after the PT
+    // arguments, so exactly one trailing ':' is always treated as that marker.
+    // Arguments that genuinely end in ':' must therefore send the marker too.
+    assert_eq!(
+        connection::http_credentials("k=v".into(), ":".into()),
+        ("k=v:".to_owned(), String::new()),
+        "genuine trailing ':' survives when the marker is present"
+    );
+    assert_eq!(
+        connection::http_credentials("k=v:".into(), String::new()),
+        ("k=v".to_owned(), String::new()),
+        "without the marker a trailing ':' is indistinguishable from it"
+    );
+    assert_eq!(
+        connection::http_credentials(String::new(), String::new()),
+        (String::new(), String::new())
+    );
+}
+
+#[tokio::test]
+async fn prefixed_reader_handles_empty_prefix_and_single_byte_reads() {
+    let (mut peer, inner) = tokio::io::duplex(64);
+    let mut empty = connection::Prefixed::new(Vec::new(), inner);
+    peer.write_all(b"data").await.unwrap();
+    let mut got = [0u8; 4];
+    empty.read_exact(&mut got).await.unwrap();
+    assert_eq!(&got, b"data");
+
+    let (mut peer, inner) = tokio::io::duplex(64);
+    let mut prefixed = connection::Prefixed::new(b"abcd".to_vec(), inner);
+    peer.write_all(b"ef").await.unwrap();
+    let mut order = Vec::new();
+    for _ in 0..6 {
+        let mut byte = [0u8; 1];
+        prefixed.read_exact(&mut byte).await.unwrap();
+        order.push(byte[0]);
+    }
+    assert_eq!(
+        order, b"abcdef",
+        "prefix bytes keep their order, one per poll"
+    );
+    drop(peer);
+    let mut end = [0u8; 1];
+    assert_eq!(
+        prefixed.read(&mut end).await.unwrap(),
+        0,
+        "EOF after prefix"
+    );
+}
+
+async fn drive_handler_to_reply(parent: &mut tokio::io::DuplexStream, request: &[u8]) -> Vec<u8> {
+    parent.write_all(request).await.unwrap();
+    parent.flush().await.unwrap();
+    let mut reply = [0u8; 10];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        parent.read_exact(&mut reply),
+    )
+    .await
+    .expect("the failure reply should arrive, not hang")
+    .expect("read SOCKS5 reply");
+    reply.to_vec()
+}
+
+#[tokio::test]
+async fn parent_domain_target_gets_host_unreachable_without_dns_or_dial() {
+    let arguments = obfs4::ServerBuilder::<TcpStream>::default().client_params();
+    assert!(arguments.len() < 255);
+    let (mut parent, connection) = tokio::io::duplex(65_536);
+    let handler = tokio::spawn(client_handle_connection(
+        connection,
+        Obfs4PT::client_builder(),
+        "127.0.0.1:9050".parse().unwrap(),
+    ));
+
+    parent.write_all(&[5, 1, 2]).await.unwrap();
+    let mut method = [0u8; 2];
+    parent.read_exact(&mut method).await.unwrap();
+    assert_eq!(method, [5, 2]);
+    let mut auth = vec![1, arguments.len() as u8];
+    auth.extend_from_slice(arguments.as_bytes());
+    auth.extend_from_slice(&[1, 0]);
+    parent.write_all(&auth).await.unwrap();
+    let mut status = [0u8; 2];
+    parent.read_exact(&mut status).await.unwrap();
+    assert_eq!(status, [1, 0]);
+
+    // ATYP=3: PT targets must be IP literals; names are never resolved.
+    let name = b"bridge.invalid";
+    let mut connect = vec![5, 1, 0, 3, name.len() as u8];
+    connect.extend_from_slice(name);
+    connect.extend_from_slice(&443u16.to_be_bytes());
+    let reply = drive_handler_to_reply(&mut parent, &connect).await;
+    assert_eq!(reply, [5, 4, 0, 1, 0, 0, 0, 0, 0, 0]);
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), handler)
+        .await
+        .expect("handler should finish")
+        .expect("handler task panicked");
+    assert!(outcome.is_err(), "a domain target must fail the connection");
+}
+
+#[tokio::test]
+async fn http_connect_without_authorization_never_reports_success() {
+    // A released port: any dial would be refused at once instead of hanging.
+    let bridge_addr = {
+        let bridge = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        bridge.local_addr().unwrap()
+    };
+    let (mut parent, connection) = tokio::io::duplex(65_536);
+    let handler = tokio::spawn(client_handle_connection(
+        connection,
+        Obfs4PT::client_builder(),
+        "127.0.0.1:9050".parse().unwrap(),
+    ));
+    parent
+        .write_all(
+            format!("CONNECT {bridge_addr} HTTP/1.1\r\nHost: {bridge_addr}\r\n\r\n").as_bytes(),
+        )
+        .await
+        .unwrap();
+    parent.flush().await.unwrap();
+
+    let mut response = Vec::new();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        parent.read_to_end(&mut response),
+    )
+    .await
+    .expect("the handler must close after refusing")
+    .expect("read HTTP response");
+    let text = String::from_utf8_lossy(&response);
+    assert!(
+        !text.starts_with("HTTP/1.1 200") && !text.starts_with("HTTP/1.0 200"),
+        "CONNECT without PT arguments must not succeed: {text:?}"
+    );
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), handler)
+        .await
+        .expect("handler should finish")
+        .expect("handler task panicked");
+    assert!(
+        outcome.is_err(),
+        "missing PT arguments must fail the connection"
+    );
+}
+
+#[test]
 fn invalid_pt_arguments_error_never_echoes_submitted_values() {
     for creds in [
         // Parse failure: empty key.

@@ -63,7 +63,7 @@ pub fn is_client() -> Result<bool, Error> {
 
     match (is_client, is_server) {
         (Some(_), Some(_)) => Err(to_io_other(
-            "ENV-ERROR TOR_PT_[CLIENT,SERVER]_TRANSPORTS both set",
+            "TOR_PT_CLIENT_TRANSPORTS and TOR_PT_SERVER_TRANSPORTS both set",
         )),
         (Some(_), None) => Ok(true),
         (None, Some(_)) => Ok(false),
@@ -213,8 +213,9 @@ pub(crate) fn get_proxy_url() -> Result<Option<Url>, Error> {
     };
 
     // Url::parse() only works for absolute urls so we do not need to check for relative
+    // The raw value may carry `user:password@`; never put it in the error.
     let uri = Url::parse(&url_str)
-        .map_err(|e| to_io_other(format!("failed to parse proxy config \"{url_str}\": {e}")))?;
+        .map_err(|e| to_io_other(format!("failed to parse proxy config: {e}")))?;
 
     validate_proxy_url_with_authority(&uri, authority_explicit_port(&url_str))?;
 

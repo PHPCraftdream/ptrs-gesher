@@ -91,12 +91,17 @@ where
     drop(request);
     let mut parent = Prefixed::new(pipeline, parent);
     if let Err(e) = copy_bidirectional(&mut parent, &mut pt_conn).await {
-        warn!(
-            addres = sensitive(client_addr).to_string(),
-            "tunnel closed with error: {e:#?}"
-        );
+        log_tunnel_closed(client_addr, &e);
     }
     Ok(())
+}
+
+/// Structured field names are a contract for log filters: keep `address`.
+pub(super) fn log_tunnel_closed(client_addr: SocketAddr, error: &std::io::Error) {
+    warn!(
+        address = sensitive(client_addr).to_string(),
+        "tunnel closed with error: {error:#?}"
+    );
 }
 
 /// HTTP Basic parsers split at the first `:`, so rejoin the halves. Clients

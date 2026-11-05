@@ -385,6 +385,27 @@ fn client_transports() -> Result<(), Error> {
 
 #[test]
 #[serial]
+fn proxy_config_errors_never_echo_credentials() {
+    let _guard = EnvGuard::new(&[constants::PROXY]);
+    for bad in [
+        "socks5://user:hunter2secret@[not-ipv6]:1080",
+        "socks5://user:hunter2secret@[::1:1080",
+        "ftp://user:hunter2secret@127.0.0.1:1080",
+        "socks5://user:hunter2secret@127.0.0.1:1080/path",
+        "socks5://user:hunter2secret@not-an-ip.invalid:1080",
+        "socks4a://user:hunter2secret@127.0.0.1:1080",
+    ] {
+        env::set_var(constants::PROXY, bad);
+        let error = get_proxy_url().expect_err(bad).to_string();
+        assert!(
+            !error.contains("hunter2secret"),
+            "error for {bad:?} leaked credentials: {error}"
+        );
+    }
+}
+
+#[test]
+#[serial]
 fn client_info_without_proxy_ignores_proxy_variable() -> Result<(), Error> {
     let _guard = EnvGuard::new(&[
         constants::MANAGED_VER,

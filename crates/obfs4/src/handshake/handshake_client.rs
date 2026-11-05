@@ -117,7 +117,7 @@ where
             xy.was_contributory(),
             xb.was_contributory()
         );
-        debug!("{} != {}", hex::encode(auth), hex::encode(authcode));
+        debug!("server auth tag mismatch");
         return Err(Error::BadCircHandshakeAuth);
     }
 

@@ -492,7 +492,7 @@ pub async fn run() -> Result<()> {
     let args = Args::parse();
 
     // Make state directory
-    let statedir = ptrs::make_state_dir()?;
+    let statedir = make_state_dir_reporting()?;
 
     // launch tracing subscriber with filter level
     let _logging_guard = init_logging_recvr(
@@ -515,8 +515,16 @@ pub async fn run() -> Result<()> {
 ///
 /// Not cancel-safe: drive the future to completion to join owned tasks.
 pub async fn run_from_env() -> Result<()> {
-    let statedir = ptrs::make_state_dir()?;
+    let statedir = make_state_dir_reporting()?;
     run_managed(&statedir).await
+}
+
+/// PT-spec §3.2: a missing `TOR_PT_STATE_LOCATION` is an `ENV-ERROR`.
+fn make_state_dir_reporting() -> Result<String> {
+    if std::env::var_os(ptrs::constants::STATE_LOCATION).is_none() {
+        pt_proto::print_env_error("TOR_PT_STATE_LOCATION is not set");
+    }
+    Ok(ptrs::make_state_dir()?)
 }
 
 async fn run_managed(statedir: &str) -> Result<()> {
@@ -549,7 +557,9 @@ async fn run_managed(statedir: &str) -> Result<()> {
 }
 
 async fn setup_listeners(statedir: &str, ctx: RunTasks) -> Result<JoinSet<Result<()>>> {
-    if ptrs::is_client()? {
+    // PT-spec §3.1/§3.2: version negotiation and environment errors are
+    // reported on the control channel before anything else.
+    if pt_proto::negotiate()? {
         client_setup(statedir, ctx).await
     } else {
         #[cfg(feature = "experimental-server")]
@@ -582,10 +592,6 @@ async fn setup_listeners(statedir: &str, ctx: RunTasks) -> Result<JoinSet<Result
 async fn client_setup(_statedir: &str, ctx: RunTasks) -> Result<JoinSet<Result<()>>> {
     let obfs4_name = Obfs4PT::name();
     let webtunnel_name = webtunnel::WEBTUNNEL_NAME.to_string();
-
-    // PT spec §3.3.1: announce our protocol version to the parent before
-    // anything else the parent parses on the control channel.
-    pt_proto::print_version();
 
     // PT-spec section 3.3.2: refuse unsupported proxy configurations before binding.
     let proxy = match proxy::Proxy::from_env() {

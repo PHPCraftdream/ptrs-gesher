@@ -853,6 +853,35 @@ fn config_connect_host_and_port_rejects_bad_addr() {
 }
 
 #[test]
+fn config_addr_host_rejects_control_bytes_and_never_echoes_them() {
+    // The addr= host can be spliced into an upstream proxy's CONNECT line.
+    for bad in [
+        "host\r\nX-Evil: 1:8443",
+        "host\n:8443",
+        "ho st:8443",
+        "host\t:8443",
+        "host\0:8443",
+        "host\x7f:8443",
+        " :8443",
+    ] {
+        let args = make_args(&[("url", "https://bridge.test/x"), ("addr", bad)]);
+        let cfg = WebTunnelConfig::from_args(&args).unwrap();
+        let error = cfg.connect_host_and_port().unwrap_err().to_string();
+        assert!(error.contains("invalid addr= host"), "{bad:?}: {error}");
+        assert!(!error.contains("Evil"), "{bad:?}: {error}");
+    }
+    let args = make_args(&[
+        ("url", "https://bridge.test/x"),
+        ("addr", "relay.test:8443"),
+    ]);
+    let cfg = WebTunnelConfig::from_args(&args).unwrap();
+    assert_eq!(
+        cfg.connect_host_and_port().unwrap(),
+        ("relay.test".to_string(), 8443)
+    );
+}
+
+#[test]
 fn config_connect_host_port_http_defaults_to_80() {
     let args = make_args(&[("url", "http://example.com/path")]);
     let cfg = WebTunnelConfig::from_args(&args).unwrap();

@@ -17,7 +17,11 @@ pub(crate) struct Proxy {
 
 impl Proxy {
     pub(crate) fn from_env() -> Result<Option<Arc<Self>>, ()> {
-        match std::env::var_os("TOR_PT_PROXY") {
+        Self::from_os(std::env::var_os("TOR_PT_PROXY"))
+    }
+
+    fn from_os(value: Option<std::ffi::OsString>) -> Result<Option<Arc<Self>>, ()> {
+        match value {
             None => Ok(None),
             Some(value) if value.is_empty() => Ok(None),
             Some(value) => {
@@ -100,7 +104,10 @@ impl Proxy {
 
     /// cancel-safe: NO — cancellation discards the owned, partially negotiated stream.
     pub(crate) async fn connect(&self, host: &str, port: u16) -> io::Result<TcpStream> {
-        if self.protocol == ProxyProtocol::Https || host.is_empty() || host.len() > 255 || port == 0
+        if self.protocol == ProxyProtocol::Https
+            || !valid_target_host(host)
+            || host.len() > 255
+            || port == 0
         {
             return Err(failure());
         }
@@ -146,6 +153,12 @@ impl Proxy {
 
 fn failure() -> io::Error {
     io::Error::other("upstream proxy connection failed")
+}
+
+/// The host is spliced into an HTTP request line, so whitespace and control
+/// bytes (CR/LF injection) must never reach the upstream proxy.
+fn valid_target_host(host: &str) -> bool {
+    !host.is_empty() && !host.bytes().any(|b| b <= 0x20 || b == 0x7f)
 }
 
 fn decode(value: &str) -> Result<String, ()> {
@@ -202,6 +215,139 @@ mod tests {
         ] {
             assert!(Proxy::parse(input).is_err());
         }
+    }
+
+    #[test]
+    fn proxy_uri_degenerate_forms_are_rejected() {
+        for input in [
+            "socks5://127.0.0.1:1080?x=1",
+            "socks5://127.0.0.1:1080#frag",
+            "http://127.0.0.1:8080?x=1",
+            "socks5://[::1%25eth0]:1080",
+            "socks5://a@b@127.0.0.1:1080",
+            "socks5://",
+            "http://",
+            "socks5://@127.0.0.1:1080",
+            "socks5://@:1080",
+            "socks5://127.0.0.1",
+            "http://127.0.0.1",
+            "socks5://127.0.0.1:65536",
+            "SOCKS5://127.0.0.1:1080",
+            "socks5://u:p@127.0.0.1:1080 ",
+            "socks5://u:p\r\n@127.0.0.1:1080",
+        ] {
+            assert!(Proxy::parse(input).is_err(), "{input:?} must be rejected");
+        }
+    }
+
+    #[test]
+    fn socks5_credential_length_boundaries_are_exact() {
+        let max = "x".repeat(255);
+        let over = "x".repeat(256);
+        assert!(Proxy::parse(&format!("socks5://{max}:{max}@127.0.0.1:1080")).is_ok());
+        assert!(Proxy::parse(&format!("socks5://{over}:p@127.0.0.1:1080")).is_err());
+        assert!(Proxy::parse(&format!("socks5://u:{over}@127.0.0.1:1080")).is_err());
+        // 255 decoded bytes may arrive as a longer percent-encoded string.
+        let encoded = "%41".repeat(255);
+        let proxy = Proxy::parse(&format!("socks5://{encoded}:p@127.0.0.1:1080")).unwrap();
+        assert_eq!(proxy.credentials.unwrap().0, "A".repeat(255));
+    }
+
+    #[test]
+    fn proxy_from_os_handles_unset_empty_valid_and_non_unicode_values() {
+        use std::ffi::OsString;
+
+        assert!(matches!(Proxy::from_os(None), Ok(None)));
+        assert!(matches!(Proxy::from_os(Some(OsString::new())), Ok(None)));
+        assert!(matches!(
+            Proxy::from_os(Some("socks5://127.0.0.1:1080".into())),
+            Ok(Some(_))
+        ));
+        #[cfg(unix)]
+        let non_unicode = {
+            use std::os::unix::ffi::OsStringExt;
+            OsString::from_vec(b"socks5://127.0.0.1:1080/\xff".to_vec())
+        };
+        #[cfg(windows)]
+        let non_unicode = {
+            use std::os::windows::ffi::OsStringExt;
+            OsString::from_wide(&[0xD800])
+        };
+        assert!(non_unicode.to_str().is_none());
+        assert!(Proxy::from_os(Some(non_unicode)).is_err());
+    }
+
+    #[test]
+    fn target_host_validation_rejects_injection_bytes() {
+        for good in ["carrier.invalid", "2001:db8::1", "192.0.2.1", "a"] {
+            assert!(valid_target_host(good), "{good:?}");
+        }
+        for bad in [
+            "",
+            " ",
+            "a b",
+            "a\tb",
+            "a\r\nX-Injected: 1",
+            "a\nb",
+            "a\0b",
+            "a\x7fb",
+        ] {
+            assert!(!valid_target_host(bad), "{bad:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_rejects_bad_targets_before_touching_the_network() {
+        for scheme in ["socks5", "http"] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let proxy =
+                Proxy::parse(&format!("{scheme}://{}", listener.local_addr().unwrap())).unwrap();
+            let oversized = "h".repeat(256);
+            for (host, port) in [
+                ("carrier.invalid", 0),
+                ("", 443),
+                (oversized.as_str(), 443),
+                ("host\r\nProxy-Authorization: Basic AAAA", 443),
+                ("host\nX: y", 443),
+                ("ho st", 443),
+                ("host\0", 443),
+            ] {
+                let error = proxy.connect(host, port).await.unwrap_err();
+                assert_eq!(error.to_string(), "upstream proxy connection failed");
+            }
+            // Rejected up front: the proxy never saw a connection attempt.
+            let dialed = tokio::time::timeout(Duration::from_millis(100), listener.accept()).await;
+            assert!(dialed.is_err(), "{scheme}: no connection may be attempted");
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn carrier_handshake_has_one_whole_operation_deadline() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = Proxy::parse(&format!("socks5://{}", listener.local_addr().unwrap())).unwrap();
+        // Accepts and then stays silent for the whole test.
+        let silent = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let _held = stream;
+            std::future::pending::<()>().await;
+        });
+        let started = Instant::now();
+        let mut connect = std::pin::pin!(proxy.connect("carrier.invalid", 443));
+        // The first poll starts the handshake and fixes its deadline.
+        assert!(futures::FutureExt::now_or_never(connect.as_mut()).is_none());
+        tokio::time::advance(CONNECT_TIMEOUT - Duration::from_millis(1)).await;
+        assert!(
+            futures::FutureExt::now_or_never(connect.as_mut()).is_none(),
+            "the handshake must still be pending just before the deadline"
+        );
+        let error = connect.await.unwrap_err();
+        assert_eq!(error.to_string(), "upstream proxy connection failed");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= CONNECT_TIMEOUT && elapsed < CONNECT_TIMEOUT + Duration::from_secs(1),
+            "one deadline covers the whole handshake, elapsed {elapsed:?}"
+        );
+        silent.abort();
     }
 
     #[test]
@@ -367,5 +513,129 @@ mod tests {
         })
         .await
         .expect("rejected carrier must close");
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum UpstreamScript {
+        ClosesAfterMethodSelection,
+        ClosesMidAuthReply,
+        RejectsAuth,
+        ClosesAfterAuth,
+    }
+
+    #[tokio::test]
+    async fn socks5_upstream_failing_at_any_stage_is_terminal() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        for script in [
+            UpstreamScript::ClosesAfterMethodSelection,
+            UpstreamScript::ClosesMidAuthReply,
+            UpstreamScript::RejectsAuth,
+            UpstreamScript::ClosesAfterAuth,
+        ] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let proxy =
+                Proxy::parse(&format!("socks5://u:p@{}", listener.local_addr().unwrap())).unwrap();
+            let server = async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut greeting = [0; 3];
+                stream.read_exact(&mut greeting).await.unwrap();
+                stream.write_all(&[5, 2]).await.unwrap();
+                if matches!(script, UpstreamScript::ClosesAfterMethodSelection) {
+                    return;
+                }
+                let mut auth = [0; 5];
+                stream.read_exact(&mut auth).await.unwrap();
+                assert_eq!(auth, [1, 1, b'u', 1, b'p']);
+                match script {
+                    UpstreamScript::ClosesMidAuthReply => stream.write_all(&[1]).await.unwrap(),
+                    UpstreamScript::RejectsAuth => stream.write_all(&[1, 1]).await.unwrap(),
+                    _ => stream.write_all(&[1, 0]).await.unwrap(),
+                }
+                // Dropping the stream closes it before any CONNECT reply.
+            };
+            let client = async {
+                let outcome = proxy.connect("carrier.invalid", 443).await;
+                assert!(outcome.is_err(), "{script:?} must fail the carrier");
+            };
+            tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::join!(server, client)
+            })
+            .await
+            .unwrap_or_else(|_| panic!("{script:?} must terminate"));
+        }
+    }
+
+    #[tokio::test]
+    async fn carrier_handshake_survives_one_byte_replies() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn drip(stream: &mut TcpStream, bytes: &[u8]) {
+            for byte in bytes {
+                stream.write_all(&[*byte]).await.unwrap();
+                stream.flush().await.unwrap();
+                tokio::task::yield_now().await;
+            }
+        }
+
+        // SOCKS5: method selection, auth status and CONNECT reply, byte by byte.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy =
+            Proxy::parse(&format!("socks5://u:p@{}", listener.local_addr().unwrap())).unwrap();
+        let server = async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut greeting = [0; 3];
+            stream.read_exact(&mut greeting).await.unwrap();
+            drip(&mut stream, &[5, 2]).await;
+            let mut auth = [0; 5];
+            stream.read_exact(&mut auth).await.unwrap();
+            drip(&mut stream, &[1, 0]).await;
+            let mut header = [0; 4];
+            stream.read_exact(&mut header).await.unwrap();
+            assert_eq!(header, [5, 1, 0, 3], "ATYP=3 carries the hostname");
+            // length byte + "carrier.invalid" (15) + port (2)
+            let mut rest = [0; 1 + 15 + 2];
+            stream.read_exact(&mut rest).await.unwrap();
+            drip(&mut stream, &[5, 0, 0, 1, 0, 0, 0, 0, 0, 0]).await;
+            stream.write_all(b"ok").await.unwrap();
+        };
+        let client = async {
+            let mut stream = proxy.connect("carrier.invalid", 443).await.unwrap();
+            let mut payload = [0; 2];
+            stream.read_exact(&mut payload).await.unwrap();
+            assert_eq!(&payload, b"ok");
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(server, client)
+        })
+        .await
+        .expect("fragmented SOCKS5 replies must be reassembled");
+
+        // HTTP CONNECT: status line and header terminator byte by byte.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy = Proxy::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+        let server = async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut seen = Vec::new();
+            while !seen.ends_with(b"\r\n\r\n") {
+                let mut byte = [0; 1];
+                stream.read_exact(&mut byte).await.unwrap();
+                seen.push(byte[0]);
+            }
+            assert!(seen.starts_with(b"CONNECT carrier.invalid:443 HTTP/1.1\r\n"));
+            drip(&mut stream, b"HTTP/1.1 200 Connection Established\r\n\r\n").await;
+            stream.write_all(b"ok").await.unwrap();
+        };
+        let client = async {
+            let mut stream = proxy.connect("carrier.invalid", 443).await.unwrap();
+            let mut payload = [0; 2];
+            stream.read_exact(&mut payload).await.unwrap();
+            assert_eq!(&payload, b"ok");
+        };
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::join!(server, client)
+        })
+        .await
+        .expect("fragmented HTTP replies must be reassembled");
     }
 }
