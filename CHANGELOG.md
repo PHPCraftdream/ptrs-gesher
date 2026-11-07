@@ -18,28 +18,39 @@ All six crates move to 0.8.0 in lockstep.
   it is also reachable through the umbrella crate's `lyrebird` re-export.
   Hostnames are still rejected without DNS. Callers passing a `Display` value
   keep compiling; callers constructing `TargetAddr` must drop it.
-- **lyrebird**: `fast-socks5` is replaced by `resocks5-net` 0.4.1; no
+- **lyrebird**: `fast-socks5` is replaced by `resocks5-net` 0.5.0; no
   `fast-socks5` type remains in the public API.
 
 ### Added
 
 - **lyrebird**: `TOR_PT_PROXY` support for `socks5://IP:port` and
-  `http://IP:port` (HTTP CONNECT), with optional percent-encoded
-  `username:password@`. Both carriers (obfs4, WebTunnel) dial through the
-  proxy and never fall back to a direct connection. Setup answers
-  `PROXY DONE`; invalid or unsupported values (`socks4a`, `https`, hostname
-  endpoints) get `PROXY-ERROR` before any listener starts.
+  `http://IP:port` (HTTP CONNECT). A `socks5://` proxy may carry
+  percent-encoded `username:password@`; the password is never sent in clear
+  text but proven with the SDK's secure auth (SOCKS5 method 0x80), so such a
+  proxy must speak it (another `resocks5-net` peer). Both carriers (obfs4,
+  WebTunnel) dial through the proxy and never fall back to a direct
+  connection. Setup answers `PROXY DONE`; invalid or unsupported values
+  (`socks4a`, `https`, hostname endpoints, an `http://` proxy with
+  credentials, which has no secure method) get `PROXY-ERROR` before any
+  listener starts.
 - **lyrebird**: managed client listeners accept HTTP CONNECT as well as SOCKS5
   on the same loopback socket. Credential fields still carry per-bridge PT
-  arguments; over HTTP Basic, send `base64(<PT arguments>:)` (one trailing
-  `:`): parsers split at the first `:`, so lyrebird rejoins the halves and
-  strips that marker, which preserves colons such as `url=https://…`.
-  Payload already consumed during request parsing is delivered first, once,
-  and then shares the tunnel's normal backpressure.
+  arguments (PT-spec 3.5); over HTTP Basic, send `base64(<PT arguments>:)` (one
+  trailing `:`): parsers split at the first `:`, so lyrebird rejoins the halves
+  and strips that marker, which preserves colons such as `url=https://…`.
+  Bytes read past the request stay in the connection's buffer and are
+  delivered first, once, under the tunnel's normal backpressure.
 - **lyrebird**: the parent receives a failure reply instead of a bare close:
   SOCKS5 REP=4 / HTTP 502 when the transport or upstream proxy cannot be
   established, and REP=1 when the PT arguments are invalid. A success reply is
   still sent only after the transport handshake.
+- **lyrebird**: the PT parent's SOCKS5/HTTP negotiation is a small parser of
+  its own (`client/parent.rs`): `resocks5-net` has no clear-text credential
+  support, and PT-spec 3.5 requires bridge arguments in RFC 1929
+  username/password or HTTP Basic. Those bytes are transport configuration read
+  from the loopback parent, never verified, never forwarded and wiped on drop
+  (`zeroize`); SOCKS5 prefers method 0x02, then 0x00; HTTP heads are capped at
+  16 KiB (431) and malformed heads get a closing 400/501.
 - **core**: `ClientInfo::without_proxy()` reads version and transports and
   leaves `TOR_PT_PROXY` to the caller.
 - **webtunnel**: `WebTunnelClient::carrier_destination()` returns the validated
@@ -57,8 +68,33 @@ All six crates move to 0.8.0 in lockstep.
   15 s keepalive as direct bridge dials.
 - **lyrebird**: errors for invalid PT arguments no longer include the
   submitted values, so bridge secrets stay out of logs.
-- **lyrebird**: `http://` upstream credentials follow HTTP Basic rules (empty
-  password allowed, no 255-byte limit); `socks5://` keeps RFC 1929 limits.
+- **lyrebird**: `socks5://` upstream credentials keep the RFC 1929 field limits
+  (1..=255 bytes, checked once at startup with `ProxyConfig::try_with_auth` and
+  `validate_node`); the validated config is reused by every connection.
+- **lyrebird**: a SOCKS5 parent that splits a multi-byte UTF-8 character
+  across the 255-byte UNAME/PASSWD boundary is accepted; arguments that are
+  still not UTF-8 after rejoining are refused as invalid.
+- **lyrebird**: a refused, timed-out or network-unreachable bridge dial is
+  answered with SOCKS5 REP=5 / 6 / 3 (HTTP 502 / 504 / 502) instead of the
+  generic REP=4.
+- **lyrebird**: failures of an upstream `TOR_PT_PROXY` are answered with the
+  SDK's `ConnectError::suggested_reply()` (the single table for every gateway),
+  without any address or text. The reply says who is at fault: the destination's
+  own verdict is REP=2 / 3 / 5 / 6 (HTTP 403 / 502 / 502 / 504); an upstream
+  that cannot be reached or stalls before speaking (TCP connect, SOCKS5
+  greeting) is REP=4 (HTTP 502); a stalled CONNECT or an exhausted 10 s budget
+  is REP=6 (HTTP 504); everything on our side or in a broken conversation, such
+  as a wrong proxy password, a refused auth method, HTTP 407 or an upstream
+  that hangs up, is REP=1 (HTTP 502). A rejected login is no longer reported as
+  a policy denial.
+- **lyrebird**: the upstream dial is `resocks5_net::connect::dial_tcp` with one
+  10 s budget (`DialOptions`: connect, handshake and total), `TCP_NODELAY` and
+  a 15 s keepalive idle/interval; the tunnel runs on the SDK's
+  `tunnel_with_timeouts` (no idle or lifetime cap, since a Tor channel may stay
+  quiet); the forwarded byte counts are logged at debug level.
+- **lyrebird**: `resocks5-net` is built with `secure-auth` (the only way a
+  proxy password is ever used) and `zeroize`; its clear-text features no longer
+  exist and are not used.
 - `Cargo.lock`: rustls 0.23.46 (RUSTSEC-2026-0346..0349) and webpki-roots
   1.0.11 (RUSTSEC-2026-0381), rustls-webpki 0.103.16 (RUSTSEC-2026-0382) and
   tokio 1.54.1 (RUSTSEC-2026-0386).
@@ -73,8 +109,10 @@ All six crates move to 0.8.0 in lockstep.
   control channel as PT-spec §3.1/§3.2 require: `VERSION-ERROR no-version` when
   no offered version is supported (previously `VERSION 1` was printed and the
   process exited silently), and `ENV-ERROR <reason>` for a missing
-  `TOR_PT_MANAGED_TRANSPORT_VER` or `TOR_PT_STATE_LOCATION`, both or neither of
-  the client/server transport variables.
+  `TOR_PT_MANAGED_TRANSPORT_VER`, a missing or unusable `TOR_PT_STATE_LOCATION`
+  (empty or not a directory; an empty value used to silently select the working directory), a non-unicode `TOR_PT_CLIENT_TRANSPORTS`, and both
+  or neither of the client/server transport variables. Reasons are static and
+  never echo the offending value.
 - **lyrebird**: the "tunnel closed with error" log event used the field name
   `addres`; it is now `address`, like every other event.
 - **core**: a malformed `TOR_PT_PROXY` no longer echoes the raw value (which may

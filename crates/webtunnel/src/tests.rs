@@ -865,8 +865,11 @@ fn config_addr_host_rejects_control_bytes_and_never_echoes_them() {
         " :8443",
     ] {
         let args = make_args(&[("url", "https://bridge.test/x"), ("addr", bad)]);
-        let cfg = WebTunnelConfig::from_args(&args).unwrap();
-        let error = cfg.connect_host_and_port().unwrap_err().to_string();
+        // `from_args` already validates the host; both paths must refuse it.
+        let error = WebTunnelConfig::from_args(&args)
+            .and_then(|cfg| cfg.connect_host_and_port().map(|_| ()))
+            .unwrap_err()
+            .to_string();
         assert!(error.contains("invalid addr= host"), "{bad:?}: {error}");
         assert!(!error.contains("Evil"), "{bad:?}: {error}");
     }

@@ -39,10 +39,16 @@ pub fn negotiate() -> anyhow::Result<bool> {
         anyhow::bail!("no supported managed transport protocol version");
     }
     print_version();
-    ptrs::is_client().map_err(|error| {
+    let client = ptrs::is_client().map_err(|error| {
         print_env_error(&error.to_string());
-        error.into()
-    })
+        anyhow::Error::from(error)
+    })?;
+    // `is_client` only checks presence; setup later reads the value as UTF-8.
+    if client && std::env::var(ptrs::constants::CLIENT_TRANSPORTS).is_err() {
+        print_env_error("TOR_PT_CLIENT_TRANSPORTS is not valid unicode");
+        anyhow::bail!("TOR_PT_CLIENT_TRANSPORTS is not valid unicode");
+    }
+    Ok(client)
 }
 
 pub fn print_cmethod(transport: &str, proto: &str, addr: SocketAddr) {

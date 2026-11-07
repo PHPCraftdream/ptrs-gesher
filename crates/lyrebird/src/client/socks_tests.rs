@@ -1,5 +1,6 @@
 use super::*;
 use futures::FutureExt;
+use resocks5_net::server::Reply;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 async fn assert_socks5_setup_timeout(prefix: &[u8]) {
@@ -172,38 +173,19 @@ async fn http_connect_preserves_pipelined_payload_through_transport() {
 fn http_credentials_rejoin_basic_halves_and_strip_marker() {
     // Basic parsers split `url=https://x:` at its first ':'.
     assert_eq!(
-        connection::http_credentials("url=https".into(), "//x:".into()),
-        ("url=https://x".to_owned(), String::new())
+        connection::http_credentials("url=https", "//x:"),
+        "url=https://x"
     );
     // Plain arguments followed by the empty-password marker.
     assert_eq!(
-        connection::http_credentials("cert=AAA;iat-mode=0".into(), String::new()),
-        ("cert=AAA;iat-mode=0".to_owned(), String::new())
+        connection::http_credentials("cert=AAA;iat-mode=0", ""),
+        "cert=AAA;iat-mode=0"
     );
     // Arguments sent without the marker keep their interior colons.
     assert_eq!(
-        connection::http_credentials("url=https".into(), "//x".into()),
-        ("url=https://x".to_owned(), String::new())
+        connection::http_credentials("url=https", "//x"),
+        "url=https://x"
     );
-}
-
-#[tokio::test]
-async fn prefixed_reader_serves_prefix_first_then_inner_and_passes_writes() {
-    let (mut peer, inner) = tokio::io::duplex(64);
-    let mut prefixed = connection::Prefixed::new(b"head".to_vec(), inner);
-    peer.write_all(b"-tail").await.unwrap();
-
-    let mut first = [0u8; 3];
-    prefixed.read_exact(&mut first).await.unwrap();
-    assert_eq!(&first, b"hea");
-    let mut rest = [0u8; 6];
-    prefixed.read_exact(&mut rest).await.unwrap();
-    assert_eq!(&rest, b"d-tail");
-
-    prefixed.write_all(b"echo").await.unwrap();
-    let mut echoed = [0u8; 4];
-    peer.read_exact(&mut echoed).await.unwrap();
-    assert_eq!(&echoed, b"echo");
 }
 
 #[test]
@@ -245,50 +227,18 @@ fn http_credentials_trailing_colon_ambiguity_is_pinned() {
     // arguments, so exactly one trailing ':' is always treated as that marker.
     // Arguments that genuinely end in ':' must therefore send the marker too.
     assert_eq!(
-        connection::http_credentials("k=v".into(), ":".into()),
-        ("k=v:".to_owned(), String::new()),
+        connection::http_credentials("k=v", ":"),
+        "k=v:",
         "genuine trailing ':' survives when the marker is present"
     );
+    // Basic "k=v:" (marker only) and a genuine trailing ':' sent without the
+    // marker both split into ("k=v", ""): the latter loses its colon.
     assert_eq!(
-        connection::http_credentials("k=v:".into(), String::new()),
-        ("k=v".to_owned(), String::new()),
-        "without the marker a trailing ':' is indistinguishable from it"
+        connection::http_credentials("k=v", ""),
+        "k=v",
+        "a lone marker and an unmarked trailing ':' are indistinguishable"
     );
-    assert_eq!(
-        connection::http_credentials(String::new(), String::new()),
-        (String::new(), String::new())
-    );
-}
-
-#[tokio::test]
-async fn prefixed_reader_handles_empty_prefix_and_single_byte_reads() {
-    let (mut peer, inner) = tokio::io::duplex(64);
-    let mut empty = connection::Prefixed::new(Vec::new(), inner);
-    peer.write_all(b"data").await.unwrap();
-    let mut got = [0u8; 4];
-    empty.read_exact(&mut got).await.unwrap();
-    assert_eq!(&got, b"data");
-
-    let (mut peer, inner) = tokio::io::duplex(64);
-    let mut prefixed = connection::Prefixed::new(b"abcd".to_vec(), inner);
-    peer.write_all(b"ef").await.unwrap();
-    let mut order = Vec::new();
-    for _ in 0..6 {
-        let mut byte = [0u8; 1];
-        prefixed.read_exact(&mut byte).await.unwrap();
-        order.push(byte[0]);
-    }
-    assert_eq!(
-        order, b"abcdef",
-        "prefix bytes keep their order, one per poll"
-    );
-    drop(peer);
-    let mut end = [0u8; 1];
-    assert_eq!(
-        prefixed.read(&mut end).await.unwrap(),
-        0,
-        "EOF after prefix"
-    );
+    assert_eq!(connection::http_credentials("", ""), "");
 }
 
 async fn drive_handler_to_reply(parent: &mut tokio::io::DuplexStream, request: &[u8]) -> Vec<u8> {
@@ -307,7 +257,7 @@ async fn drive_handler_to_reply(parent: &mut tokio::io::DuplexStream, request: &
 
 #[tokio::test]
 async fn parent_domain_target_gets_host_unreachable_without_dns_or_dial() {
-    let arguments = obfs4::ServerBuilder::<TcpStream>::default().client_params();
+    let arguments = encoded_client_arguments();
     assert!(arguments.len() < 255);
     let (mut parent, connection) = tokio::io::duplex(65_536);
     let handler = tokio::spawn(client_handle_connection(
@@ -344,11 +294,10 @@ async fn parent_domain_target_gets_host_unreachable_without_dns_or_dial() {
 
 #[tokio::test]
 async fn http_connect_without_authorization_never_reports_success() {
-    // A released port: any dial would be refused at once instead of hanging.
-    let bridge_addr = {
-        let bridge = TcpListener::bind("127.0.0.1:0").await.unwrap();
-        bridge.local_addr().unwrap()
-    };
+    // The listener stays up for the whole test: a dial would sit in its
+    // backlog and be seen below, while a refused connection could not.
+    let bridge = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let bridge_addr = bridge.local_addr().unwrap();
     let (mut parent, connection) = tokio::io::duplex(65_536);
     let handler = tokio::spawn(client_handle_connection(
         connection,
@@ -380,30 +329,264 @@ async fn http_connect_without_authorization_never_reports_success() {
         .await
         .expect("handler should finish")
         .expect("handler task panicked");
+    // The refusal comes from the missing arguments (rejected by the parent
+    // negotiation or by the transport options), not from a failed dial.
+    let reason = outcome
+        .expect_err("missing PT arguments must fail the connection")
+        .to_string();
     assert!(
-        outcome.is_err(),
-        "missing PT arguments must fail the connection"
+        matches!(
+            reason.as_str(),
+            "PT arguments rejected by the transport" | "SOCKS5 parent negotiation failed"
+        ),
+        "unexpected failure reason: {reason}"
     );
+    let dialed = tokio::time::timeout(std::time::Duration::from_millis(100), bridge.accept()).await;
+    assert!(dialed.is_err(), "the bridge must never be dialed");
 }
 
 #[test]
 fn invalid_pt_arguments_error_never_echoes_submitted_values() {
-    for creds in [
+    for arguments in [
         // Parse failure: empty key.
-        ("=secret-token", "\0"),
+        "=secret-token",
         // Transport rejection: not a valid obfs4 certificate.
-        ("cert=not-a-valid-certificate-secret-token;iat-mode=0", "\0"),
+        "cert=not-a-valid-certificate-secret-token;iat-mode=0",
     ] {
         let mut builder = Obfs4PT::client_builder();
-        let error = connection::configure_builder(
-            &mut builder,
-            Some((creds.0.to_owned(), creds.1.to_owned())),
-        )
-        .expect_err("invalid PT arguments must be rejected");
+        let error = connection::configure_builder(&mut builder, arguments)
+            .expect_err("invalid PT arguments must be rejected");
         let text = format!("{error:#}");
         assert!(
             !text.contains("secret-token"),
             "error must not echo submitted values: {text}"
         );
+    }
+}
+
+#[test]
+fn raw_socks5_credentials_rejoin_a_character_split_at_255_bytes() {
+    // 254 ASCII bytes then a 2-byte character cut between UNAME and PASSWD:
+    // each half alone is invalid UTF-8, the concatenation is valid.
+    let mut text = "a".repeat(254);
+    text.push('é');
+    let (head, tail) = text.as_bytes().split_at(255);
+    assert!(std::str::from_utf8(head).is_err());
+    assert!(std::str::from_utf8(tail).is_err());
+    assert_eq!(
+        connection::pt_arguments_from_bytes(head, tail).unwrap(),
+        text
+    );
+
+    // The lone-NUL password is the "uname only" marker; anything else joins.
+    assert_eq!(
+        connection::pt_arguments_from_bytes(b"cert=A;iat-mode=0", &[0]).unwrap(),
+        "cert=A;iat-mode=0"
+    );
+    assert_eq!(
+        connection::pt_arguments_from_bytes(b"cert=A;", b"iat-mode=0").unwrap(),
+        "cert=A;iat-mode=0"
+    );
+    // Still invalid after joining: rejected, never lossily decoded.
+    assert!(connection::pt_arguments_from_bytes(b"cert=\xff", &[0]).is_err());
+    // Same answer as the string form for valid UTF-8.
+    assert_eq!(
+        connection::pt_arguments_from_bytes(b"k=v", b";x=y").unwrap(),
+        arg_string_from_creds(Some(("k=v".into(), ";x=y".into())))
+    );
+}
+
+#[test]
+fn dial_failures_map_to_the_specific_socks5_replies() {
+    use std::io::ErrorKind;
+
+    fn failed(kind: ErrorKind) -> anyhow::Error {
+        failed_via(kind, None)
+    }
+    fn failed_via(kind: ErrorKind, upstream: Option<Reply>) -> anyhow::Error {
+        Err::<(), _>(anyhow!("handshake failed"))
+            .context(DialFailed { kind, upstream })
+            .unwrap_err()
+    }
+    // A reply recorded from an upstream proxy wins over the dial's kind.
+    assert!(matches!(
+        connection::reply_for_error(&failed_via(ErrorKind::Other, Some(Reply::Forbidden))),
+        Reply::Forbidden
+    ));
+    assert!(matches!(
+        connection::reply_for_error(&failed_via(
+            ErrorKind::ConnectionRefused,
+            Some(Reply::TimedOut)
+        )),
+        Reply::TimedOut
+    ));
+    assert!(matches!(
+        connection::reply_for_error(&failed(ErrorKind::ConnectionRefused)),
+        Reply::ConnectionRefused
+    ));
+    assert!(matches!(
+        connection::reply_for_error(&failed(ErrorKind::TimedOut)),
+        Reply::TimedOut
+    ));
+    assert!(matches!(
+        connection::reply_for_error(&failed(ErrorKind::NetworkUnreachable)),
+        Reply::NetworkUnreachable
+    ));
+    // Anything else, and errors that did not come from the dial, stay REP=4.
+    assert!(matches!(
+        connection::reply_for_error(&failed(ErrorKind::UnexpectedEof)),
+        Reply::UpstreamUnavailable
+    ));
+    assert!(matches!(
+        connection::reply_for_error(&anyhow!("upstream proxy connection failed")),
+        Reply::UpstreamUnavailable
+    ));
+}
+
+#[tokio::test]
+async fn refused_bridge_dial_gets_connection_refused_reply() {
+    let arguments = encoded_client_arguments();
+    // A released port refuses the dial (Windows may take a couple of seconds).
+    let bridge_addr = {
+        let bridge = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        bridge.local_addr().unwrap()
+    };
+    let (mut parent, connection) = tokio::io::duplex(65_536);
+    let handler = tokio::spawn(client_handle_connection(
+        connection,
+        Obfs4PT::client_builder(),
+        "127.0.0.1:9050".parse().unwrap(),
+    ));
+    parent.write_all(&[5, 1, 2]).await.unwrap();
+    let mut method = [0u8; 2];
+    parent.read_exact(&mut method).await.unwrap();
+    let mut auth = vec![1, arguments.len() as u8];
+    auth.extend_from_slice(arguments.as_bytes());
+    auth.extend_from_slice(&[1, 0]);
+    parent.write_all(&auth).await.unwrap();
+    let mut status = [0u8; 2];
+    parent.read_exact(&mut status).await.unwrap();
+    let mut connect = vec![5, 1, 0, 1, 127, 0, 0, 1];
+    connect.extend_from_slice(&bridge_addr.port().to_be_bytes());
+    parent.write_all(&connect).await.unwrap();
+
+    let mut reply = [0u8; 10];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        parent.read_exact(&mut reply),
+    )
+    .await
+    .expect("the failure reply should arrive, not hang")
+    .expect("read SOCKS5 reply");
+    assert_eq!(
+        reply,
+        [5, 5, 0, 1, 0, 0, 0, 0, 0, 0],
+        "REP=5 connection refused"
+    );
+    let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), handler)
+        .await
+        .expect("handler should finish")
+        .expect("handler task panicked");
+    assert!(outcome.is_err());
+}
+
+/// Fresh throwaway bridge parameters in the form a parent sends them: the
+/// server's SMETHOD arguments re-encoded as client parameters.
+fn encoded_client_arguments() -> String {
+    ptrs::args::Args::parse_smethod_args(
+        &obfs4::ServerBuilder::<TcpStream>::default().client_params(),
+    )
+    .expect("parse bridge parameters")
+    .encode_client_parameters()
+}
+
+/// Play the PT parent over `parent`: password auth carrying `arguments`, then
+/// a CONNECT to the IPv4 `target`. Returns the 10-byte reply.
+async fn socks5_parent_connect(
+    parent: &mut tokio::io::DuplexStream,
+    arguments: &str,
+    target: std::net::SocketAddrV4,
+) -> [u8; 10] {
+    parent.write_all(&[5, 1, 2]).await.unwrap();
+    let mut method = [0u8; 2];
+    parent.read_exact(&mut method).await.unwrap();
+    let mut auth = vec![1, arguments.len() as u8];
+    auth.extend_from_slice(arguments.as_bytes());
+    auth.extend_from_slice(&[1, 0]);
+    parent.write_all(&auth).await.unwrap();
+    let mut status = [0u8; 2];
+    parent.read_exact(&mut status).await.unwrap();
+    assert_eq!(status, [1, 0]);
+    let mut connect = vec![5, 1, 0, 1];
+    connect.extend_from_slice(&target.ip().octets());
+    connect.extend_from_slice(&target.port().to_be_bytes());
+    parent.write_all(&connect).await.unwrap();
+    let mut reply = [0u8; 10];
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        parent.read_exact(&mut reply),
+    )
+    .await
+    .expect("the failure reply should arrive, not hang")
+    .expect("read SOCKS5 reply");
+    reply
+}
+
+#[tokio::test]
+async fn upstream_proxy_refusals_are_forwarded_to_the_parent() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // (what the upstream answers to our CONNECT, what the parent must see)
+    let cases: [(u8, u8); 4] = [(5, 5), (3, 3), (6, 6), (2, 2)];
+    for (upstream_rep, parent_rep) in cases {
+        let arguments = encoded_client_arguments();
+        let upstream = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let proxy =
+            proxy::Proxy::parse(&format!("socks5://{}", upstream.local_addr().unwrap())).unwrap();
+        let upstream_task = tokio::spawn(async move {
+            let (mut stream, _) = upstream.accept().await.unwrap();
+            let mut greeting = [0u8; 3];
+            stream.read_exact(&mut greeting).await.unwrap();
+            stream.write_all(&[5, 0]).await.unwrap();
+            // Read the whole CONNECT request whatever the address type.
+            let mut head = [0u8; 4];
+            stream.read_exact(&mut head).await.unwrap();
+            let rest = match head[3] {
+                1 => 4 + 2,
+                4 => 16 + 2,
+                _ => {
+                    let mut length = [0u8; 1];
+                    stream.read_exact(&mut length).await.unwrap();
+                    usize::from(length[0]) + 2
+                }
+            };
+            let mut tail = vec![0u8; rest];
+            stream.read_exact(&mut tail).await.unwrap();
+            stream
+                .write_all(&[5, upstream_rep, 0, 1, 0, 0, 0, 0, 0, 0])
+                .await
+                .unwrap();
+            stream.flush().await.unwrap();
+        });
+        let (mut parent, connection) = tokio::io::duplex(65_536);
+        let handler = tokio::spawn(client_handle_connection_with_proxy(
+            connection,
+            Obfs4PT::client_builder(),
+            "127.0.0.1:9050".parse().unwrap(),
+            Some(Arc::new(proxy)),
+        ));
+        let reply =
+            socks5_parent_connect(&mut parent, &arguments, "127.0.0.1:9".parse().unwrap()).await;
+        assert_eq!(
+            reply,
+            [5, parent_rep, 0, 1, 0, 0, 0, 0, 0, 0],
+            "upstream REP {upstream_rep}"
+        );
+        let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), handler)
+            .await
+            .expect("handler should finish")
+            .expect("handler task panicked");
+        assert!(outcome.is_err());
+        upstream_task.await.expect("upstream task panicked");
     }
 }

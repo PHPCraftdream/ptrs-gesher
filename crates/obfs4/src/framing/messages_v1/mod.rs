@@ -196,14 +196,15 @@ mod test {
     }
 
     #[test]
-    fn parsed_payload_is_allocated_once_at_its_exact_size() -> Result<(), FrameError> {
+    fn parsed_payload_buffer_has_exactly_the_payload_size() -> Result<(), FrameError> {
         let mut buf = BytesMut::new();
         build_and_marshall(&mut buf, MessageTypes::Payload.into(), [7_u8; 1000], 0)?;
 
         match Messages::try_parse(&mut buf)? {
             Messages::Payload(bytes) => {
                 assert_eq!(bytes.len(), 1000);
-                assert_eq!(bytes.capacity(), 1000, "no growth reallocations");
+                // Final size only: the number of allocations is not observable here.
+                assert_eq!(bytes.capacity(), 1000, "no spare capacity is retained");
             }
             other => panic!("expected a payload, got {other:?}"),
         }

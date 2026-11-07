@@ -415,7 +415,9 @@ async fn unreachable_upstream_proxy_never_falls_back_to_direct_dial() {
     .await
     .expect("the failure reply should arrive, not hang")
     .expect("read SOCKS5 failure reply");
-    assert_eq!(reply, [0x05, 0x04, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
+    // An upstream that hangs up mid-conversation is the SDK's "general
+    // failure" (REP 1); an unreachable one would be REP 4.
+    assert_eq!(reply, [0x05, 0x01, 0x00, 0x01, 0, 0, 0, 0, 0, 0]);
     let outcome = tokio::time::timeout(std::time::Duration::from_secs(5), handler)
         .await
         .expect("handler should finish")

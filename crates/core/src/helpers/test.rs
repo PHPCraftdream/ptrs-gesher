@@ -56,6 +56,15 @@ fn is_client_from_env() -> Result<(), Error> {
 
 #[test]
 #[serial]
+fn empty_state_location_is_rejected() {
+    let _guard = EnvGuard::new(&[constants::STATE_LOCATION]);
+    env::set_var(constants::STATE_LOCATION, "");
+    let error = make_state_dir().expect_err("an empty state location is unusable");
+    assert!(error.to_string().contains("empty"), "{error}");
+}
+
+#[test]
+#[serial]
 fn statedir() -> Result<(), Error> {
     // TOR_PT_STATE_LOCATION not set.
     env::remove_var(constants::STATE_LOCATION);

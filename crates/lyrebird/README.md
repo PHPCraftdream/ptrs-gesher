@@ -101,17 +101,23 @@ arguments containing `:` (for example WebTunnel `url=https://…`) survive.
 HTTP pipeline bytes are forwarded once, before unread bytes from the socket.
 Bridge-side transport sockets are not HTTP proxy listeners and are unchanged.
 
-`TOR_PT_PROXY` supports `socks5://IP:port` and `http://IP:port`, with optional
-percent-encoded `username:password@` user information. Proxy endpoints must be
-IP literals; destination hostnames are passed to the proxy without local DNS.
-Unsupported configuration fails before listeners are announced. A configured
-proxy error never selects a direct carrier. WebTunnel TLS and its HTTP upgrade
-run unchanged over the proxy-supplied stream.
+`TOR_PT_PROXY` supports `socks5://IP:port` and `http://IP:port`. A `socks5://`
+proxy may carry percent-encoded `username:password@`: the password is never sent
+in clear text but proven with secure auth (SOCKS5 method 0x80), so the proxy
+must speak it (for example another `resocks5-net` peer). An `http://` proxy with
+credentials is refused, because HTTP CONNECT has no such method. Proxy
+endpoints must be IP literals; destination hostnames are passed to the proxy
+without local DNS. Unsupported configuration fails with `PROXY-ERROR` before
+listeners are announced. A configured proxy error never selects a direct
+carrier. WebTunnel TLS and its HTTP upgrade run unchanged over the proxy-supplied
+stream.
 
-HTTP CONNECT and SOCKS5 authentication do not encrypt their credential-bearing
-hop. HTTPS-to-proxy is not enabled by this interface. The upstream protocol
-implementation comes from `resocks5-net` 0.4.1; no separate SOCKS/HTTP client
-parser is maintained here.
+Bridge arguments from the parent (PT-spec 3.5) are the one place where
+username/password bytes are read: lyrebird takes them from the loopback parent
+as transport configuration, never forwards them, and wipes them on drop.
+HTTPS-to-proxy is not enabled by this interface. The upstream protocol
+implementation comes from `resocks5-net` 0.5.0; only the small loopback parser
+for the parent's request is kept here.
 
 ## License
 

@@ -338,3 +338,49 @@ async fn missing_state_location_is_reported_as_env_error() {
     )
     .await;
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_but_unusable_state_location_is_reported_without_echoing_it() {
+    // A regular file cannot be a state directory.
+    let file = std::env::temp_dir().join(format!(
+        "lyrebird-state-is-a-file-{}-secret-path",
+        std::process::id()
+    ));
+    std::fs::write(&file, b"not a directory").expect("create blocker file");
+    let blocker = file.clone().into_os_string();
+    let mut process = spawn_pt_with(None, |cmd| {
+        cmd.env("TOR_PT_STATE_LOCATION", blocker);
+    });
+    assert_control_failure(
+        &mut process,
+        &["ENV-ERROR TOR_PT_STATE_LOCATION is unusable"],
+    )
+    .await;
+    let _ = std::fs::remove_file(&file);
+
+    let mut empty = spawn_pt_with(None, |cmd| {
+        cmd.env("TOR_PT_STATE_LOCATION", "");
+    });
+    assert_control_failure(&mut empty, &["ENV-ERROR TOR_PT_STATE_LOCATION is unusable"]).await;
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn non_unicode_transports_are_reported_without_echoing_bytes() {
+    use std::os::unix::ffi::OsStringExt;
+
+    let mut process = spawn_pt_with(None, |cmd| {
+        cmd.env(
+            "TOR_PT_CLIENT_TRANSPORTS",
+            OsString::from_vec(b"obfs4\xffSECRET".to_vec()),
+        );
+    });
+    assert_control_failure(
+        &mut process,
+        &[
+            "VERSION 1",
+            "ENV-ERROR TOR_PT_CLIENT_TRANSPORTS is not valid unicode",
+        ],
+    )
+    .await;
+}

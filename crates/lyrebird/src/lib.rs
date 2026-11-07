@@ -76,9 +76,9 @@
 //!    automatically create `obfs4_state.json` or `obfs4_bridgeline.txt`.
 //!
 // Follow-up work tracked in the issue tracker, not in rustdoc:
-//   - tunnel-level metrics (failures, byte counters).
+//   - tunnel-level metrics beyond the debug-logged byte counters.
 //   - rate-limiting for the bidirectional copy.
-//   - replace `tokio::io::copy_bidirectional` with an interactive copy
+//   - replace the SDK tunnel copy with an interactive copy
 //     that flushes only when the reader stalls.
 
 #![deny(missing_docs)]
@@ -93,6 +93,8 @@ mod connection;
 #[cfg(test)]
 use connection::client_handle_connection;
 use connection::client_handle_connection_with_proxy;
+#[path = "client/parent.rs"]
+mod parent;
 #[path = "client/proxy.rs"]
 mod proxy;
 use safelog::{sensitive, Guard};
@@ -100,7 +102,7 @@ use safelog::{sensitive, Guard};
 use tokio::io::AsyncWriteExt;
 use tokio::task::JoinSet;
 use tokio::{
-    io::{copy_bidirectional, AsyncRead, AsyncWrite},
+    io::{AsyncRead, AsyncWrite},
     net::{TcpListener, TcpStream},
 };
 use tokio_util::sync::CancellationToken;
@@ -519,12 +521,18 @@ pub async fn run_from_env() -> Result<()> {
     run_managed(&statedir).await
 }
 
-/// PT-spec §3.2: a missing `TOR_PT_STATE_LOCATION` is an `ENV-ERROR`.
+/// PT-spec §3.2: a missing or unusable `TOR_PT_STATE_LOCATION` is an
+/// `ENV-ERROR`. The reason is static: the value (a path) is never echoed.
 fn make_state_dir_reporting() -> Result<String> {
-    if std::env::var_os(ptrs::constants::STATE_LOCATION).is_none() {
-        pt_proto::print_env_error("TOR_PT_STATE_LOCATION is not set");
-    }
-    Ok(ptrs::make_state_dir()?)
+    let set = std::env::var_os(ptrs::constants::STATE_LOCATION).is_some();
+    ptrs::make_state_dir().map_err(|error| {
+        pt_proto::print_env_error(if set {
+            "TOR_PT_STATE_LOCATION is unusable"
+        } else {
+            "TOR_PT_STATE_LOCATION is not set"
+        });
+        error.into()
+    })
 }
 
 async fn run_managed(statedir: &str) -> Result<()> {
@@ -867,15 +875,48 @@ where
     In2: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
     C2: ptrs::ClientTransport<In2, std::io::Error> + Send,
 {
+    // The transport flattens its errors to text; remember how the dial itself
+    // failed so the parent can get a precise SOCKS5/HTTP failure reply.
+    let dial_kind = Arc::new(std::sync::Mutex::new(None));
+    let record = dial_kind.clone();
+    let dial: Pin<ptrs::FutureResult<In2, std::io::Error>> = Box::pin(async move {
+        let result = dial.await;
+        if let (Err(error), Ok(mut slot)) = (&result, record.lock()) {
+            *slot = Some(DialFailed {
+                kind: error.kind(),
+                upstream: proxy::failure_reply(error),
+            });
+        }
+        result
+    });
     match ptrs::ClientTransport::<In2, std::io::Error>::establish(pt_client, dial).await {
         Err(e) => {
             warn!(
                 address = sensitive(client_addr).to_string(),
                 "handshake failed: {e:#?}"
             );
-            Err(obfs4::Error::from(e.to_string())).context("handshake failed")
+            let failure = Err(obfs4::Error::from(e.to_string())).context("handshake failed");
+            match dial_kind.lock().ok().and_then(|mut slot| slot.take()) {
+                Some(failed) => failure.context(failed),
+                None => failure,
+            }
         }
         Ok(c) => Ok(c),
+    }
+}
+
+/// Marks a handshake failure whose cause was the carrier dial itself: the
+/// `io::ErrorKind` of the dial and, when it went through an upstream proxy,
+/// the parent reply that proxy's failure maps to. Carries no address or text.
+#[derive(Debug)]
+pub(crate) struct DialFailed {
+    pub(crate) kind: std::io::ErrorKind,
+    pub(crate) upstream: Option<resocks5_net::server::Reply>,
+}
+
+impl std::fmt::Display for DialFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("carrier dial failed")
     }
 }
 

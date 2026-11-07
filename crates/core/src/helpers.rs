@@ -79,6 +79,10 @@ pub fn is_client() -> Result<bool, Error> {
 pub fn make_state_dir() -> Result<String, Error> {
     let path = env::var(constants::STATE_LOCATION)
         .map_err(|_| to_io_other("missing required TOR_PT_STATE_LOCATION env var"))?;
+    // `create_dir_all("")` succeeds and would silently use the working directory.
+    if path.is_empty() {
+        return Err(to_io_other("TOR_PT_STATE_LOCATION is empty"));
+    }
 
     let mut builder = DirBuilder::new();
     builder.recursive(true);

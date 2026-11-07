@@ -218,10 +218,8 @@ impl Decoder for EncryptingCodec {
 
                 // De-obfuscate the length field
                 let length_mask = self.decoder.drbg.length_mask();
-                trace!(
-                    "decoding {length:04x}^{length_mask:04x} {:04x}B",
-                    length ^ length_mask
-                );
+                // The mask is DRBG output: never log it next to the wire length.
+                trace!("decoding {length:04x}B (masked)");
                 length ^= length_mask;
                 if MAX_FRAME_LENGTH < length as usize || MIN_FRAME_LENGTH > length as usize {
                     // The obfs4 data channel is AEAD-protected (XSalsa20-Poly1305),
