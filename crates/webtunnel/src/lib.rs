@@ -253,8 +253,13 @@ impl PreparedConfig {
                 let (host, port) = addr.rsplit_once(':').ok_or_else(|| {
                     Error::InvalidUrl(format!("addr= missing ':' (expected host:port): {addr}"))
                 })?;
-                if host.is_empty() || host.contains([':', '[', ']']) {
-                    return Err(Error::InvalidUrl(format!("invalid addr= host: {host}")));
+                // The host may reach a proxy request line: no whitespace or
+                // control bytes (CR/LF), and the message never echoes them.
+                if host.is_empty()
+                    || host.contains([':', '[', ']'])
+                    || host.bytes().any(|b| b <= 0x20 || b == 0x7f)
+                {
+                    return Err(Error::InvalidUrl("invalid addr= host".into()));
                 }
                 let port = port
                     .parse()
@@ -474,6 +479,13 @@ fn reject_bound_carrier(
 }
 
 impl WebTunnelClient {
+    /// Return the validated carrier destination without resolving its hostname.
+    /// The caller can dial through a proxy and supply that stream to `establish`.
+    pub fn carrier_destination(&self) -> Result<(String, u16), Error> {
+        let prepared = self.config.as_ref().ok_or(Error::MissingUrl)?.prepare()?;
+        Ok((prepared.host, prepared.port))
+    }
+
     /// Connect directly to the configured `url=` endpoint.
     ///
     /// This explicit API owns URL dialing. The [`ptrs::ClientTransport`]
@@ -501,6 +513,9 @@ where
     type OutErr = Error;
     type Builder = WebTunnelBuilder;
 
+    /// cancel-safe: NO — cancellation or the stage deadline discards the owned
+    /// carrier mid-dial or mid-handshake; the stream is never reused. One
+    /// absolute deadline covers the dial, TLS and the HTTP upgrade.
     fn establish(self, input: Pin<F<InRW, InErr>>) -> Pin<F<Self::OutRW, Self::OutErr>> {
         Box::pin(async move {
             let config = self.config.ok_or(Error::MissingUrl)?;
@@ -518,6 +533,9 @@ where
         })
     }
 
+    /// cancel-safe: NO — cancellation or the deadline discards the owned
+    /// stream mid-handshake (a partial upgrade request may already be
+    /// written); the stream is never reused.
     fn wrap(self, io: InRW) -> Pin<F<Self::OutRW, Self::OutErr>> {
         Box::pin(async move {
             let config = self.config.ok_or(Error::MissingUrl)?;

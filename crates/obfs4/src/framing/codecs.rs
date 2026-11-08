@@ -218,10 +218,8 @@ impl Decoder for EncryptingCodec {
 
                 // De-obfuscate the length field
                 let length_mask = self.decoder.drbg.length_mask();
-                trace!(
-                    "decoding {length:04x}^{length_mask:04x} {:04x}B",
-                    length ^ length_mask
-                );
+                // The mask is DRBG output: never log it next to the wire length.
+                trace!("decoding {length:04x}B (masked)");
                 length ^= length_mask;
                 if MAX_FRAME_LENGTH < length as usize || MIN_FRAME_LENGTH > length as usize {
                     // The obfs4 data channel is AEAD-protected (XSalsa20-Poly1305),
@@ -392,10 +390,9 @@ impl<T: Buf> Encoder<T> for EncryptingCodec {
         // Obfuscate the length
         let mut length = ct_len as u16;
         let length_mask: u16 = self.encoder.drbg.length_mask();
-        debug!(
-            "encoding➡️ {length}B, {length:04x}^{length_mask:04x} {:04x}",
-            length ^ length_mask
-        );
+        // The mask is DRBG output: logging it next to the wire length would
+        // let a log reader unmask frame lengths.
+        debug!("encoding➡️ {length}B");
         length ^= length_mask;
 
         dst.reserve(LENGTH_LENGTH + ct_len);
@@ -416,11 +413,6 @@ impl<T: Buf> Encoder<T> for EncryptingCodec {
         )?;
         dst[tag_start..payload_start].copy_from_slice(tag.as_slice());
 
-        trace!(
-            "prng_ciphertext: {}{}",
-            hex::encode(length.to_be_bytes()),
-            hex::encode(&dst[tag_start..payload_start + pt_len])
-        );
         Ok(())
     }
 }
@@ -470,7 +462,8 @@ impl NonceBox {
         nonce[..NONCE_PREFIX_LENGTH].copy_from_slice(&self.prefix);
         nonce[NONCE_PREFIX_LENGTH..].copy_from_slice(&self.counter.to_be_bytes());
 
-        trace!("fresh nonce: {}", hex::encode(nonce));
+        // The 16-byte prefix is key material: log the counter only.
+        trace!("fresh nonce counter: {}", self.counter);
         self.inc();
         Ok(nonce)
     }

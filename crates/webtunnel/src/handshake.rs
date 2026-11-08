@@ -545,6 +545,9 @@ fn build_tls_config() -> rustls::ClientConfig {
 }
 
 /// Send the HTTP Upgrade request, read the 101 response, return the stream.
+///
+/// cancel-safe: NO — cancellation can leave the request partially written;
+/// the owned stream is dropped with the future and never reused.
 async fn read_upgrade<S>(mut stream: S, config: &PreparedConfig) -> Result<(S, Vec<u8>), Error>
 where
     S: AsyncReadExt + AsyncWriteExt + Unpin + Send + 'static,

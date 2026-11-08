@@ -280,11 +280,7 @@ impl Server {
             h.update(eh.as_bytes());
             let mac_calculated = &h.finalize_reset().into_bytes()[..MAC_LENGTH];
             let mac_received = &buf[pos + MARK_LENGTH..pos + MARK_LENGTH + MAC_LENGTH];
-            trace!(
-                "server {}-{}",
-                hex::encode(mac_calculated),
-                hex::encode(mac_received)
-            );
+            // MACs are keyed by the bridge identity: never log their bytes.
             if mac_calculated.ct_eq(mac_received).into() {
                 trace!("correct mac");
                 // Ensure that this handshake has not been seen previously.

@@ -56,6 +56,15 @@ fn is_client_from_env() -> Result<(), Error> {
 
 #[test]
 #[serial]
+fn empty_state_location_is_rejected() {
+    let _guard = EnvGuard::new(&[constants::STATE_LOCATION]);
+    env::set_var(constants::STATE_LOCATION, "");
+    let error = make_state_dir().expect_err("an empty state location is unusable");
+    assert!(error.to_string().contains("empty"), "{error}");
+}
+
+#[test]
+#[serial]
 fn statedir() -> Result<(), Error> {
     // TOR_PT_STATE_LOCATION not set.
     env::remove_var(constants::STATE_LOCATION);
@@ -380,6 +389,49 @@ fn client_transports() -> Result<(), Error> {
         assert_eq!(result, trial.1);
     }
 
+    Ok(())
+}
+
+#[test]
+#[serial]
+fn proxy_config_errors_never_echo_credentials() {
+    let _guard = EnvGuard::new(&[constants::PROXY]);
+    for bad in [
+        "socks5://user:hunter2secret@[not-ipv6]:1080",
+        "socks5://user:hunter2secret@[::1:1080",
+        "ftp://user:hunter2secret@127.0.0.1:1080",
+        "socks5://user:hunter2secret@127.0.0.1:1080/path",
+        "socks5://user:hunter2secret@not-an-ip.invalid:1080",
+        "socks4a://user:hunter2secret@127.0.0.1:1080",
+    ] {
+        env::set_var(constants::PROXY, bad);
+        let error = get_proxy_url().expect_err(bad).to_string();
+        assert!(
+            !error.contains("hunter2secret"),
+            "error for {bad:?} leaked credentials: {error}"
+        );
+    }
+}
+
+#[test]
+#[serial]
+fn client_info_without_proxy_ignores_proxy_variable() -> Result<(), Error> {
+    let _guard = EnvGuard::new(&[
+        constants::MANAGED_VER,
+        constants::CLIENT_TRANSPORTS,
+        constants::PROXY,
+    ]);
+    env::set_var(constants::MANAGED_VER, "1");
+    env::set_var(constants::CLIENT_TRANSPORTS, "obfs4,webtunnel");
+    env::set_var(constants::PROXY, "socks4a://not-an-ip:1080");
+
+    assert!(ClientInfo::new().is_err());
+    let info = ClientInfo::without_proxy()?;
+    assert_eq!(info.methods, vec!["obfs4", "webtunnel"]);
+    assert!(info.uri.is_none());
+
+    env::set_var(constants::MANAGED_VER, "2");
+    assert!(ClientInfo::without_proxy().is_err());
     Ok(())
 }
 

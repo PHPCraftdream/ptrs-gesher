@@ -86,6 +86,39 @@ lyrebird::run_from_env().await?;
 
 Call this from an async context after setting the managed-transport environment.
 
+## Proxy protocols
+
+Each managed client listener accepts both SOCKS5 and HTTP CONNECT on its existing
+loopback socket. PT control announcements still advertise `socks5` for Tor/Arti
+compatibility. These are transport-control listeners: RFC 1929 or HTTP Basic
+credential fields carry per-bridge PT arguments, not application user accounts.
+Parsing never opens a plain relay or sends success before the PT handshake.
+If the transport or upstream proxy cannot be established, the parent receives a
+failure reply (SOCKS5 REP=4 or HTTP 502); invalid PT arguments get REP=1 /
+HTTP 502. Over HTTP Basic, send `base64(<PT arguments>:)`: the trailing `:` is
+an empty-password marker that lyrebird strips after rejoining the halves, so
+arguments containing `:` (for example WebTunnel `url=https://…`) survive.
+HTTP pipeline bytes are forwarded once, before unread bytes from the socket.
+Bridge-side transport sockets are not HTTP proxy listeners and are unchanged.
+
+`TOR_PT_PROXY` supports `socks5://IP:port` and `http://IP:port`. A `socks5://`
+proxy may carry percent-encoded `username:password@`: the password is never sent
+in clear text but proven with secure auth (SOCKS5 method 0x80), so the proxy
+must speak it (for example another `resocks5-net` peer). An `http://` proxy with
+credentials is refused, because HTTP CONNECT has no such method. Proxy
+endpoints must be IP literals; destination hostnames are passed to the proxy
+without local DNS. Unsupported configuration fails with `PROXY-ERROR` before
+listeners are announced. A configured proxy error never selects a direct
+carrier. WebTunnel TLS and its HTTP upgrade run unchanged over the proxy-supplied
+stream.
+
+Bridge arguments from the parent (PT-spec 3.5) are the one place where
+username/password bytes are read: lyrebird takes them from the loopback parent
+as transport configuration, never forwards them, and wipes them on drop.
+HTTPS-to-proxy is not enabled by this interface. The upstream protocol
+implementation comes from `resocks5-net` 0.5.0; only the small loopback parser
+for the parent's request is kept here.
+
 ## License
 
 Dual-licensed under either:

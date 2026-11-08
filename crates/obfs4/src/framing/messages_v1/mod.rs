@@ -116,7 +116,6 @@ impl Messages {
         // length here, so no out-of-bound check is needed there.
         match pt {
             MessageTypes::Payload => {
-                let mut dst = vec![];
                 if length == 0 {
                     // this "packet" is all padding -> get rid of it
                     trace!("padding payload len={_r}");
@@ -129,6 +128,8 @@ impl Messages {
                 }
                 trace!("content payload len={_r}");
 
+                // `length` is bounded by `buf.remaining()` above.
+                let mut dst = Vec::with_capacity(length);
                 dst.put(buf.take(length));
                 trace!("{}B remainng", buf.remaining());
                 Ok(Messages::Payload(dst))
@@ -192,6 +193,32 @@ mod test {
         assert_eq!(Messages::Payload(payload.to_vec()), pkt);
 
         Ok(())
+    }
+
+    #[test]
+    fn parsed_payload_buffer_has_exactly_the_payload_size() -> Result<(), FrameError> {
+        let mut buf = BytesMut::new();
+        build_and_marshall(&mut buf, MessageTypes::Payload.into(), [7_u8; 1000], 0)?;
+
+        match Messages::try_parse(&mut buf)? {
+            Messages::Payload(bytes) => {
+                assert_eq!(bytes.len(), 1000);
+                // Final size only: the number of allocations is not observable here.
+                assert_eq!(bytes.capacity(), 1000, "no spare capacity is retained");
+            }
+            other => panic!("expected a payload, got {other:?}"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn oversized_payload_length_is_rejected_without_allocating() {
+        // Declared length 0xFFFF, only 3 bytes follow.
+        let mut buf = BytesMut::from(&[0x00, 0xFF, 0xFF, 1, 2, 3][..]);
+        assert_eq!(
+            Messages::try_parse(&mut buf).unwrap_err(),
+            FrameError::InvalidMessage
+        );
     }
 
     #[test]

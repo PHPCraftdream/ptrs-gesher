@@ -76,9 +76,9 @@
 //!    automatically create `obfs4_state.json` or `obfs4_bridgeline.txt`.
 //!
 // Follow-up work tracked in the issue tracker, not in rustdoc:
-//   - tunnel-level metrics (failures, byte counters).
+//   - tunnel-level metrics beyond the debug-logged byte counters.
 //   - rate-limiting for the bidirectional copy.
-//   - replace `tokio::io::copy_bidirectional` with an interactive copy
+//   - replace the SDK tunnel copy with an interactive copy
 //     that flushes only when the reader stalls.
 
 #![deny(missing_docs)]
@@ -88,11 +88,21 @@ use ptrs::{error, info, warn, PluggableTransport};
 
 use anyhow::{anyhow, Context, Result};
 use clap::Parser;
-use fast_socks5::util::target_addr::TargetAddr;
+#[path = "client/connection.rs"]
+mod connection;
+#[cfg(test)]
+use connection::client_handle_connection;
+use connection::client_handle_connection_with_proxy;
+#[path = "client/parent.rs"]
+mod parent;
+#[path = "client/proxy.rs"]
+mod proxy;
 use safelog::{sensitive, Guard};
+#[cfg(test)]
+use tokio::io::AsyncWriteExt;
 use tokio::task::JoinSet;
 use tokio::{
-    io::{copy_bidirectional, AsyncRead, AsyncWrite, AsyncWriteExt},
+    io::{AsyncRead, AsyncWrite},
     net::{TcpListener, TcpStream},
 };
 use tokio_util::sync::CancellationToken;
@@ -160,11 +170,6 @@ fn accept_retry_delay(consecutive_failures: u32) -> std::time::Duration {
             .min(ACCEPT_RETRY_MAX_MS),
     )
 }
-
-/// Error defined to denote a failure to get the bridge line
-#[derive(Debug, thiserror::Error)]
-#[error("Error while obtaining bridge line data")]
-struct BridgeLineParseError;
 
 #[derive(Parser)]
 #[command(author, version, long_about = None, about="Tunnel Tor SOCKS5 traffic through pluggable transport connections")]
@@ -398,18 +403,10 @@ fn default_filter_directives(level: Level) -> String {
     level.to_string()
 }
 
-/// Resolve a `fast_socks5::util::TargetAddr` to a concrete `SocketAddr`.
-/// `Ip(_)` variants pass through; `Domain` variants always fail because
-/// the PT spec forbids the transport from doing DNS — that's the calling
-/// Tor client's responsibility.
-pub fn resolve_target_addr(addr: &TargetAddr) -> Result<SocketAddr> {
-    match addr {
-        TargetAddr::Ip(sa) => Ok(*sa),
-        TargetAddr::Domain(_, _) => {
-            // this will always fail because ptrs does not do dns lookups.
-            ptrs::resolve_addr(format!("{addr}")).context("domain resolution failed")
-        }
-    }
+/// Parse an IP-literal target without performing DNS resolution.
+/// Hostnames are rejected: resolving bridge targets is the Tor client's responsibility.
+pub fn resolve_target_addr(addr: impl std::fmt::Display) -> Result<SocketAddr> {
+    ptrs::resolve_addr(addr.to_string()).context("PT target must be an IP address")
 }
 
 /// Dial a bridge's OR-port and apply socket options that keep the obfs4
@@ -427,12 +424,18 @@ pub fn resolve_target_addr(addr: &TargetAddr) -> Result<SocketAddr> {
 async fn dial_bridge(remote_addr: SocketAddr) -> std::io::Result<TcpStream> {
     let stream = TcpStream::connect(remote_addr).await?;
     // Best-effort: failure to set an option must not abort the dial.
+    tune_outgoing(&stream);
+    Ok(stream)
+}
+
+/// Best-effort nodelay and keepalive for every outgoing carrier socket
+/// (direct bridge dial and the connection to an upstream proxy).
+fn tune_outgoing(stream: &TcpStream) {
     let _ = stream.set_nodelay(true);
     let keepalive = socket2::TcpKeepalive::new()
         .with_time(std::time::Duration::from_secs(15))
         .with_interval(std::time::Duration::from_secs(15));
-    let _ = socket2::SockRef::from(&stream).set_tcp_keepalive(&keepalive);
-    Ok(stream)
+    let _ = socket2::SockRef::from(stream).set_tcp_keepalive(&keepalive);
 }
 
 /// Run the lyrebird pluggable transport. Expects the standard
@@ -441,11 +444,9 @@ async fn dial_bridge(remote_addr: SocketAddr) -> std::io::Result<TcpStream> {
 ///
 /// # Upstream proxies
 ///
-/// Client setup is *fail-closed* with respect to `TOR_PT_PROXY`
-/// (PT-spec §3.3.2): no upstream proxy dialer is implemented, so a
-/// configured upstream proxy is answered with `PROXY-ERROR` on the
-/// control channel and setup aborts before any transport starts. The
-/// parent is never told the proxy is in use when it is not.
+/// `TOR_PT_PROXY` supports SOCKS5 or HTTP CONNECT IP endpoints with optional credentials.
+/// Invalid or unsupported configurations fail before any transport starts.
+/// When configured, every carrier uses that proxy; dialing errors never fall back.
 ///
 /// # Shutdown semantics
 ///
@@ -493,7 +494,7 @@ pub async fn run() -> Result<()> {
     let args = Args::parse();
 
     // Make state directory
-    let statedir = ptrs::make_state_dir()?;
+    let statedir = make_state_dir_reporting()?;
 
     // launch tracing subscriber with filter level
     let _logging_guard = init_logging_recvr(
@@ -516,8 +517,22 @@ pub async fn run() -> Result<()> {
 ///
 /// Not cancel-safe: drive the future to completion to join owned tasks.
 pub async fn run_from_env() -> Result<()> {
-    let statedir = ptrs::make_state_dir()?;
+    let statedir = make_state_dir_reporting()?;
     run_managed(&statedir).await
+}
+
+/// PT-spec §3.2: a missing or unusable `TOR_PT_STATE_LOCATION` is an
+/// `ENV-ERROR`. The reason is static: the value (a path) is never echoed.
+fn make_state_dir_reporting() -> Result<String> {
+    let set = std::env::var_os(ptrs::constants::STATE_LOCATION).is_some();
+    ptrs::make_state_dir().map_err(|error| {
+        pt_proto::print_env_error(if set {
+            "TOR_PT_STATE_LOCATION is unusable"
+        } else {
+            "TOR_PT_STATE_LOCATION is not set"
+        });
+        error.into()
+    })
 }
 
 async fn run_managed(statedir: &str) -> Result<()> {
@@ -550,7 +565,9 @@ async fn run_managed(statedir: &str) -> Result<()> {
 }
 
 async fn setup_listeners(statedir: &str, ctx: RunTasks) -> Result<JoinSet<Result<()>>> {
-    if ptrs::is_client()? {
+    // PT-spec §3.1/§3.2: version negotiation and environment errors are
+    // reported on the control channel before anything else.
+    if pt_proto::negotiate()? {
         client_setup(statedir, ctx).await
     } else {
         #[cfg(feature = "experimental-server")]
@@ -584,46 +601,26 @@ async fn client_setup(_statedir: &str, ctx: RunTasks) -> Result<JoinSet<Result<(
     let obfs4_name = Obfs4PT::name();
     let webtunnel_name = webtunnel::WEBTUNNEL_NAME.to_string();
 
-    // PT spec §3.3.1: announce our protocol version to the parent before
-    // anything else the parent parses on the control channel.
-    pt_proto::print_version();
-
-    // PT-spec §3.3.2, fail-closed: when the parent sets TOR_PT_PROXY, ALL
-    // outgoing traffic MUST be routed through that upstream proxy, and the
-    // PT must answer with either `PROXY DONE` (proxy supported and
-    // actually in use) or `PROXY-ERROR` and terminate — before any
-    // transport is initialized. There is no upstream proxy dialer in this
-    // codebase: `dial_bridge` always opens a *direct* TCP connection, and
-    // no proxy URI is retained because proxy dialing is unsupported.
-    // Proceeding silently would route traffic around the configured proxy
-    // while the parent believes its routing requirement is honored, and
-    // answering `PROXY DONE` would promise a route the code never uses.
-    //
-    // The gate therefore tests the raw variable BEFORE the core `TOR_PT_*`
-    // reader: ANY set (non-empty) value is refused outright — even a URI
-    // the reader would reject must be answered on the control channel with
-    // `PROXY-ERROR`, not with the reader's bare exit. An empty value means
-    // "no upstream proxy requested", matching the reference PT
-    // implementations. Either way the parent sees the transport fail to
-    // configure instead of believing its proxy is in use.
-    let proxy_requested =
-        std::env::var_os(ptrs::constants::PROXY).is_some_and(|value| !value.is_empty());
-    if proxy_requested {
-        const PROXY_REFUSAL: &str = "upstream proxy dialing is not supported by this transport";
-        pt_proto::print_proxy_error(PROXY_REFUSAL);
-        return Err(anyhow!(
-            "TOR_PT_PROXY is set but upstream proxy dialing is not implemented; refusing to bypass the configured proxy (PT-spec fail-closed)"
-        ));
+    // PT-spec section 3.3.2: refuse unsupported proxy configurations before binding.
+    let proxy = match proxy::Proxy::from_env() {
+        Ok(proxy) => proxy,
+        Err(()) => {
+            pt_proto::print_proxy_error("invalid or unsupported upstream proxy");
+            return Err(anyhow!("invalid or unsupported upstream proxy"));
+        }
+    };
+    // The proxy is already validated above; core reads only version and transports.
+    let methods = ptrs::ClientInfo::without_proxy()?.methods;
+    if proxy.is_some() {
+        pt_proto::print_proxy_done();
     }
-
-    let client_pt_info = ptrs::ClientInfo::new()?;
 
     // Build all accept futures before spawning any of them. If a later bind
     // or local-address lookup fails, no earlier listener task needs cleanup.
     type AcceptTask = Pin<Box<dyn Future<Output = Result<()>> + Send + 'static>>;
     let mut accept_tasks: Vec<AcceptTask> = Vec::new();
 
-    for name in client_pt_info.methods {
+    for name in methods {
         info!(name);
 
         if name == obfs4_name {
@@ -631,13 +628,23 @@ async fn client_setup(_statedir: &str, ctx: RunTasks) -> Result<JoinSet<Result<(
             let listener = tokio::net::TcpListener::bind(CLIENT_SOCKS_ADDR).await?;
             let local_addr = listener.local_addr()?;
             pt_proto::print_cmethod(&name, "socks5", local_addr);
-            accept_tasks.push(Box::pin(client_accept_loop(listener, builder, ctx.clone())));
+            accept_tasks.push(Box::pin(client_accept_loop_with_proxy(
+                listener,
+                builder,
+                ctx.clone(),
+                proxy.clone(),
+            )));
         } else if name == webtunnel_name {
             let builder = webtunnel::WebTunnelBuilder::default();
             let listener = tokio::net::TcpListener::bind(CLIENT_SOCKS_ADDR).await?;
             let local_addr = listener.local_addr()?;
             pt_proto::print_cmethod(&name, "socks5", local_addr);
-            accept_tasks.push(Box::pin(client_accept_loop(listener, builder, ctx.clone())));
+            accept_tasks.push(Box::pin(client_accept_loop_with_proxy(
+                listener,
+                builder,
+                ctx.clone(),
+                proxy.clone(),
+            )));
         } else {
             pt_proto::print_cmethod_error(&name, "no such transport is supported");
             warn!("no such transport is supported");
@@ -666,13 +673,25 @@ async fn connection_permit(
     }
 }
 
+#[cfg(test)]
 async fn client_accept_loop<C>(
     listener: TcpListener,
     builder: impl ptrs::ClientBuilder<TcpStream, ClientPT = C> + Send + 'static,
     ctx: RunTasks,
 ) -> Result<()>
 where
-    // the provided client builder should build the C ClientTransport.
+    C: ManagedClient,
+{
+    client_accept_loop_with_proxy(listener, builder, ctx, None).await
+}
+
+async fn client_accept_loop_with_proxy<C>(
+    listener: TcpListener,
+    builder: impl ptrs::ClientBuilder<TcpStream, ClientPT = C> + Send + 'static,
+    ctx: RunTasks,
+    proxy: Option<Arc<proxy::Proxy>>,
+) -> Result<()>
+where
     C: ManagedClient,
 {
     let pt_name = C::method_name();
@@ -722,6 +741,7 @@ where
                     break;
                 }
                 let builder_clone = builder.clone();
+                let proxy = proxy.clone();
                 let conns = ctx.conns.clone();
                 ctx.spawn_connection(async move {
                     let _permit = permit; // held for the task's lifetime, freed on drop
@@ -731,7 +751,7 @@ where
                         // halves of the tunnel. Runs only once the graceful
                         // drain budget expired (or on terminate/EOF).
                         _ = conns.cancelled() => {}
-                        res = client_handle_connection(conn, builder_clone, client_addr) => {
+                        res = client_handle_connection_with_proxy(conn, builder_clone, client_addr, proxy) => {
                             if let Err(e) = res {
                                 warn!(
                                     address = sensitive(client_addr).to_string(),
@@ -748,28 +768,48 @@ where
     Ok(())
 }
 
-trait ManagedClient: ptrs::ClientTransport<TcpStream, std::io::Error> + Send + 'static {
+// Internal, statically dispatched transport adapter; no public trait surface.
+trait ManagedClient: ptrs::ClientTransport<TcpStream, std::io::Error> + Sized + Send + 'static {
     type ManagedOut: AsyncRead + AsyncWrite + Send + Unpin + 'static;
 
+    #[cfg(test)]
     fn managed_connect(
         self,
-        target_addr: TargetAddr,
+        target_addr: String,
         client_addr: SocketAddr,
+    ) -> Pin<Box<dyn Future<Output = Result<Self::ManagedOut>> + Send>> {
+        self.managed_connect_with_proxy(target_addr, client_addr, None)
+    }
+
+    fn managed_connect_with_proxy(
+        self,
+        target_addr: String,
+        client_addr: SocketAddr,
+        proxy: Option<Arc<proxy::Proxy>>,
     ) -> Pin<Box<dyn Future<Output = Result<Self::ManagedOut>> + Send>>;
 }
 
 impl ManagedClient for obfs4::Client {
     type ManagedOut = <Self as ptrs::ClientTransport<TcpStream, std::io::Error>>::OutRW;
 
-    fn managed_connect(
+    fn managed_connect_with_proxy(
         self,
-        target_addr: TargetAddr,
+        target_addr: String,
         client_addr: SocketAddr,
+        proxy: Option<Arc<proxy::Proxy>>,
     ) -> Pin<Box<dyn Future<Output = Result<Self::ManagedOut>> + Send>> {
         Box::pin(async move {
             let remote_addr = resolve_target_addr(&target_addr).context("no remote address")?;
-            let remote: Pin<ptrs::FutureResult<TcpStream, std::io::Error>> =
-                Box::pin(dial_bridge(remote_addr));
+            let remote: Pin<ptrs::FutureResult<TcpStream, std::io::Error>> = Box::pin(async move {
+                match proxy {
+                    Some(proxy) => {
+                        proxy
+                            .connect(&remote_addr.ip().to_string(), remote_addr.port())
+                            .await
+                    }
+                    None => dial_bridge(remote_addr).await,
+                }
+            });
             establish_pt_conn(self, remote, client_addr).await
         })
     }
@@ -778,109 +818,36 @@ impl ManagedClient for obfs4::Client {
 impl ManagedClient for webtunnel::WebTunnelClient {
     type ManagedOut = <Self as ptrs::ClientTransport<TcpStream, std::io::Error>>::OutRW;
 
-    fn managed_connect(
+    fn managed_connect_with_proxy(
         self,
-        _target_addr: TargetAddr,
-        _client_addr: SocketAddr,
+        _target_addr: String,
+        client_addr: SocketAddr,
+        proxy: Option<Arc<proxy::Proxy>>,
     ) -> Pin<Box<dyn Future<Output = Result<Self::ManagedOut>> + Send>> {
         Box::pin(async move {
-            self.connect_url()
-                .await
-                .map_err(|error| anyhow!("WebTunnel URL connection failed: {error}"))
+            match proxy {
+                Some(proxy) => {
+                    let (host, port) = self
+                        .carrier_destination()
+                        .map_err(|_| anyhow!("invalid WebTunnel destination"))?;
+                    let remote: Pin<ptrs::FutureResult<TcpStream, std::io::Error>> =
+                        Box::pin(async move { proxy.connect(&host, port).await });
+                    establish_pt_conn(self, remote, client_addr).await
+                }
+                None => self
+                    .connect_url()
+                    .await
+                    .map_err(|error| anyhow!("WebTunnel URL connection failed: {error}")),
+            }
         })
     }
-}
-
-/// This function assumes that the provided connection / socket manages reconstruction
-/// and reliability before passing to this layer.
-async fn client_handle_connection<In, C, B>(
-    conn: In,
-    mut builder: B,
-    client_addr: SocketAddr,
-) -> Result<()>
-where
-    // the provided T must be usable as a connection in an async context
-    In: AsyncRead + AsyncWrite + Send + Unpin,
-    // the provided client builder should build the C ClientTransport.
-    C: ManagedClient,
-    B: ptrs::ClientBuilder<TcpStream, ClientPT = C>,
-{
-    // PT-spec §3.5 requires the parent to negotiate USERNAME/PASSWORD
-    // (auth method 0x02) and pack the per-bridge PT arguments into the
-    // UNAME/PASSWD fields. We accept any creds (and also accept clients
-    // that legitimately want NO_AUTH) — see `PtArgsAuth` below.
-    let mut config =
-        fast_socks5::server::Config::<fast_socks5::server::DenyAuthentication>::default()
-            .with_authentication(PtArgsAuth);
-    config.set_allow_no_auth(true);
-    // Critical: we are a pluggable transport, not a plain TCP proxy. With
-    // the default `execute_command = true`, `upgrade_to_socks5()` would
-    // itself open a *plain* TCP connection to the bridge, send the SOCKS
-    // reply, and proxy the parent against that — bypassing obfs4 entirely
-    // and consuming the parent socket. We must only *read* the request
-    // here and do the obfs4 dial + reply ourselves below.
-    config.set_execute_command(false);
-    let socks5_conn = fast_socks5::server::Socks5Socket::new(conn, Arc::new(config));
-
-    let mut socks5_conn =
-        tokio::time::timeout(SOCKS5_SETUP_TIMEOUT, socks5_conn.upgrade_to_socks5())
-            .await
-            .context("SOCKS5 negotiation timed out")??;
-    let creds = socks5_conn.take_credentials();
-
-    let target_addr = socks5_conn
-        .target_addr()
-        .ok_or(BridgeLineParseError)
-        .context("missing remote address in request")?;
-    let target_addr = target_addr.clone();
-
-    // Reconstruct the PT-spec argument string from SOCKS5 user/pass and
-    // hand it to the transport's `options(&Args)` so the obfs4
-    // ClientBuilder picks up `cert=...` / `iat-mode=...` etc.
-    let arg_string = arg_string_from_creds(creds);
-    let args = if arg_string.is_empty() {
-        ptrs::args::Args::default()
-    } else {
-        ptrs::args::Args::from_str(&arg_string).context("parsing PT arg string")?
-    };
-    <B as ptrs::ClientBuilder<TcpStream>>::options(&mut builder, &args)
-        .map_err(|e| anyhow::anyhow!("applying PT args to builder: {e}"))?;
-
-    // Build the client and let the transport choose its connection path.
-    // WebTunnel owns URL dialing; its SOCKS target is only a PT-spec carrier
-    // placeholder and must never become a direct dial target.
-    let pt_client = builder.build();
-    let mut pt_conn = C::managed_connect(pt_client, target_addr, client_addr).await?;
-
-    // The obfs4 tunnel to the bridge is up, so report CONNECT success to
-    // the PT parent (arti/tor). Because we disabled `execute_command`,
-    // fast-socks5 has NOT sent any reply — we must. This is the canonical
-    // SOCKS5 success frame: VER=5, REP=0 (succeeded), RSV=0, ATYP=1
-    // (IPv4), BND.ADDR=0.0.0.0, BND.PORT=0. The parent ignores BND.*.
-    let mut parent = socks5_conn.into_inner();
-    parent
-        .write_all(&[0x05, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0])
-        .await
-        .context("writing SOCKS5 success reply to PT parent")?;
-    parent
-        .flush()
-        .await
-        .context("flushing SOCKS5 success reply")?;
-
-    if let Err(e) = copy_bidirectional(&mut parent, &mut pt_conn).await {
-        warn!(
-            addres = sensitive(client_addr).to_string(),
-            "tunnel closed with error: {e:#?}"
-        );
-    }
-    Ok(())
 }
 
 /// Drive a built pluggable-transport client to completion against a dial
 /// future, returning the wrapped tunnel stream.
 ///
 /// This is the outgoing-connection seam carved out of
-/// [`client_handle_connection`]. The dial is supplied as an already-pinned
+/// `client_handle_connection_with_proxy`. The dial is supplied as an already-pinned
 /// [`ptrs::FutureResult`] (the same shape `establish` consumes) rather than
 /// being created inline with `TcpStream::connect`, so tests can inject an
 /// in-memory `tokio::io::duplex()` half — or a future that fails — and
@@ -908,15 +875,48 @@ where
     In2: AsyncRead + AsyncWrite + Send + Sync + Unpin + 'static,
     C2: ptrs::ClientTransport<In2, std::io::Error> + Send,
 {
+    // The transport flattens its errors to text; remember how the dial itself
+    // failed so the parent can get a precise SOCKS5/HTTP failure reply.
+    let dial_kind = Arc::new(std::sync::Mutex::new(None));
+    let record = dial_kind.clone();
+    let dial: Pin<ptrs::FutureResult<In2, std::io::Error>> = Box::pin(async move {
+        let result = dial.await;
+        if let (Err(error), Ok(mut slot)) = (&result, record.lock()) {
+            *slot = Some(DialFailed {
+                kind: error.kind(),
+                upstream: proxy::failure_reply(error),
+            });
+        }
+        result
+    });
     match ptrs::ClientTransport::<In2, std::io::Error>::establish(pt_client, dial).await {
         Err(e) => {
             warn!(
                 address = sensitive(client_addr).to_string(),
                 "handshake failed: {e:#?}"
             );
-            Err(obfs4::Error::from(e.to_string())).context("handshake failed")
+            let failure = Err(obfs4::Error::from(e.to_string())).context("handshake failed");
+            match dial_kind.lock().ok().and_then(|mut slot| slot.take()) {
+                Some(failed) => failure.context(failed),
+                None => failure,
+            }
         }
         Ok(c) => Ok(c),
+    }
+}
+
+/// Marks a handshake failure whose cause was the carrier dial itself: the
+/// `io::ErrorKind` of the dial and, when it went through an upstream proxy,
+/// the parent reply that proxy's failure maps to. Carries no address or text.
+#[derive(Debug)]
+pub(crate) struct DialFailed {
+    pub(crate) kind: std::io::ErrorKind,
+    pub(crate) upstream: Option<resocks5_net::server::Reply>,
+}
+
+impl std::fmt::Display for DialFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("carrier dial failed")
     }
 }
 
@@ -939,29 +939,12 @@ use server::server_setup;
 #[cfg(test)]
 mod logging_tests;
 #[cfg(test)]
+#[path = "client/socks_tests.rs"]
 mod socks_tests;
 
 // ================================================================ //
 //        PT-spec helpers (auth, args, parent-channel messages)     //
 // ================================================================ //
-
-/// Custom `fast_socks5` authenticator. Per pt-spec §3.5 the parent
-/// MUST negotiate USERNAME/PASSWORD when it wants to pass per-bridge PT
-/// args; we accept any (or no) credentials and just propagate them so
-/// `client_handle_connection` can grab them via `take_credentials()`.
-#[derive(Clone, Copy, Default)]
-struct PtArgsAuth;
-
-#[async_trait::async_trait]
-impl fast_socks5::server::Authentication for PtArgsAuth {
-    type Item = (String, String);
-
-    async fn authenticate(&self, credentials: Option<(String, String)>) -> Option<Self::Item> {
-        // Propagate creds untouched. `None` (NO_AUTH path) is also fine —
-        // we let it through as empty strings so the same plumbing applies.
-        Some(credentials.unwrap_or_default())
-    }
-}
 
 /// Reconstruct the PT-spec argument string from the SOCKS5
 /// USERNAME/PASSWORD fields, mirroring Go lyrebird `rfc1929.go:88-100`.
@@ -994,6 +977,8 @@ mod pt_proto;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod unit_tests;
 
 #[cfg(test)]
 mod lifecycle_tests;

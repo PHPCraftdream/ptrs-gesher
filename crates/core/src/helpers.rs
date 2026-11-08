@@ -63,7 +63,7 @@ pub fn is_client() -> Result<bool, Error> {
 
     match (is_client, is_server) {
         (Some(_), Some(_)) => Err(to_io_other(
-            "ENV-ERROR TOR_PT_[CLIENT,SERVER]_TRANSPORTS both set",
+            "TOR_PT_CLIENT_TRANSPORTS and TOR_PT_SERVER_TRANSPORTS both set",
         )),
         (Some(_), None) => Ok(true),
         (None, Some(_)) => Ok(false),
@@ -79,6 +79,10 @@ pub fn is_client() -> Result<bool, Error> {
 pub fn make_state_dir() -> Result<String, Error> {
     let path = env::var(constants::STATE_LOCATION)
         .map_err(|_| to_io_other("missing required TOR_PT_STATE_LOCATION env var"))?;
+    // `create_dir_all("")` succeeds and would silently use the working directory.
+    if path.is_empty() {
+        return Err(to_io_other("TOR_PT_STATE_LOCATION is empty"));
+    }
 
     let mut builder = DirBuilder::new();
     builder.recursive(true);
@@ -184,6 +188,19 @@ impl ClientInfo {
             uri: get_proxy_url()?,
         })
     }
+
+    /// Read version and transports, leaving `TOR_PT_PROXY` unparsed (`uri` is `None`).
+    ///
+    /// For callers that validate and consume the upstream proxy themselves.
+    pub fn without_proxy() -> Result<Self, Error> {
+        let _ver = get_managed_transport_ver()?;
+        debug!("VERSION {_ver}");
+
+        Ok(Self {
+            methods: get_client_transports()?,
+            uri: None,
+        })
+    }
 }
 
 pub(crate) fn get_client_transports() -> Result<Vec<String>, Error> {
@@ -200,8 +217,9 @@ pub(crate) fn get_proxy_url() -> Result<Option<Url>, Error> {
     };
 
     // Url::parse() only works for absolute urls so we do not need to check for relative
+    // The raw value may carry `user:password@`; never put it in the error.
     let uri = Url::parse(&url_str)
-        .map_err(|e| to_io_other(format!("failed to parse proxy config \"{url_str}\": {e}")))?;
+        .map_err(|e| to_io_other(format!("failed to parse proxy config: {e}")))?;
 
     validate_proxy_url_with_authority(&uri, authority_explicit_port(&url_str))?;
 

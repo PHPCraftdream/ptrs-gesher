@@ -600,3 +600,53 @@ mod proptest_codec {
         }
     }
 }
+
+#[test]
+fn codec_logs_never_contain_key_derived_hex() {
+    use std::fmt::Write as _;
+    use std::sync::{Arc, Mutex};
+    use tracing_subscriber::layer::{Context, SubscriberExt};
+
+    struct Capture(Arc<Mutex<Vec<String>>>);
+    struct Text(String);
+    impl tracing::field::Visit for Text {
+        fn record_debug(&mut self, _: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            let _ = write!(self.0, "{value:?} ");
+        }
+    }
+    impl<S: tracing::Subscriber> tracing_subscriber::Layer<S> for Capture {
+        fn on_event(&self, event: &tracing::Event<'_>, _: Context<'_, S>) {
+            let mut text = Text(String::new());
+            event.record(&mut text);
+            self.0.lock().unwrap().push(text.0);
+        }
+    }
+
+    let logs = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::registry().with(Capture(logs.clone()));
+    tracing::subscriber::with_default(subscriber, || {
+        let km = [0x42; KEY_MATERIAL_LENGTH];
+        let mut encoder = EncryptingCodec::new(km, km);
+        let mut decoder = EncryptingCodec::new(km, km);
+        let mut wire = BytesMut::new();
+        encoder.encode(&b"hello world"[..], &mut wire).unwrap();
+        decoder.decode(&mut wire).unwrap();
+    });
+
+    let logs = logs.lock().unwrap();
+    assert!(!logs.is_empty(), "the codec must still emit diagnostics");
+    for line in logs.iter() {
+        // Nonce prefixes, length masks, ciphertext and MACs are all hex
+        // dumps far longer than any counter or length.
+        let longest_hex_run = line
+            .split(|c: char| !c.is_ascii_hexdigit())
+            .map(str::len)
+            .max()
+            .unwrap_or(0);
+        assert!(longest_hex_run < 16, "key-derived hex in log line: {line}");
+        assert!(
+            !line.contains('^'),
+            "length mask leaked in log line: {line}"
+        );
+    }
+}
