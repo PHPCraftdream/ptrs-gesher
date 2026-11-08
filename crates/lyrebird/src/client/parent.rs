@@ -5,8 +5,9 @@
 //! `Proxy-Authorization: Basic` header. Those bytes are transport
 //! configuration, not a login: nothing is verified, they go to the transport's
 //! `options` and nowhere else, and they are wiped when dropped.
-//! `resocks5-net` deliberately has no clear-text credential support, so this
-//! small parser owns that one spec-mandated channel.
+//! The `resocks5-net` server checks every username/password against a secret
+//! store and never hands raw fields over, so this small parser owns that one
+//! spec-mandated channel.
 
 use anyhow::{anyhow, Result};
 use base64::{engine::general_purpose::STANDARD, Engine as _};

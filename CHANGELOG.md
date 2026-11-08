@@ -24,15 +24,18 @@ All six crates move to 0.8.0 in lockstep.
 ### Added
 
 - **lyrebird**: `TOR_PT_PROXY` support for `socks5://IP:port` and
-  `http://IP:port` (HTTP CONNECT). A `socks5://` proxy may carry
-  percent-encoded `username:password@`; the password is never sent in clear
-  text but proven with the SDK's secure auth (SOCKS5 method 0x80), so such a
-  proxy must speak it (another `resocks5-net` peer). Both carriers (obfs4,
-  WebTunnel) dial through the proxy and never fall back to a direct
-  connection. Setup answers `PROXY DONE`; invalid or unsupported values
-  (`socks4a`, `https`, hostname endpoints, an `http://` proxy with
-  credentials, which has no secure method) get `PROXY-ERROR` before any
-  listener starts.
+  `http://IP:port` (HTTP CONNECT), both with optional percent-encoded
+  `username:password@` (1..=255 bytes each). By default any standard proxy
+  works: SOCKS5 offers secure auth (method 0x80) and RFC 1929 (0x02) and the
+  upstream picks, so a `resocks5-net` peer never sees the password while a
+  plain RFC 1929 proxy gets the usual exchange; HTTP sends `Basic` in the
+  CONNECT. `LYREBIRD_PROXY_AUTH=secure` demands secure auth only (SOCKS5 0x80,
+  HTTP `Resocks5-Secure`): an upstream without it fails before any password
+  byte is sent, with no downgrade. Both carriers (obfs4, WebTunnel) dial
+  through the proxy and never fall back to a direct connection. Setup answers
+  `PROXY DONE`; invalid or unsupported values (`socks4a`, `https`, hostname
+  endpoints, an unknown `LYREBIRD_PROXY_AUTH`, secure mode without
+  credentials) get `PROXY-ERROR` before any listener starts.
 - **lyrebird**: managed client listeners accept HTTP CONNECT as well as SOCKS5
   on the same loopback socket. Credential fields still carry per-bridge PT
   arguments (PT-spec 3.5); over HTTP Basic, send `base64(<PT arguments>:)` (one
@@ -45,9 +48,10 @@ All six crates move to 0.8.0 in lockstep.
   established, and REP=1 when the PT arguments are invalid. A success reply is
   still sent only after the transport handshake.
 - **lyrebird**: the PT parent's SOCKS5/HTTP negotiation is a small parser of
-  its own (`client/parent.rs`): `resocks5-net` has no clear-text credential
-  support, and PT-spec 3.5 requires bridge arguments in RFC 1929
-  username/password or HTTP Basic. Those bytes are transport configuration read
+  its own (`client/parent.rs`): PT-spec 3.5 carries bridge arguments in RFC
+  1929 username/password or HTTP Basic, while the `resocks5-net` server checks
+  every username/password against a secret store and has no framing-only mode
+  that hands the raw fields over. Those bytes are transport configuration read
   from the loopback parent, never verified, never forwarded and wiped on drop
   (`zeroize`); SOCKS5 prefers method 0x02, then 0x00; HTTP heads are capped at
   16 KiB (431) and malformed heads get a closing 400/501.
@@ -68,9 +72,11 @@ All six crates move to 0.8.0 in lockstep.
   15 s keepalive as direct bridge dials.
 - **lyrebird**: errors for invalid PT arguments no longer include the
   submitted values, so bridge secrets stay out of logs.
-- **lyrebird**: `socks5://` upstream credentials keep the RFC 1929 field limits
-  (1..=255 bytes, checked once at startup with `ProxyConfig::try_with_auth` and
-  `validate_node`); the validated config is reused by every connection.
+- **lyrebird**: upstream credentials keep the RFC 1929 field limits for both
+  protocols (1..=255 bytes; HTTP also refuses `:` in the user and control
+  characters), checked once at startup with `ProxyConfig::try_with_auth` and
+  `validate_node`; the validated config is reused by every connection and its
+  password is wiped when it is dropped.
 - **lyrebird**: a SOCKS5 parent that splits a multi-byte UTF-8 character
   across the 255-byte UNAME/PASSWD boundary is accepted; arguments that are
   still not UTF-8 after rejoining are refused as invalid.
@@ -88,13 +94,13 @@ All six crates move to 0.8.0 in lockstep.
   that hangs up, is REP=1 (HTTP 502). A rejected login is no longer reported as
   a policy denial.
 - **lyrebird**: the upstream dial is `resocks5_net::connect::dial_tcp` with one
-  10 s budget (`DialOptions`: connect, handshake and total), `TCP_NODELAY` and
+  10 s budget (`DialOptions` total; the connect and handshake timers end at
+  9 s so a silent upstream is always told apart from a spent budget), `TCP_NODELAY` and
   a 15 s keepalive idle/interval; the tunnel runs on the SDK's
   `tunnel_with_timeouts` (no idle or lifetime cap, since a Tor channel may stay
   quiet); the forwarded byte counts are logged at debug level.
-- **lyrebird**: `resocks5-net` is built with `secure-auth` (the only way a
-  proxy password is ever used) and `zeroize`; its clear-text features no longer
-  exist and are not used.
+- **lyrebird**: `resocks5-net` is built with `secure-auth` (method 0x80 /
+  `Resocks5-Secure` next to RFC 1929 / Basic) and `zeroize`.
 - `Cargo.lock`: rustls 0.23.46 (RUSTSEC-2026-0346..0349) and webpki-roots
   1.0.11 (RUSTSEC-2026-0381), rustls-webpki 0.103.16 (RUSTSEC-2026-0382) and
   tokio 1.54.1 (RUSTSEC-2026-0386).

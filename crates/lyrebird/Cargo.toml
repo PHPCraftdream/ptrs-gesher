@@ -43,8 +43,8 @@ webtunnel = { package = "ptrs-gesher-webtunnel", path = "../webtunnel", version 
 anyhow = "1.0"
 async-trait = "0.1"
 clap = { version = "4.5", features = ["derive"]}
-# secure-auth: a TOR_PT_PROXY SOCKS5 password is never sent in clear text; the
-# SDK proves knowledge of it with SOCKS5 method 0x80 instead.
+# secure-auth: a TOR_PT_PROXY password is proven with SOCKS5 method 0x80 when the
+# upstream supports it (always, with LYREBIRD_PROXY_AUTH=secure).
 resocks5-net = { version = "0.5.0", default-features = false, features = ["zeroize", "secure-auth"] }
 base64 = "0.22"
 # Wipe the parent's PT arguments (bridge secrets) when dropped.
