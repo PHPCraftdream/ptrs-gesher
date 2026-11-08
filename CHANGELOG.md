@@ -18,7 +18,7 @@ All six crates move to 0.8.0 in lockstep.
   it is also reachable through the umbrella crate's `lyrebird` re-export.
   Hostnames are still rejected without DNS. Callers passing a `Display` value
   keep compiling; callers constructing `TargetAddr` must drop it.
-- **lyrebird**: `fast-socks5` is replaced by `resocks5-net` 0.5.0; no
+- **lyrebird**: `fast-socks5` is replaced by `resocks5-net` 0.5.1; no
   `fast-socks5` type remains in the public API.
 
 ### Added

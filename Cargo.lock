@@ -2997,9 +2997,9 @@ dependencies = [
 
 [[package]]
 name = "resocks5-net"
-version = "0.5.0"
+version = "0.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "552ba04d951cc47a53c94a0b57a1ad54d54e44fdf4567c3ba3df1c89119629c0"
+checksum = "21758cd56cea0a3e7c9a115b814da54a6248bb060d3b729075905faab8ee3af3"
 dependencies = [
  "argon2",
  "base64",
