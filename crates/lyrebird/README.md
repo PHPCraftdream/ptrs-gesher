@@ -101,20 +101,25 @@ arguments containing `:` (for example WebTunnel `url=https://…`) survive.
 HTTP pipeline bytes are forwarded once, before unread bytes from the socket.
 Bridge-side transport sockets are not HTTP proxy listeners and are unchanged.
 
-`TOR_PT_PROXY` supports `socks5://IP:port` and `http://IP:port`. A `socks5://`
-proxy may carry percent-encoded `username:password@`: the password is never sent
-in clear text but proven with secure auth (SOCKS5 method 0x80), so the proxy
-must speak it (for example another `resocks5-net` peer). An `http://` proxy with
-credentials is refused, because HTTP CONNECT has no such method. Proxy
-endpoints must be IP literals; destination hostnames are passed to the proxy
+`TOR_PT_PROXY` supports `socks5://IP:port` and `http://IP:port`, both with
+optional percent-encoded `username:password@` (1..=255 bytes each). By default
+any standard proxy works: SOCKS5 offers secure auth (method 0x80) and RFC 1929
+(0x02) and the upstream picks, so a `resocks5-net` peer never sees the password
+while a plain RFC 1929 proxy gets the usual exchange; HTTP sends `Basic` in the
+CONNECT. Set `LYREBIRD_PROXY_AUTH=secure` to demand secure auth only (SOCKS5
+0x80, HTTP `Resocks5-Secure`): an upstream without it fails before any password
+byte is sent, never downgrading. Any other value, or secure mode without
+credentials, is a `PROXY-ERROR`. Proxy endpoints must be IP literals; destination hostnames are passed to the proxy
 without local DNS. Unsupported configuration fails with `PROXY-ERROR` before
 listeners are announced. A configured proxy error never selects a direct
 carrier. WebTunnel TLS and its HTTP upgrade run unchanged over the proxy-supplied
 stream.
 
-Bridge arguments from the parent (PT-spec 3.5) are the one place where
-username/password bytes are read: lyrebird takes them from the loopback parent
-as transport configuration, never forwards them, and wipes them on drop.
+Bridge arguments from the parent (PT-spec 3.5) arrive in username/password
+fields: lyrebird takes them from the loopback parent as transport configuration,
+never verifies or forwards them, and wipes them on drop. The `resocks5-net`
+server checks credentials against a secret store and has no framing-only mode,
+so this parser is lyrebird's own.
 HTTPS-to-proxy is not enabled by this interface. The upstream protocol
 implementation comes from `resocks5-net` 0.5.0; only the small loopback parser
 for the parent's request is kept here.
