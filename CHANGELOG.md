@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-10
+
+All six crates move to 0.9.0 in lockstep for the Arti 2.8.0 (tor-* 0.48)
+update. No public API change (`cargo-semver-checks` against 0.8.0).
+
 ### Changed
 
 - **obfs4**: Arti 0.48 (arti 2.8.0): `tor-cell`, `tor-llcrypto`, `tor-error`
@@ -18,9 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `digest` 0.10 and 0.11, `sha2` 0.10 and 0.11, `sha3` 0.10 and 0.12 on
   purpose: tor-llcrypto's own `rsa` still needs `digest` 0.10, and moving
   `hmac`/`hkdf` to 0.13 is a separate change.
-- **obfs4**: the ntor `verify` and `KEY_SEED` HMAC outputs live in
-  `Zeroizing` buffers and the `auth` input in a `SecretBuf`, so they are wiped
-  on drop.
+- **obfs4**: the ntor `verify` and `KEY_SEED` HMAC outputs are finalized
+  straight into `Zeroizing` buffers (no intermediate output array) and the
+  `auth` input lives in a `SecretBuf`, so they are wiped on drop. The HMAC
+  state itself is not zeroized by `hmac` 0.12.
 - CI runs the Go obfs4 interop (`tools/interop/run.py`) on every PR, not only
   before a release.
 - **obfs4**: `crypto_secretbox` is built without the `heapless` feature (only
