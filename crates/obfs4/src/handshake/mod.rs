@@ -30,6 +30,7 @@ use subtle::ConstantTimeEq;
 use tor_bytes::{EncodeResult, SecretBuf, Writer};
 use tor_error::into_internal;
 use tor_llcrypto::pk::rsa::RsaIdentity;
+use zeroize::Zeroizing;
 
 #[cfg(test)]
 use rand::{CryptoRng, RngCore};
@@ -301,10 +302,10 @@ fn ntor_derive(
     message.write(&suffix[..])?; // b | b | x | y | PROTOID | ID
 
     // verify = HMAC_SHA256(msg, T_VERIFY)
-    let verify = {
+    let verify: Zeroizing<[u8; 32]> = {
         let mut m = Hmac::<Sha256>::new_from_slice(T_VERIFY).expect("Hmac allows keys of any size");
         m.update(&message[..]);
-        m.finalize()
+        Zeroizing::new(m.finalize().into_bytes().into())
     };
 
     // auth_input = verify | (suffix) | "Server"
@@ -312,8 +313,8 @@ fn ntor_derive(
     //
     // Again obfs4 uses all of the same fields (with the servers identity public
     // key duplicated), but in a different order than Ntor V1.
-    let mut auth_input = Vec::new();
-    auth_input.write(&verify.into_bytes()[..])?; // verify
+    let mut auth_input = SecretBuf::new();
+    auth_input.write(&verify[..])?; // verify
     auth_input.write(&suffix[..])?; // b | b | x | y | PROTOID | ID
     auth_input.write(server_string)?; // "Server"
 
@@ -326,13 +327,13 @@ fn ntor_derive(
     let auth: [u8; 32] = auth_mac.into_bytes()[..].try_into().unwrap();
 
     // key_seed = HMAC_SHA256(message, T_KEY)
-    let key_seed_bytes = {
+    let key_seed_bytes: Zeroizing<[u8; 32]> = {
         let mut m = Hmac::<Sha256>::new_from_slice(T_KEY).expect("Hmac allows keys of any size");
         m.update(&message[..]);
-        m.finalize()
+        Zeroizing::new(m.finalize().into_bytes().into())
     };
     let mut key_seed = SecretBuf::new();
-    key_seed.write(&key_seed_bytes.into_bytes()[..])?;
+    key_seed.write(&key_seed_bytes[..])?;
 
     Ok((key_seed, auth))
 }

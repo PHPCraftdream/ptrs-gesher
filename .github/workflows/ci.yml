@@ -101,3 +101,16 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --locked --workspace --examples
+
+  interop:
+    name: Go interop (obfs4)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+          cache-dependency-path: tools/interop/go/go.sum
+      - uses: Swatinem/rust-cache@v2
+      - run: python3 tools/interop/run.py

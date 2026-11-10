@@ -14,7 +14,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   transitively. MSRV stays 1.92. No `tor-*` type is part of the public API.
 - **obfs4**: tor-llcrypto 0.48 hashes with `digest` 0.11; the ntor KDF and
   HMACs keep SHA-256 from `sha2` 0.10 and SHAKE-256 from `sha3` 0.10, next to
-  `hmac`/`hkdf` 0.12. The wire format is unchanged.
+  `hmac`/`hkdf` 0.12. The wire format is unchanged. The tree now has
+  `digest` 0.10 and 0.11, `sha2` 0.10 and 0.11, `sha3` 0.10 and 0.12 on
+  purpose: tor-llcrypto's own `rsa` still needs `digest` 0.10, and moving
+  `hmac`/`hkdf` to 0.13 is a separate change.
+- **obfs4**: the ntor `verify` and `KEY_SEED` HMAC outputs live in
+  `Zeroizing` buffers and the `auth` input in a `SecretBuf`, so they are wiped
+  on drop.
+- CI runs the Go obfs4 interop (`tools/interop/run.py`) on every PR, not only
+  before a release.
 - **obfs4**: `crypto_secretbox` is built without the `heapless` feature (only
   detached in-place sealing is used), which drops `heapless` 0.7 and the
   unmaintained `atomic-polyfill` (RUSTSEC-2023-0089) from the tree.
