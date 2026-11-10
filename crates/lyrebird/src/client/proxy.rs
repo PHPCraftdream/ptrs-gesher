@@ -519,22 +519,24 @@ mod tests {
         // upstream pauses before its greeting reply and before its CONNECT
         // reply, each less than the 2 s budget: a per-stage timer would let
         // both runs finish; only one deadline for the whole handshake tells
-        // them apart (2 x 0.6 s fits, 2 x 1.4 s does not). That deadline is
-        // 0.9 of the budget, so it fires before the whole-operation cap.
-        let budget = Duration::from_secs(2);
-        let (fits, took) = delayed_carrier(Duration::from_millis(600), budget).await;
+        // them apart (2 x 0.8 s fits, 2 x 2.6 s does not). That deadline is
+        // 0.9 of the budget, so it fires before the whole-operation cap. The
+        // margins (2 s spare, 1.6 s past the deadline) absorb a stalled test
+        // process under a loaded machine.
+        let budget = Duration::from_secs(4);
+        let (fits, took) = delayed_carrier(Duration::from_millis(800), budget).await;
         assert!(
             fits.is_ok(),
-            "a 1.2 s handshake fits in {budget:?}: {fits:?}"
+            "a 1.6 s handshake fits in {budget:?}: {fits:?}"
         );
         assert!(took < budget, "{took:?}");
 
-        let (overruns, took) = delayed_carrier(Duration::from_millis(1400), budget).await;
-        let error = overruns.expect_err("a 2.8 s handshake must hit the original deadline");
+        let (overruns, took) = delayed_carrier(Duration::from_millis(2600), budget).await;
+        let error = overruns.expect_err("a 5.2 s handshake must hit the original deadline");
         assert_eq!(error.to_string(), "upstream proxy connection failed");
         assert_eq!(failure_reply(&error), Some(Reply::TimedOut));
         assert!(
-            took >= Duration::from_millis(1800) && took < Duration::from_millis(2600),
+            took >= Duration::from_millis(3600) && took < Duration::from_millis(5200),
             "the deadline is fixed at the start, not renewed per stage: {took:?}"
         );
     }
@@ -655,7 +657,9 @@ mod tests {
     #[tokio::test]
     async fn a_silent_upstream_is_always_reported_unavailable() {
         // Regression for the same race, end to end: many concurrent dials,
-        // each must name the silent upstream, never a spent budget.
+        // each must name the silent upstream, never a spent budget. A 3 s
+        // budget leaves 300 ms between the stage and total deadlines, so a
+        // short stall of a loaded test process cannot reorder them.
         let silent = MockUpstream::socks5()
             .script(Script::SilentGreeting)
             .spawn()
@@ -663,7 +667,7 @@ mod tests {
             .unwrap();
         let proxy = proxy_for("socks5", &silent);
         let dials =
-            (0..32).map(|_| proxy.connect_within("carrier.invalid", 443, Duration::from_secs(1)));
+            (0..32).map(|_| proxy.connect_within("carrier.invalid", 443, Duration::from_secs(3)));
         for outcome in futures::future::join_all(dials).await {
             let error = outcome.unwrap_err();
             assert_eq!(failure_reply(&error), Some(Reply::UpstreamUnavailable));

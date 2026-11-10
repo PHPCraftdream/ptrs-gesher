@@ -22,7 +22,7 @@ use base64::{
     Engine as _,
 };
 use bytes::BytesMut;
-use digest::Mac;
+use digest::{generic_array::GenericArray, FixedOutput, Mac};
 use hmac::Hmac;
 use ptrs::warn;
 use sha2::Sha256;
@@ -302,11 +302,7 @@ fn ntor_derive(
     message.write(&suffix[..])?; // b | b | x | y | PROTOID | ID
 
     // verify = HMAC_SHA256(msg, T_VERIFY)
-    let verify: Zeroizing<[u8; 32]> = {
-        let mut m = Hmac::<Sha256>::new_from_slice(T_VERIFY).expect("Hmac allows keys of any size");
-        m.update(&message[..]);
-        Zeroizing::new(m.finalize().into_bytes().into())
-    };
+    let verify = hmac_sha256_zeroizing(T_VERIFY, &message[..]);
 
     // auth_input = verify | (suffix) | "Server"
     // auth_input = verify | b | b | y | x | PROTOID | ID | "Server"
@@ -327,15 +323,21 @@ fn ntor_derive(
     let auth: [u8; 32] = auth_mac.into_bytes()[..].try_into().unwrap();
 
     // key_seed = HMAC_SHA256(message, T_KEY)
-    let key_seed_bytes: Zeroizing<[u8; 32]> = {
-        let mut m = Hmac::<Sha256>::new_from_slice(T_KEY).expect("Hmac allows keys of any size");
-        m.update(&message[..]);
-        Zeroizing::new(m.finalize().into_bytes().into())
-    };
+    let key_seed_bytes = hmac_sha256_zeroizing(T_KEY, &message[..]);
     let mut key_seed = SecretBuf::new();
     key_seed.write(&key_seed_bytes[..])?;
 
     Ok((key_seed, auth))
+}
+
+/// HMAC-SHA256 finalized straight into a buffer that is wiped on drop, with no
+/// intermediate output array left behind.
+fn hmac_sha256_zeroizing(key: &[u8], data: &[u8]) -> Zeroizing<[u8; 32]> {
+    let mut m = Hmac::<Sha256>::new_from_slice(key).expect("Hmac allows keys of any size");
+    m.update(data);
+    let mut out = Zeroizing::new([0u8; 32]);
+    FixedOutput::finalize_into(m, GenericArray::from_mut_slice(&mut out[..]));
+    out
 }
 
 /// Obfs4 helper trait to ensure that a returned key generator can be used
