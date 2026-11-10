@@ -25,10 +25,10 @@ use bytes::BytesMut;
 use digest::Mac;
 use hmac::Hmac;
 use ptrs::warn;
+use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use tor_bytes::{EncodeResult, SecretBuf, Writer};
 use tor_error::into_internal;
-use tor_llcrypto::d::Sha256;
 use tor_llcrypto::pk::rsa::RsaIdentity;
 
 #[cfg(test)]
@@ -313,7 +313,7 @@ fn ntor_derive(
     // Again obfs4 uses all of the same fields (with the servers identity public
     // key duplicated), but in a different order than Ntor V1.
     let mut auth_input = Vec::new();
-    auth_input.write_and_consume(verify)?; // verify
+    auth_input.write(&verify.into_bytes()[..])?; // verify
     auth_input.write(&suffix[..])?; // b | b | x | y | PROTOID | ID
     auth_input.write(server_string)?; // "Server"
 
@@ -332,7 +332,7 @@ fn ntor_derive(
         m.finalize()
     };
     let mut key_seed = SecretBuf::new();
-    key_seed.write_and_consume(key_seed_bytes)?;
+    key_seed.write(&key_seed_bytes.into_bytes()[..])?;
 
     Ok((key_seed, auth))
 }

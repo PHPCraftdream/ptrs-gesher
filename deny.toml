@@ -24,10 +24,17 @@ confidence-threshold = 0.93
 
 [advisories]
 yanked = "deny"
-unmaintained = "workspace"
-# rsa 0.9.10 (RUSTSEC-2023-0071, Marvin Attack) is pulled in transitively by
-# tor-llcrypto; we don't use RSA directly and cannot upgrade until upstream does.
-ignore = ["RUSTSEC-2023-0071"]
+unmaintained = "all"
+# Transitive dependencies count too, so an unmaintained crate anywhere in the
+# tree fails the check instead of only surfacing in downstream trees.
+ignore = [
+    # rsa 0.9.10 (Marvin Attack) is pulled in by tor-llcrypto 0.48; we don't
+    # use RSA directly and no fixed rsa release exists yet.
+    { id = "RUSTSEC-2023-0071", reason = "rsa via tor-llcrypto, RSA unused here, no fixed release" },
+    # paste 1.0.15 (unmaintained) is a proc-macro used by tor-basic-utils,
+    # tor-cell, tor-error and other tor-* crates at compile time only.
+    { id = "RUSTSEC-2024-0436", reason = "paste via tor-* crates, compile-time macro only" },
+]
 
 [bans]
 multiple-versions = "warn"

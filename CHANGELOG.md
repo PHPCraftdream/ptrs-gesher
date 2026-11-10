@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **obfs4**: Arti 0.48 (arti 2.8.0): `tor-cell`, `tor-llcrypto`, `tor-error`
+  and `tor-bytes` move from 0.47 to 0.48, and the other `tor-*` crates follow
+  transitively. MSRV stays 1.92. No `tor-*` type is part of the public API.
+- **obfs4**: tor-llcrypto 0.48 hashes with `digest` 0.11; the ntor KDF and
+  HMACs keep SHA-256 from `sha2` 0.10 and SHAKE-256 from `sha3` 0.10, next to
+  `hmac`/`hkdf` 0.12. The wire format is unchanged.
+- **obfs4**: `crypto_secretbox` is built without the `heapless` feature (only
+  detached in-place sealing is used), which drops `heapless` 0.7 and the
+  unmaintained `atomic-polyfill` (RUSTSEC-2023-0089) from the tree.
+- `deny.toml`: `unmaintained = "all"` checks transitive dependencies too.
+  Ignored with a reason: RUSTSEC-2023-0071 (`rsa` via tor-llcrypto, still no
+  fixed release) and RUSTSEC-2024-0436 (`paste`, a compile-time macro of the
+  `tor-*` crates). The semver baseline is 0.8.0.
+
+### Documentation
+
+- `README.md`: parity with Go lyrebird v0.10.0 for obfs4 and WebTunnel,
+  including the WebTunnel arguments not ported yet.
+
 ## [0.8.0] - 2026-11-08
 
 All six crates move to 0.8.0 in lockstep.

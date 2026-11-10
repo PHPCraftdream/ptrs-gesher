@@ -67,6 +67,25 @@ webtunnel = { package = "ptrs-gesher-webtunnel", version = "0.8.0" }
 | Dropped: `o5`, `o7`, lyrebird `fwd/` forward-proxy binary | Upstream-WIP / scope unrelated to bridge transport. |
 | New crate `ptrs-gesher-bridge-line` | torrc bridge-line parser usable by the transports themselves. |
 
+## Parity with Go lyrebird
+
+Checked against [lyrebird](https://gitlab.torproject.org/tpo/anti-censorship/pluggable-transports/lyrebird)
+v0.10.0 (2026-11-04), the Tor Project's Go implementation:
+
+- **obfs4**: wire-compatible with lyrebird v0.10.0. Its obfs4 code has had no
+  protocol change since the Elligator 2 fix of obfs4proxy 0.0.14 (later commits
+  are renames and event logging). Interop runs in CI against Go obfs4 at commit
+  `c3e2d44` (see [docs/VALIDATION.md](docs/VALIDATION.md)).
+- **WebTunnel**: matches the lyrebird 0.6.x client arguments `url`,
+  `servername` (one name) and `addr`; `ver` from bridge lines is accepted.
+  Not ported: uTLS fingerprints (`utls=` is accepted and ignored; TLS uses
+  rustls with the webpki roots), and from lyrebird 0.7.0 certificate hash
+  chain pinning (`cert`), `cert-domain`, several server names and
+  `sni-imitation`. `doh-mode` is our own addition.
+- lyrebird v0.10.0 changes only snowflake (2.15.3) and a test, so there is
+  nothing to port from it. meek, snowflake, obfs2/3 and ScrambleSuit are not
+  implemented here.
+
 ## Status
 
 - Workspace builds on stable Rust ≥ 1.92.
