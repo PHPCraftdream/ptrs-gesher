@@ -23,7 +23,7 @@ const READ_STALL_GUARD: Duration = Duration::from_secs(30);
 async fn public_handshake() -> Result<()> {
     init_subscriber();
     let (mut c, mut s) = tokio::io::duplex(65_536);
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     let o4_server = Server::new_from_random(&mut rng);
     let client_config = o4_server.client_params();
@@ -44,7 +44,7 @@ async fn public_iface() -> Result<()> {
     init_subscriber();
     let message = b"awoewaeojawenwaefaw lfawn;awe da;wfenalw fawf aw";
     let (mut c, mut s) = tokio::io::duplex(65_536);
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     let o4_server = Server::new_from_random(&mut rng);
     let client_config = o4_server.client_params();
@@ -101,7 +101,7 @@ async fn transfer_10k_x1() -> Result<()> {
     init_subscriber();
 
     let (c, mut s) = tokio::io::duplex(1024 * 1000);
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     let o4_server = Server::new_from_random(&mut rng);
     let client_config = o4_server.client_params();
@@ -283,7 +283,7 @@ async fn transfer_1M_1024x1024() -> Result<()> {
     init_subscriber();
 
     let (c, mut s) = tokio::io::duplex(1024 * 1000);
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     let o4_server = Server::new_from_random(&mut rng);
     let client_config = o4_server.client_params();
@@ -370,7 +370,7 @@ async fn transfer_512k_x1() -> Result<()> {
     init_subscriber();
 
     let (c, mut s) = tokio::io::duplex(1024 * 512);
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     let o4_server = Server::new_from_random(&mut rng);
     let client_config = o4_server.client_params();
@@ -463,7 +463,7 @@ async fn transfer_3M_real_tcp() -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     let o4_server = Server::new_from_random(&mut rng);
     let client_config = o4_server.client_params();
@@ -527,7 +527,7 @@ async fn transfer_3M_real_tcp_small_writes() -> Result<()> {
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
     let addr = listener.local_addr()?;
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     let o4_server = Server::new_from_random(&mut rng);
     let client_config = o4_server.client_params();
@@ -581,7 +581,7 @@ async fn transfer_2_x() -> Result<()> {
     init_subscriber();
 
     let (c, mut s) = tokio::io::duplex(1024 * 1000);
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     let o4_server = Server::new_from_random(&mut rng);
     let client_config = o4_server.client_params();

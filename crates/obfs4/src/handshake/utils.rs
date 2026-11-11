@@ -2,7 +2,7 @@ use crate::{constants::*, Result};
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use rand_core::RngCore;
+use rand_core::Rng;
 use subtle::ConstantTimeEq;
 
 use ptrs::trace; // , trace};
@@ -21,10 +21,8 @@ pub fn get_epoch_hour() -> u64 {
 pub fn make_hs_pad(pad_len: usize) -> Result<Vec<u8>> {
     trace!("[make_hs_pad] generating {pad_len}B");
     let mut pad = vec![u8::default(); pad_len];
-    // A CSPRNG failure while generating handshake padding is unrecoverable.
-    rand::thread_rng()
-        .try_fill_bytes(&mut pad)
-        .expect("system RNG failure");
+    // ThreadRng is infallible; a seeding failure panics inside `rand::rng()`.
+    rand::rng().fill_bytes(&mut pad);
     Ok(pad)
 }
 

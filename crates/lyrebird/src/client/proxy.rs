@@ -1,11 +1,9 @@
 use std::{io, sync::Arc, time::Duration};
 
-use percent_encoding::percent_decode_str;
-use resocks5_net::connect::{dial_tcp, DialOptions};
+use resocks5_net::connect::{dial_tcp, DialOptions, ProxyUriOptions};
 use resocks5_net::server::Reply;
 use resocks5_net::types::{ProxyConfig, ProxyProtocol};
 use tokio::net::TcpStream;
-use url::Url;
 
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
 /// Dead-peer detection on the upstream socket: idle time and probe interval.
@@ -74,64 +72,47 @@ impl Proxy {
     /// [`AuthMode`] for how it reaches the upstream. Secure-only mode without
     /// credentials is a configuration error.
     pub(crate) fn parse_with(input: &str, mode: AuthMode) -> Result<Self, ()> {
-        let (protocol, scheme, authority) = if let Some(authority) = input.strip_prefix("socks5://")
-        {
-            (ProxyProtocol::Socks5, "socks5", authority)
-        } else if let Some(authority) = input.strip_prefix("http://") {
-            (
-                ProxyProtocol::Http,
-                "http",
-                authority.strip_suffix('/').unwrap_or(authority),
-            )
+        // The SDK also takes `socks5h`, `https` and any letter case; the PT
+        // spec names lowercase `socks5`/`http`, and only HTTP gets a trailing `/`.
+        let protocol = if let Some(rest) = input.strip_prefix("socks5://") {
+            if rest.ends_with('/') {
+                return Err(());
+            }
+            ProxyProtocol::Socks5
+        } else if input.starts_with("http://") {
+            ProxyProtocol::Http
         } else {
             return Err(());
         };
-        if authority.is_empty()
-            || authority.bytes().any(|byte| {
-                byte <= 0x20 || byte == 0x7f || matches!(byte, b'/' | b'?' | b'#' | b'\\')
-            })
-        {
+        // IP literal host (PT spec §3.3.2), required port, no path/query/
+        // fragment; credentials checked per protocol by the SDK.
+        let options = ProxyUriOptions::new()
+            .ip_literal_only(true)
+            .allow_trailing_slash(true)
+            .validate_auth(true);
+        let mut config = ProxyConfig::from_uri_with(input, &options).map_err(|_| ())?;
+        if config.protocol != protocol {
             return Err(());
         }
-        let (userinfo, hostport) = match authority.rsplit_once('@') {
-            Some((user, host)) if !user.contains('@') => (Some(user), host),
-            Some(_) => return Err(()),
-            None => (None, authority),
-        };
-        let address: std::net::SocketAddr = hostport.parse().map_err(|_| ())?;
-        if address.port() == 0 {
-            return Err(());
-        }
-        let parsed = Url::parse(input).map_err(|_| ())?;
-        if parsed.scheme() != scheme
-            || parsed.host().is_none()
-            || parsed.port_or_known_default() != Some(address.port())
-            || parsed.query().is_some()
-            || parsed.fragment().is_some()
-            || (!parsed.path().is_empty()
-                && !(protocol == ProxyProtocol::Http && parsed.path() == "/"))
-        {
-            return Err(());
-        }
-        let mut config = ProxyConfig::new(protocol, address.ip().to_string(), address.port());
         config.validate_node().map_err(|_| ())?;
-        match userinfo {
-            Some(info) => {
-                let (username, password) = info.split_once(':').ok_or(())?;
-                let username = decode(username)?;
-                let password = decode(password)?;
-                // RFC 1929 field limits for both protocols; the SDK adds the
-                // HTTP rules (no `:` in the user, no control characters).
+        match (config.user.as_deref(), config.password.as_deref()) {
+            (Some(username), Some(password)) => {
+                // RFC 1929 field limits for HTTP too: the SDK enforces them
+                // only for SOCKS5.
                 if !(1..=255).contains(&username.len()) || !(1..=255).contains(&password.len()) {
+                    config.wipe_credentials();
                     return Err(());
                 }
-                config = config.try_with_auth(username, password).map_err(|_| ())?;
                 if mode == AuthMode::SecureOnly {
                     config = config.secure_only();
                 }
             }
-            None if mode == AuthMode::SecureOnly => return Err(()),
-            None => {}
+            (None, None) if mode == AuthMode::SecureOnly => return Err(()),
+            (None, None) => {}
+            _ => {
+                config.wipe_credentials();
+                return Err(());
+            }
         }
         Ok(Self { config })
     }
@@ -168,9 +149,9 @@ impl Drop for Proxy {
     }
 }
 
-/// Stage timers end strictly before the whole-operation deadline: equal
-/// deadlines race, and the losing timer decides between REP=4 (silent
-/// upstream) and REP=6 (budget spent) at random.
+/// Stage timers end strictly before the whole-operation deadline: the SDK
+/// reports a tie as the total deadline (REP=6), and only a strictly tighter
+/// stage bound names a silent upstream (REP=4).
 fn dial_options(budget: Duration) -> DialOptions {
     let stage = budget - budget / 10;
     DialOptions::new()
@@ -215,28 +196,6 @@ pub(crate) fn failure_reply(error: &io::Error) -> Option<Reply> {
 /// bytes (CR/LF injection) must never reach the upstream proxy.
 fn valid_target_host(host: &str) -> bool {
     !host.is_empty() && !host.bytes().any(|b| b <= 0x20 || b == 0x7f)
-}
-
-fn decode(value: &str) -> Result<String, ()> {
-    let bytes = value.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'%' {
-            if index + 2 >= bytes.len()
-                || !bytes[index + 1].is_ascii_hexdigit()
-                || !bytes[index + 2].is_ascii_hexdigit()
-            {
-                return Err(());
-            }
-            index += 3;
-        } else {
-            index += 1;
-        }
-    }
-    percent_decode_str(value)
-        .decode_utf8()
-        .map(|s| s.into_owned())
-        .map_err(|_| ())
 }
 
 #[cfg(test)]
@@ -350,6 +309,14 @@ mod tests {
             "http://127.0.0.1",
             "socks5://127.0.0.1:65536",
             "SOCKS5://127.0.0.1:1080",
+            "HTTP://127.0.0.1:8080",
+            // Schemes the SDK parser knows but `TOR_PT_PROXY` does not use.
+            "socks5h://127.0.0.1:1080",
+            "socks4a://127.0.0.1:1080",
+            // Only HTTP tolerates a trailing slash.
+            "socks5://127.0.0.1:1080/",
+            "socks5://u:p@127.0.0.1:1080/",
+            "socks5://user@127.0.0.1:1080",
             "socks5://u:p@127.0.0.1:1080 ",
             "socks5://u:p\r\n@127.0.0.1:1080",
         ] {

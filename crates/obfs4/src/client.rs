@@ -493,9 +493,9 @@ impl Client {
 
     /// Variant of [`Client::establish`] parameterised by the keygen closure.
     /// Production callers go through `establish`, which fixes the closure to
-    /// `Keys::ephemeral_from_rng(rand::thread_rng())`. The seam exists so the
+    /// `Keys::ephemeral_from_rng(rand::rng())`. The seam exists so the
     /// order invariant (keygen MUST run before `stream_fut.await`) is testable
-    /// without instrumenting `rand::thread_rng` itself — a test can pass a
+    /// without instrumenting `rand::rng` itself — a test can pass a
     /// counting closure and a `stream_fut` that records its first poll, then
     /// assert keygen completed before the dial began.
     pub(crate) async fn establish_with_keygen<'a, T, E, F>(
@@ -523,7 +523,7 @@ impl Client {
         // variable, network-observable gap between TCP handshake and the
         // first byte that a censor can fingerprint. Pre-generating moves
         // that variance entirely before the wire is touched.
-        let ephem = keygen(rand::thread_rng())?;
+        let ephem = keygen(rand::rng())?;
 
         tokio::time::timeout_at(budget, async {
             let stream = stream_fut.await.map_err(|e| Error::Other(Box::new(e)))?;

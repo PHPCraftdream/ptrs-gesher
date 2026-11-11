@@ -592,14 +592,14 @@ impl Server {
     }
 
     /// Construct a server with a freshly generated identity key from the provided RNG.
-    pub fn new_from_random<R: RngCore + CryptoRng>(mut rng: R) -> Self {
+    pub fn new_from_random<R: CryptoRng>(mut rng: R) -> Self {
         let mut id = [0_u8; 20];
         // Random bytes will work for testing, but aren't necessarily actually a valid id.
         rng.fill_bytes(&mut id);
 
         // Generated identity secret key does not need to be elligator2 representable
         // so we can use the regular dalek_x25519 key generation.
-        let sk = StaticSecret::random_from_rng(rng);
+        let sk = StaticSecret::random_from_rng(&mut rng);
 
         let pk = Obfs4NtorPublicKey {
             pk: PublicKey::from(&sk),
@@ -735,7 +735,7 @@ impl Server {
         &self,
     ) -> Result<sessions::ServerSession<sessions::Initialized>> {
         let mut session_id = [0u8; SESSION_ID_LEN];
-        rand::thread_rng().fill_bytes(&mut session_id);
+        rand::rng().fill_bytes(&mut session_id);
         let len_seed = self
             .0
             .drbg_seed

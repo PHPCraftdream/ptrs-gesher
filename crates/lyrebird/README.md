@@ -121,7 +121,7 @@ never verifies or forwards them, and wipes them on drop. The `resocks5-net`
 server checks credentials against a secret store and has no framing-only mode,
 so this parser is lyrebird's own.
 HTTPS-to-proxy is not enabled by this interface. The upstream protocol
-implementation comes from `resocks5-net` 0.5.1; only the small loopback parser
+implementation comes from `resocks5-net` 0.5.2; only the small loopback parser
 for the parent's request is kept here.
 
 ## License

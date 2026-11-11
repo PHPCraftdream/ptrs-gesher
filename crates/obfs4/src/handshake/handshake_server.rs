@@ -8,7 +8,6 @@ use crate::{
 };
 
 use ptrs::{debug, trace};
-use rand::thread_rng;
 use tokio_util::codec::Encoder;
 
 use std::time::Instant;
@@ -52,7 +51,7 @@ impl Server {
     where
         T: AsRef<[u8]>,
     {
-        let rng = thread_rng();
+        let rng = rand::rng();
         let session_sk = Keys::ephemeral_from_rng(rng)
             .map_err(into_internal!("failed to derive elligator2 server keypair"))?;
 
@@ -333,7 +332,8 @@ mod epoch_window_tests {
 
     use super::*;
     use crate::common::x25519_elligator2::{EphemeralSecret, Keys};
-    use rand::rngs::OsRng;
+    use rand::rngs::SysRng;
+    use rand_core::UnwrapErr;
 
     /// Reproduce the exact client-hello wire format
     /// `X | P_C | M_C | MAC(X | P_C | M_C | E)` for an explicit epoch hour `E`.
@@ -380,7 +380,7 @@ mod epoch_window_tests {
     /// the same MAC accepted at `base = E` would otherwise be rejected as a
     /// replay when re-checked at `base = E±1`.
     fn server_and_hello_for_epoch(e: u64) -> (Server, Vec<u8>, HandshakeMaterials) {
-        let mut rng = OsRng;
+        let mut rng = UnwrapErr(SysRng);
         let identity = Obfs4NtorSecretKey::generate_for_test(&mut rng);
         let server = Server::new_from_key(identity.clone());
 

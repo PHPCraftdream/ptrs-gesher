@@ -23,7 +23,7 @@ use std::io::{Error as IoError, ErrorKind as IoErrorKind};
 
 use bytes::BytesMut;
 use ptrs::{debug, info, trace};
-use rand_core::RngCore;
+use rand_core::Rng;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::time::Instant;
 
@@ -151,10 +151,10 @@ pub(crate) fn new_client_session(
     station_pubkey: Obfs4NtorPublicKey,
     iat_mode: IAT,
 ) -> ClientSession<Initialized> {
-    new_client_session_with_rng(station_pubkey, iat_mode, &mut rand::thread_rng())
+    new_client_session_with_rng(station_pubkey, iat_mode, &mut rand::rng())
 }
 
-pub(crate) fn new_client_session_with_rng<R: RngCore>(
+pub(crate) fn new_client_session_with_rng<R: Rng>(
     station_pubkey: Obfs4NtorPublicKey,
     iat_mode: IAT,
     rng: &mut R,
@@ -667,9 +667,9 @@ mod tests {
 
     #[test]
     fn deterministic_rng_produces_same_session_id() {
-        use rand::rngs::mock::StepRng;
-        let mut rng1 = StepRng::new(42, 1);
-        let mut rng2 = StepRng::new(42, 1);
+        use rand::{rngs::StdRng, SeedableRng};
+        let mut rng1 = StdRng::seed_from_u64(42);
+        let mut rng2 = StdRng::seed_from_u64(42);
         let s1 = new_client_session_with_rng(test_pubkey(), IAT::Off, &mut rng1);
         let s2 = new_client_session_with_rng(test_pubkey(), IAT::Off, &mut rng2);
         assert_eq!(s1.session_id, s2.session_id);
@@ -677,9 +677,9 @@ mod tests {
 
     #[test]
     fn different_rng_produces_different_session_id() {
-        use rand::rngs::mock::StepRng;
-        let mut rng1 = StepRng::new(1, 1);
-        let mut rng2 = StepRng::new(999, 1);
+        use rand::{rngs::StdRng, SeedableRng};
+        let mut rng1 = StdRng::seed_from_u64(1);
+        let mut rng2 = StdRng::seed_from_u64(999);
         let s1 = new_client_session_with_rng(test_pubkey(), IAT::Off, &mut rng1);
         let s2 = new_client_session_with_rng(test_pubkey(), IAT::Off, &mut rng2);
         assert_ne!(s1.session_id, s2.session_id);

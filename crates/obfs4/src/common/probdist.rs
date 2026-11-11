@@ -15,7 +15,7 @@ use std::collections::VecDeque;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
-use rand::{seq::SliceRandom, Rng};
+use rand::{seq::SliceRandom, Rng, RngExt};
 
 const MIN_VALUES: i32 = 1;
 const MAX_VALUES: i32 = 100;
@@ -61,13 +61,13 @@ impl WeightedDist {
         let mut buf = [0_u8; 16];
         // Both random draws are independent OS-CSPRNG output. Keep this
         // outside the mutex so sampling does not hold the lock during I/O.
-        getrandom::getrandom(&mut buf).expect("system RNG failure during obfs4 length sampling");
+        getrandom::fill(&mut buf).expect("system RNG failure during obfs4 length sampling");
 
         let dist = self.0.lock().unwrap();
 
         // Invariant: `values`/`prob`/`alias` are non-empty after construction.
         // `WeightedDist::new` always calls `reseed`, which calls `gen_values`,
-        // and `gen_values` picks `rng.gen_range(1..=n)` (with `n >= MIN_VALUES`
+        // and `gen_values` picks `rng.random_range(1..=n)` (with `n >= MIN_VALUES`
         // == 1) entries — so `values.len() >= 1`. The `% values.len()` below and
         // the `prob[i]`/`alias[i]` indexing rely on this; assert it so a future
         // refactor that breaks the invariant fails loudly instead of panicking
@@ -133,7 +133,7 @@ impl InnerWeightedDist {
         n_values = max(n_values, MIN_VALUES);
         n_values = min(n_values, MAX_VALUES);
 
-        let n_values = rng.gen_range(1..=n_values) as usize;
+        let n_values = rng.random_range(1..=n_values) as usize;
         self.values = values[..n_values].to_vec();
     }
 
@@ -144,7 +144,7 @@ impl InnerWeightedDist {
 
         let mut cumul_prob: f64 = 0.0;
         for i in 0..self.weights.len() {
-            self.weights[i] = (1.0 - cumul_prob) * rng.gen::<f64>();
+            self.weights[i] = (1.0 - cumul_prob) * rng.random::<f64>();
             cumul_prob += self.weights[i];
         }
     }
@@ -154,7 +154,7 @@ impl InnerWeightedDist {
         self.weights = vec![0_f64; self.values.len()];
 
         for i in 0..self.weights.len() {
-            self.weights[i] = rng.gen();
+            self.weights[i] = rng.random();
         }
     }
 

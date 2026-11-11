@@ -68,7 +68,7 @@ impl InnerReplayFilter {
     fn new(ttl_limit: Duration, max_cap: usize) -> Self {
         let mut key = [0_u8; 16];
         // SipHash key for the filter; a CSPRNG failure here is unrecoverable.
-        getrandom::getrandom(&mut key).expect("system RNG failure seeding replay filter key");
+        getrandom::fill(&mut key).expect("system RNG failure seeding replay filter key");
 
         Self {
             filter: HashSet::new(),

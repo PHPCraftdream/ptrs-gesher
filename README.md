@@ -44,7 +44,7 @@ All crates are dual-licensed `MIT OR Apache-2.0`.
 ## Crate names and migration
 
 Cross-crate dependencies use Cargo's `package =` rename so consumers continue
-to `use ptrs::...`, `use obfs4::...`, etc. Version 0.9.0 moves to Arti 2.8.0 (tor-* 0.48); 0.8.0 added upstream proxy (`TOR_PT_PROXY`) support to
+to `use ptrs::...`, `use obfs4::...`, etc. Version 0.10.0 moves obfs4 to the RustCrypto generation Arti 2.8.0 uses (breaking: `rand_core` 0.10 in its RNG bounds); 0.9.0 moved to Arti 2.8.0 (tor-* 0.48); 0.8.0 added upstream proxy (`TOR_PT_PROXY`) support to
 lyrebird and replaced `fast-socks5` with `resocks5-net`; version 0.7.0 moved to Arti 2.7.0 (tor-* 0.47).
 Version 0.6 included API and
 behavior changes; see [the migration guide](docs/MIGRATING-0.6.md) when updating
@@ -52,9 +52,9 @@ from 0.5.x or upstream. Dependency names can remain unchanged:
 
 ```toml
 [dependencies]
-ptrs    = { package = "ptrs-gesher-core",   version = "0.9.0" }
-obfs4   = { package = "ptrs-gesher-obfs4",  version = "0.9.0" }
-webtunnel = { package = "ptrs-gesher-webtunnel", version = "0.9.0" }
+ptrs    = { package = "ptrs-gesher-core",   version = "0.10.0" }
+obfs4   = { package = "ptrs-gesher-obfs4",  version = "0.10.0" }
+webtunnel = { package = "ptrs-gesher-webtunnel", version = "0.10.0" }
 ```
 
 ## Differences from upstream
@@ -90,7 +90,7 @@ v0.10.0 (2026-11-04), the Tor Project's Go implementation:
 
 - Workspace builds on stable Rust ≥ 1.92.
 - Unit, integration, property, and protocol tests run in CI.
-- All six crates are versioned in lockstep at 0.9.0.
+- All six crates are versioned in lockstep at 0.10.0.
 - Real Tor HTTPS smoke tests complement the offline protocol tests. They measure
   functional connectivity, not long-term availability under every network condition.
 

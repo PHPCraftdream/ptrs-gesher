@@ -1,6 +1,6 @@
 [package]
 name = "ptrs-gesher-lyrebird"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"
@@ -33,9 +33,9 @@ bench = false
 
 [dependencies]
 ## internal crates
-ptrs = { package = "ptrs-gesher-core", path = "../core", version = "0.9.0" }
-obfs4 = { package = "ptrs-gesher-obfs4", path = "../obfs4", version = "0.9.0" }
-webtunnel = { package = "ptrs-gesher-webtunnel", path = "../webtunnel", version = "0.9.0" }
+ptrs = { package = "ptrs-gesher-core", path = "../core", version = "0.10.0" }
+obfs4 = { package = "ptrs-gesher-obfs4", path = "../obfs4", version = "0.10.0" }
+webtunnel = { package = "ptrs-gesher-webtunnel", path = "../webtunnel", version = "0.10.0" }
 
 # shared deps
 
@@ -45,12 +45,10 @@ async-trait = "0.1"
 clap = { version = "4.5", features = ["derive"]}
 # secure-auth: a TOR_PT_PROXY password is proven with SOCKS5 method 0x80 when the
 # upstream supports it (always, with LYREBIRD_PROXY_AUTH=secure).
-resocks5-net = { version = "0.5.1", default-features = false, features = ["zeroize", "secure-auth"] }
+resocks5-net = { version = "0.5.2", default-features = false, features = ["zeroize", "secure-auth"] }
 base64 = "0.23.1"
 # Wipe the parent's PT arguments (bridge secrets) when dropped.
 zeroize = "1"
-url = "2.5.8"
-percent-encoding = "2.3.2"
 log = "0.4.34"
 # TCP keepalive on the outgoing bridge dial (already in-tree via tokio).
 socket2 = "0.6"
@@ -80,7 +78,7 @@ windows-sys = { version = "0.61.2", features = [
 # lyrebird deps
 
 [dev-dependencies]
-resocks5-net = { version = "0.5.1", default-features = false, features = ["zeroize", "secure-auth", "test-instrumentation"] }
+resocks5-net = { version = "0.5.2", default-features = false, features = ["zeroize", "secure-auth", "test-instrumentation"] }
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-util", "test-util"] }
 

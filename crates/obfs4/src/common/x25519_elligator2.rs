@@ -8,7 +8,6 @@
 // its items would pin our semver to it forever. These traits are an internal
 // implementation detail of the elligator2 mapping and stay private.
 use curve25519_elligator2::{MapToPointVariant, Randomized};
-use getrandom::getrandom;
 // `StaticSecret`/`SharedSecret` are needed by other modules in this crate but
 // are not part of the stable public API, so they are crate-private re-exports.
 pub(crate) use x25519_dalek::{SharedSecret, StaticSecret};
@@ -44,7 +43,7 @@ impl EphemeralSecret {
     ///
     /// Convenience wrapper that panics on RNG failure; security-sensitive callers
     /// should use [`Keys::ephemeral_from_rng`] which returns a `Result`.
-    pub fn random_from_rng<T: RngCore + CryptoRng>(csprng: T) -> Self {
+    pub fn random_from_rng<T: CryptoRng>(csprng: T) -> Self {
         Keys::ephemeral_from_rng(csprng).expect("CSPRNG failed for elligator2 keygen")
     }
 
@@ -170,7 +169,7 @@ impl From<PublicRepresentative> for PublicKey {
     }
 }
 
-use rand_core::{CryptoRng, RngCore};
+use rand_core::CryptoRng;
 
 /// Length in bytes of an elligator2 public key representative.
 pub const REPRESENTATIVE_LENGTH: usize = 32;
@@ -189,7 +188,7 @@ impl RetryLimit for Keys {}
 #[allow(unused)]
 impl Keys {
     /// Generate a new Elligator2 representable ['StaticSecret'] with the supplied RNG.
-    pub fn static_from_rng<R: RngCore + CryptoRng>(mut rng: R) -> StaticSecret {
+    pub fn static_from_rng<R: CryptoRng>(mut rng: R) -> StaticSecret {
         StaticSecret::random_from_rng(&mut rng)
     }
 
@@ -204,7 +203,7 @@ impl Keys {
     /// representable point. With a sound CSPRNG this should be statistically
     /// unreachable, but the error surface keeps the server's handshake path from
     /// panicking on hostile input or RNG starvation.
-    pub fn ephemeral_from_rng<R: RngCore + CryptoRng>(mut csprng: R) -> Result<EphemeralSecret> {
+    pub fn ephemeral_from_rng<R: CryptoRng>(mut csprng: R) -> Result<EphemeralSecret> {
         // Re-roll private *and* tweak each iteration: the same tweak with the
         // same RNG output would otherwise be retried forever in the unlikely
         // case the initial pair maps to None.
@@ -233,7 +232,7 @@ impl Keys {
         for _ in 0..Self::RETRY_LIMIT {
             let private = StaticSecret::random();
             let mut tweak = [0u8];
-            getrandom(&mut tweak)?;
+            getrandom::fill(&mut tweak)?;
 
             let repres: Option<[u8; 32]> =
                 Randomized::to_representative(&private.to_bytes(), tweak[0]).into();
@@ -258,7 +257,7 @@ mod test {
     };
     use hex::FromHex;
 
-    use rand::Rng;
+    use rand::RngExt;
 
     #[test]
     fn representative_match() {
@@ -281,7 +280,7 @@ mod test {
     /// should statiscally never fail to generate a representable key.
     #[test]
     fn about_half() -> Result<()> {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         let mut success = 0;
         let mut not_found = 0;
@@ -345,9 +344,9 @@ mod test {
 
     // Generates a new Keypair using, and returns the public key representative
     // along, with its public key as a newly allocated edwards25519.Point.
-    fn generate<R: RngCore + CryptoRng>(rng: &mut R) -> ([u8; 32], EdwardsPoint) {
+    fn generate<R: CryptoRng>(rng: &mut R) -> ([u8; 32], EdwardsPoint) {
         for _ in 0..63 {
-            let y_sk = rng.gen::<[u8; 32]>();
+            let y_sk = rng.random::<[u8; 32]>();
 
             let y_repr_bytes = match Randomized::to_representative(&y_sk, 0xff).into() {
                 Some(r) => r,
@@ -411,7 +410,7 @@ mod test {
     fn keys_ephemeral_from_rng_returns_ok_on_happy_path() {
         // Regression: the security-sensitive server handshake path calls
         // Keys::ephemeral_from_rng; it must return Ok on a healthy CSPRNG.
-        let result = Keys::ephemeral_from_rng(rand::thread_rng());
+        let result = Keys::ephemeral_from_rng(rand::rng());
         assert!(result.is_ok(), "expected Ok from healthy CSPRNG");
 
         let result = Keys::random_ephemeral();
@@ -432,7 +431,7 @@ mod test {
     fn off_subgroup_check_edw() {
         let mut count = 0;
         let n_trials = 100;
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
         for _ in 0..n_trials {
             let (repr, pk) = generate(&mut rng);
 

@@ -11,7 +11,7 @@ use crate::{
 use bytes::BufMut;
 use hmac::Mac;
 use ptrs::trace;
-use rand::Rng;
+use rand::RngExt;
 
 // -----------------------------[ Server ]-----------------------------
 
@@ -33,7 +33,7 @@ impl ServerHandshakeMessage {
     ) -> Self {
         Self {
             server_auth,
-            pad_len: rand::thread_rng().gen_range(SERVER_MIN_PAD_LENGTH..SERVER_MAX_PAD_LENGTH),
+            pad_len: rand::rng().random_range(SERVER_MIN_PAD_LENGTH..SERVER_MAX_PAD_LENGTH),
             repres,
             pubkey: None,
             epoch_hour: epoch_hr,
@@ -187,7 +187,7 @@ impl ClientHandshakeMessage {
 mod tests {
     use super::*;
     use bytes::BytesMut;
-    use hmac::Mac;
+    use hmac::KeyInit;
 
     fn test_repres() -> PublicRepresentative {
         PublicRepresentative::from([0x42u8; 32])

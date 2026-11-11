@@ -22,8 +22,8 @@ use base64::{
     Engine as _,
 };
 use bytes::BytesMut;
-use digest::{generic_array::GenericArray, FixedOutput, Mac};
-use hmac::Hmac;
+use digest::{FixedOutput, Mac};
+use hmac::{Hmac, KeyInit};
 use ptrs::warn;
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
@@ -33,7 +33,7 @@ use tor_llcrypto::pk::rsa::RsaIdentity;
 use zeroize::Zeroizing;
 
 #[cfg(test)]
-use rand::{CryptoRng, RngCore};
+use rand::{CryptoRng, Rng};
 
 mod handshake_client;
 mod handshake_server;
@@ -168,15 +168,8 @@ impl std::string::ToString for Obfs4NtorPublicKey {
 pub(crate) struct Obfs4NtorSecretKey {
     /// The relay's public key information
     pub(crate) pk: Obfs4NtorPublicKey,
-    /// The secret onion key.
+    /// The secret onion key; `StaticSecret` wipes itself on drop.
     pub(crate) sk: StaticSecret,
-}
-
-impl Drop for Obfs4NtorSecretKey {
-    fn drop(&mut self) {
-        use zeroize::Zeroize;
-        self.sk.zeroize();
-    }
 }
 
 impl Obfs4NtorSecretKey {
@@ -194,13 +187,13 @@ impl Obfs4NtorSecretKey {
     pub(crate) fn getrandom() -> Self {
         let sk = Keys::random_static();
         let mut id = [0_u8; NODE_ID_LENGTH];
-        getrandom::getrandom(&mut id).expect("internal randomness error");
+        getrandom::fill(&mut id).expect("internal randomness error");
         Self::new(sk, RsaIdentity::from(id))
     }
 
     /// Generate a key using the given `rng`, suitable for testing.
     #[cfg(test)]
-    pub(crate) fn generate_for_test<R: RngCore + CryptoRng>(rng: &mut R) -> Self {
+    pub(crate) fn generate_for_test<R: CryptoRng>(rng: &mut R) -> Self {
         let mut id = [0_u8; 20];
         // Random bytes will work for testing, but aren't necessarily actually a valid id.
         rng.fill_bytes(&mut id);
@@ -336,7 +329,7 @@ fn hmac_sha256_zeroizing(key: &[u8], data: &[u8]) -> Zeroizing<[u8; 32]> {
     let mut m = Hmac::<Sha256>::new_from_slice(key).expect("Hmac allows keys of any size");
     m.update(data);
     let mut out = Zeroizing::new([0u8; 32]);
-    FixedOutput::finalize_into(m, GenericArray::from_mut_slice(&mut out[..]));
+    FixedOutput::finalize_into(m, (&mut *out).into());
     out
 }
 

@@ -1,11 +1,12 @@
 use crate::Result;
 
 use colored::Colorize;
-use hmac::Hmac;
+use hmac::HmacReset;
 use sha2::Sha256;
 
 pub(crate) mod ct;
 pub(crate) mod kdf;
+pub(crate) mod secretbox;
 
 mod skip;
 pub use skip::discard;
@@ -30,7 +31,7 @@ pub trait ArgParse {
     fn parse_args() -> Result<Self::Output>;
 }
 
-pub(crate) type HmacSha256 = Hmac<Sha256>;
+pub(crate) type HmacSha256 = HmacReset<Sha256>;
 
 pub(crate) fn colorize(b: impl AsRef<[u8]>) -> String {
     let id = b.as_ref();
