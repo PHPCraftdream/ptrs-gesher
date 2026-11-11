@@ -8,7 +8,7 @@ use crate::{
 };
 
 use ptrs::{debug, trace};
-use rand::Rng;
+use rand::RngExt;
 
 /// materials required to initiate a handshake from the client role.
 #[derive(Debug, Clone, PartialEq)]
@@ -23,7 +23,7 @@ impl HandshakeMaterials {
         HandshakeMaterials {
             node_pubkey,
             session_id,
-            pad_len: rand::thread_rng().gen_range(CLIENT_MIN_PAD_LENGTH..CLIENT_MAX_PAD_LENGTH),
+            pad_len: rand::rng().random_range(CLIENT_MIN_PAD_LENGTH..CLIENT_MAX_PAD_LENGTH),
         }
     }
 }
@@ -48,7 +48,7 @@ pub(crate) struct NtorHandshakeState {
 pub(super) fn client_handshake_obfs4(
     materials: &HandshakeMaterials,
 ) -> Result<(NtorHandshakeState, Vec<u8>)> {
-    let rng = rand::thread_rng();
+    let rng = rand::rng();
     let my_sk = Keys::ephemeral_from_rng(rng)?;
     client_handshake_obfs4_no_keygen(my_sk, materials.clone())
 }

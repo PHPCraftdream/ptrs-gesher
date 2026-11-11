@@ -19,7 +19,7 @@ use crate::{Error, Result};
 
 use digest::{ExtendableOutput, Update, XofReader};
 use sha2::Sha256;
-use sha3::Shake256;
+use shake::Shake256;
 use tor_bytes::SecretBuf;
 
 /// A trait for a key derivation function.

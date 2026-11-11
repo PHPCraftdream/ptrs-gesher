@@ -20,7 +20,7 @@ use tokio_util::codec::{Decoder, Encoder};
 
 fn random_key_material() -> [u8; KEY_MATERIAL_LENGTH] {
     let mut r = [0_u8; KEY_MATERIAL_LENGTH];
-    getrandom::getrandom(&mut r).unwrap();
+    getrandom::fill(&mut r).unwrap();
     r
 }
 
@@ -29,7 +29,7 @@ fn encode_decode() -> Result<()> {
     init_subscriber();
     let message = b"Hello there".to_vec();
     let mut key_material = [0_u8; KEY_MATERIAL_LENGTH];
-    rand::thread_rng().fill(&mut key_material[..]);
+    rand::rng().fill(&mut key_material[..]);
 
     let mut codec = Obfs4Codec::new(key_material, key_material);
 

@@ -1,6 +1,6 @@
 [package]
 name = "ptrs-gesher-obfs4"
-version = "0.9.0"
+version = "0.10.0"
 edition = "2021"
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"
@@ -23,24 +23,26 @@ crate-type = ["rlib"]
 
 [dependencies]
 ## Local
-ptrs = { package = "ptrs-gesher-core", path = "../core", version = "0.9.0" }
+ptrs = { package = "ptrs-gesher-core", path = "../core", version = "0.10.0" }
 
 ## PRNG
-getrandom = "0.2.11"
-rand = { version="0.8.5", features=["getrandom"]}
-rand_core = "0.6.4"
+getrandom = "0.4.3"
+rand = "0.10.3"
+rand_core = "0.10.1"
 
 ## Crypto
-digest = { version = "0.10.7", features=["mac"]}
+digest = { version = "0.11.3", features = ["mac"] }
 siphasher = "1.0.0"
-sha2 = "0.10.8"
-# Shake256 for the ntor KDF; tor-llcrypto 0.48 moved to digest 0.11, hmac/hkdf here are digest 0.10.
-sha3 = "0.10.8"
-hmac = { version="0.12.1", features=["reset"]}
-hkdf = "0.12.3"
-crypto_secretbox = { version="0.1.1", features=["salsa20"]}
+sha2 = "0.11.1"
+shake = "0.1.0"
+hmac = { version = "0.13.0", features = ["zeroize"] }
+hkdf = "0.13.0"
+# NaCl secretbox (XSalsa20-Poly1305) is assembled in common::secretbox:
+# crypto_secretbox has no stable release on cipher 0.5.
+salsa20 = { version = "0.11.0", features = ["zeroize"] }
+poly1305 = { version = "0.9.1", features = ["zeroize"] }
 subtle = "2.5.0"
-x25519-dalek = { version = "2.0.1", features = ["static_secrets", "getrandom", "reusable_secrets"]}
+x25519-dalek = { version = "3.0.0", features = ["static_secrets", "getrandom", "reusable_secrets"] }
 
 ## Utils
 hex = "0.4.3"
@@ -63,7 +65,6 @@ tor-cell = "0.48.0"
 tor-llcrypto = "0.48.0"
 tor-error = "0.48.0"
 tor-bytes = "0.48.0"
-cipher = "0.4.4"
 zeroize = "1.7.0"
 thiserror = "2.0.6"
 
@@ -80,8 +81,8 @@ curve25519-elligator2 = { version="0.1.0-alpha.1", features=["elligator2"] }
 tracing-subscriber = "0.3.18"
 hex-literal = "0.4.1"
 criterion = { version = "0.5", features = ["html_reports", "async_tokio"] }
-sha2 = "0.10.8"
-hmac = "0.12.1"
+sha2 = "0.11.1"
+hmac = { version = "0.13.0", features = ["zeroize"] }
 bytes = "1.5.0"
 proptest = "1"
 tokio = { version = "1.34", features = ["test-util"] }

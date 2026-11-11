@@ -96,7 +96,7 @@ mod tests {
 
     impl Kyber1024XIdentityKeys {
         fn new() -> Self {
-            let mut rng = rand::thread_rng();
+            let mut rng = rand::rng();
 
             Kyber1024XIdentityKeys {
                 x25519: Obfs4NtorSecretKey::getrandom(),
@@ -104,14 +104,14 @@ mod tests {
             }
         }
 
-        fn from_random<R: CryptoRng + RngCore>(rng: &mut R) -> Self {
+        fn from_random<R: CryptoRng>(rng: &mut R) -> Self {
             Kyber1024XIdentityKeys {
                 x25519: Obfs4NtorSecretKey::getrandom(),
                 kyber1024: pqc_kyber::keypair(rng).expect("kyber1024 key generation failed"),
             }
         }
 
-        fn from_x25519<R: CryptoRng + RngCore>(keys: Obfs4NtorSecretKey, rng: &mut R) -> Self {
+        fn from_x25519<R: CryptoRng>(keys: Obfs4NtorSecretKey, rng: &mut R) -> Self {
             Kyber1024XIdentityKeys {
                 x25519: keys,
                 kyber1024: pqc_kyber::keypair(rng).expect("kyber1024 key generation failed"),
@@ -121,7 +121,7 @@ mod tests {
 
     #[test]
     fn kyber_handshake() -> Result<()> {
-        let mut rng = rand::thread_rng();
+        let mut rng = rand::rng();
 
         // Generate Keypair
         let alice_secret = Keys::ephemeral_from_rng(&mut rng);

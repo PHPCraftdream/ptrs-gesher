@@ -164,8 +164,8 @@ mod test {
         init_subscriber();
 
         let mut buf = BytesMut::new();
-        let mut rng = rand::thread_rng();
-        let pad_len = rng.gen_range(0..100);
+        let mut rng = rand::rng();
+        let pad_len = rng.random_range(0..100);
         let mut seed = [0_u8; SEED_LENGTH];
         rng.fill_bytes(&mut seed);
 
@@ -182,8 +182,8 @@ mod test {
         init_subscriber();
 
         let mut buf = BytesMut::new();
-        let mut rng = rand::thread_rng();
-        let pad_len = rng.gen_range(0..100);
+        let mut rng = rand::rng();
+        let pad_len = rng.random_range(0..100);
         let mut payload = [0_u8; 1000];
         rng.fill_bytes(&mut payload);
 

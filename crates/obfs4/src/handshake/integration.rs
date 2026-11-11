@@ -31,14 +31,14 @@ fn make_fake_ephem_key(bytes: &[u8]) -> EphemeralSecret {
 
 #[test]
 fn test_obfs4_roundtrip() -> Result<()> {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     let relay_private = Obfs4NtorSecretKey::generate_for_test(&mut rng);
     let x_sk = EphemeralSecret::random_from_rng(&mut rng);
     let y = Obfs4NtorSecretKey::generate_for_test(&mut rng);
 
     let mut sid = [0u8; SESSION_ID_LEN];
-    rand::thread_rng().fill_bytes(&mut sid);
+    rand::rng().fill_bytes(&mut sid);
 
     let chs_materials = CHSMaterials::new(relay_private.pk, colorize(sid));
 
@@ -69,7 +69,7 @@ fn test_obfs4_roundtrip() -> Result<()> {
 // Same as previous test, but use the higher-level APIs instead.
 #[test]
 fn test_obfs4_roundtrip_highlevel() -> Result<()> {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     let relay_secret = StaticSecret::random_from_rng(&mut rng);
     let relay_public = PublicKey::from(&relay_secret);
     let relay_identity = RsaIdentity::from_bytes(&[12; 20]).unwrap();
@@ -201,7 +201,7 @@ fn test_ntor_v1_testvec() -> Result<()> {
 
 #[test]
 fn failing_handshakes() {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
 
     // Set up keys.
     let relay_secret = StaticSecret::random_from_rng(&mut rng);

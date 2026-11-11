@@ -53,14 +53,13 @@ The snippet illustrates a server handler; a client must complete the obfs4 hands
 
 ```rust no_run
 use obfs4::Server;
-use rand::thread_rng;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     let listener = TcpListener::bind("127.0.0.1:9000").await?;
-    let mut rng = thread_rng();
+    let mut rng = rand::rng();
     let server = Server::new_from_random(&mut rng);
 
     let (mut socket, _) = listener.accept().await?;

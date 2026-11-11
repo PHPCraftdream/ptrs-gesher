@@ -33,8 +33,7 @@ pub fn generate_websocket_key() -> String {
     let mut buf = [0u8; 16];
     // getrandom only fails when the system RNG is unavailable — fatal
     // for a transport that depends on randomness.
-    getrandom::getrandom(&mut buf)
-        .expect("system RNG unavailable — cannot generate Sec-WebSocket-Key");
+    getrandom::fill(&mut buf).expect("system RNG unavailable — cannot generate Sec-WebSocket-Key");
     base64::engine::general_purpose::STANDARD.encode(buf)
 }
 

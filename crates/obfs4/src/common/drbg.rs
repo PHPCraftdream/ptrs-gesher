@@ -8,9 +8,8 @@ use crate::{Error, Result};
 use std::fmt;
 use std::str::FromStr;
 
-use getrandom::getrandom;
 use hex::FromHex;
-use rand_core::{impls, Error as RandError, RngCore};
+use rand_core::{utils, Infallible, TryRng};
 use siphasher::{prelude::*, sip::SipHasher24};
 
 pub(crate) const SIZE: usize = 8;
@@ -48,7 +47,7 @@ impl Seed {
     /// Generate a fresh Hash-DRBG seed from the system random source.
     pub fn new() -> Result<Self> {
         let mut seed = Self([0_u8; SEED_LENGTH]);
-        getrandom(&mut seed.0)?;
+        getrandom::fill(&mut seed.0)?;
         Ok(seed)
     }
 
@@ -236,22 +235,21 @@ impl Drbg {
     }
 }
 
-impl RngCore for Drbg {
-    fn next_u32(&mut self) -> u32 {
-        self.next_u64() as u32
+// Byte order matches rand_core 0.6 `fill_bytes_via_next`: little-endian
+// `u64` words, the last one truncated (`next_u32` is its low half).
+impl TryRng for Drbg {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> std::result::Result<u32, Infallible> {
+        Ok(self.uint64() as u32)
     }
 
-    fn next_u64(&mut self) -> u64 {
-        self.uint64()
+    fn try_next_u64(&mut self) -> std::result::Result<u64, Infallible> {
+        Ok(self.uint64())
     }
 
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
-        impls::fill_bytes_via_next(self, dest)
-    }
-
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> std::result::Result<(), RandError> {
-        self.fill_bytes(dest);
-        Ok(())
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> std::result::Result<(), Infallible> {
+        utils::fill_bytes_via_next_word(dest, || Ok(self.uint64()))
     }
 }
 
@@ -275,6 +273,25 @@ mod test {
             assert_ne!(u, 0);
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn rng_bytes_are_little_endian_words_with_a_truncated_tail() -> Result<()> {
+        use rand_core::Rng;
+
+        let seed = Seed::try_from("0102030405060708090a0b0c0d0e0f101112131415161718").unwrap();
+        let mut words = Drbg::new(Some(seed.clone()))?;
+        let mut expected = Vec::new();
+        expected.extend_from_slice(&words.uint64().to_le_bytes());
+        expected.extend_from_slice(&words.uint64().to_le_bytes()[..5]);
+        let low_half = words.uint64() as u32;
+
+        let mut drbg = Drbg::new(Some(seed))?;
+        let mut bytes = [0u8; 13];
+        drbg.fill_bytes(&mut bytes);
+        assert_eq!(bytes[..], expected[..]);
+        assert_eq!(drbg.next_u32(), low_half);
         Ok(())
     }
 

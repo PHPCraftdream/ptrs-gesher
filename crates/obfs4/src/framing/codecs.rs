@@ -3,11 +3,8 @@ use crate::{
     framing::{FrameError, Messages},
 };
 
+use crate::common::secretbox::SecretBox;
 use bytes::{Buf, BufMut, BytesMut};
-use crypto_secretbox::{
-    aead::{generic_array::GenericArray, AeadInPlace, KeyInit},
-    XSalsa20Poly1305,
-};
 use ptrs::{debug, error, trace};
 use tokio_util::codec::{Decoder, Encoder};
 
@@ -141,12 +138,8 @@ impl EncryptingCodec {
 
 ///Decoder is a frame decoder instance.
 struct EncryptingDecoder {
-    /// The session key is fixed for the lifetime of the codec, so the AEAD
-    /// cipher is constructed once here instead of on every frame. `SecretBox`
-    /// (the type behind `XSalsa20Poly1305`) zeroizes its key on drop, so this
-    /// also preserves the key-zeroization the old `key: [u8; 32]` + `Drop`
-    /// provided.
-    cipher: XSalsa20Poly1305,
+    /// Session key, fixed for the codec's lifetime; zeroized on drop.
+    cipher: SecretBox,
     nonce: NonceBox,
     drbg: Drbg,
 
@@ -165,8 +158,8 @@ impl EncryptingDecoder {
     // containing exactly KeyLength bytes of keying material.
     fn new(key_material: [u8; KEY_MATERIAL_LENGTH]) -> Self {
         trace!("new decoder initialized");
-        let key = GenericArray::from_slice(&key_material[..KEY_LENGTH]);
-        let cipher = XSalsa20Poly1305::new(key);
+        let key: &[u8; KEY_LENGTH] = key_material[..KEY_LENGTH].try_into().unwrap();
+        let cipher = SecretBox::new(key);
         let nonce = NonceBox::new(&key_material[KEY_LENGTH..(KEY_LENGTH + NONCE_PREFIX_LENGTH)]);
         let seed = Seed::try_from(&key_material[(KEY_LENGTH + NONCE_PREFIX_LENGTH)..]).unwrap();
         let d = Drbg::new(Some(seed)).unwrap();
@@ -262,8 +255,8 @@ impl Decoder for EncryptingCodec {
             dec.scratch.clear();
             dec.scratch.extend_from_slice(&src[..next_len]);
 
-            let nonce = GenericArray::from_slice(&dec.next_nonce); // unique per message
-            let tag = crypto_secretbox::Tag::clone_from_slice(&dec.scratch[..TAG_SIZE]);
+            let nonce = &dec.next_nonce; // unique per message
+            let tag: [u8; TAG_SIZE] = dec.scratch[..TAG_SIZE].try_into().unwrap();
 
             // Authenticate + decrypt in place. A tamper anywhere in the frame
             // (header length is already validated; here it is the ciphertext or
@@ -271,9 +264,9 @@ impl Decoder for EncryptingCodec {
             // the crypto error without consuming `src`, exactly as before. We MUST
             // NOT advance the nonce/`next_length` further on failure — the session
             // is fatal at that point.
-            if let Err(e) =
-                dec.cipher
-                    .decrypt_in_place_detached(nonce, b"", &mut dec.scratch[TAG_SIZE..], &tag)
+            if let Err(e) = dec
+                .cipher
+                .open_in_place(nonce, &mut dec.scratch[TAG_SIZE..], &tag)
             {
                 trace!("failed to decrypt result: {e}");
                 return Err(e.into());
@@ -328,9 +321,8 @@ impl Decoder for EncryptingCodec {
 
 /// Encoder is a frame encoder instance.
 struct EncryptingEncoder {
-    /// Session-fixed AEAD cipher, constructed once (see `EncryptingDecoder` for
-    /// the same rationale, including key zeroization on drop).
-    cipher: XSalsa20Poly1305,
+    /// Session key, fixed for the codec's lifetime; zeroized on drop.
+    cipher: SecretBox,
     nonce: NonceBox,
     drbg: Drbg,
 }
@@ -340,8 +332,8 @@ impl EncryptingEncoder {
     /// containing exactly KeyLength bytes of keying material
     fn new(key_material: [u8; KEY_MATERIAL_LENGTH]) -> Self {
         trace!("new encoder initialized");
-        let key = GenericArray::from_slice(&key_material[..KEY_LENGTH]);
-        let cipher = XSalsa20Poly1305::new(key);
+        let key: &[u8; KEY_LENGTH] = key_material[..KEY_LENGTH].try_into().unwrap();
+        let cipher = SecretBox::new(key);
         let nonce = NonceBox::new(&key_material[KEY_LENGTH..(KEY_LENGTH + NONCE_PREFIX_LENGTH)]);
         let seed = Seed::try_from(&key_material[(KEY_LENGTH + NONCE_PREFIX_LENGTH)..]).unwrap();
         let d = Drbg::new(Some(seed)).unwrap();
@@ -404,14 +396,12 @@ impl<T: Buf> Encoder<T> for EncryptingCodec {
         dst.extend_from_slice(&[0u8; TAG_SIZE]);
         dst.put(plaintext);
 
-        let nonce = GenericArray::from_slice(&nonce_bytes); // unique per message
         let payload_start = tag_start + TAG_SIZE;
-        let tag = self.encoder.cipher.encrypt_in_place_detached(
-            nonce,
-            b"",
+        let tag = self.encoder.cipher.seal_in_place(
+            &nonce_bytes,
             &mut dst[payload_start..payload_start + pt_len],
-        )?;
-        dst[tag_start..payload_start].copy_from_slice(tag.as_slice());
+        ); // nonce unique per message
+        dst[tag_start..payload_start].copy_from_slice(&tag);
 
         Ok(())
     }

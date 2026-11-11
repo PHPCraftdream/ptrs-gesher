@@ -6,26 +6,27 @@ impl<'a> FakePRNG<'a> {
         Self { bytes }
     }
 }
-impl rand_core::RngCore for FakePRNG<'_> {
-    fn next_u32(&mut self) -> u32 {
-        rand_core::impls::next_u32_via_fill(self)
+use rand_core::{utils, Infallible, Rng, TryCryptoRng, TryRng};
+
+impl TryRng for FakePRNG<'_> {
+    type Error = Infallible;
+
+    fn try_next_u32(&mut self) -> std::result::Result<u32, Infallible> {
+        utils::next_word_via_fill(self)
     }
-    fn next_u64(&mut self) -> u64 {
-        rand_core::impls::next_u64_via_fill(self)
+    fn try_next_u64(&mut self) -> std::result::Result<u64, Infallible> {
+        utils::next_word_via_fill(self)
     }
-    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> std::result::Result<(), rand_core::Error> {
-        self.fill_bytes(dest);
-        Ok(())
-    }
-    fn fill_bytes(&mut self, dest: &mut [u8]) {
+    fn try_fill_bytes(&mut self, dest: &mut [u8]) -> std::result::Result<(), Infallible> {
         // assert!(dest.len() <= self.bytes.len(), "dst:{} > have:{}", dest.len(), self.bytes.len());
         if dest.len() > self.bytes.len() {
-            let mut rng = rand::thread_rng();
+            let mut rng = rand::rng();
             rng.fill_bytes(dest);
         } else {
             dest.copy_from_slice(&self.bytes[0..dest.len()]);
             self.bytes = &self.bytes[dest.len()..];
         }
+        Ok(())
     }
 }
-impl rand_core::CryptoRng for FakePRNG<'_> {}
+impl TryCryptoRng for FakePRNG<'_> {}

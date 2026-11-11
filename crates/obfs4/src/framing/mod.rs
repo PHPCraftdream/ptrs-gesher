@@ -50,6 +50,8 @@ mod messages_v1;
 pub use messages_v1::{MessageTypes, Messages};
 
 mod codecs;
+/// A frame failed authentication.
+pub use crate::common::secretbox::Error as CryptoError;
 pub use codecs::EncryptingCodec as Obfs4Codec;
 pub(crate) use codecs::{PaddingFrame, PayloadFrame};
 
@@ -128,7 +130,7 @@ pub enum FrameError {
     InvalidPayloadLength(usize),
 
     /// A cryptographic error occured.
-    Crypto(crypto_secretbox::Error),
+    Crypto(CryptoError),
 
     /// An error occured with the I/O processing
     IO(String),
@@ -206,8 +208,8 @@ impl std::fmt::Display for FrameError {
     }
 }
 
-impl From<crypto_secretbox::Error> for FrameError {
-    fn from(value: crypto_secretbox::Error) -> Self {
+impl From<CryptoError> for FrameError {
+    fn from(value: CryptoError) -> Self {
         FrameError::Crypto(value)
     }
 }

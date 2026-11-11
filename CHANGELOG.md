@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-11
+
+All six crates move to 0.10.0 in lockstep. obfs4 moves to the RustCrypto
+generation that Arti 2.8.0 (tor-llcrypto 0.48) uses. Its RNG bounds and some
+error payloads are foreign types from that generation, so this is a breaking
+release.
+
+### Breaking
+
+- **obfs4**: RNG parameters take `rand_core` 0.10 `CryptoRng` (was 0.6
+  `RngCore + CryptoRng`): `Keys::static_from_rng`, `Keys::ephemeral_from_rng`,
+  `EphemeralSecret::random_from_rng`, `Server::new_from_random` and the other
+  `*_rng` constructors. `rand::rng()` (rand 0.10) works where
+  `rand::thread_rng()` (rand 0.8) did.
+- **obfs4**: `drbg::Drbg` implements `rand_core` 0.10 `TryRng` (infallible)
+  instead of 0.6 `RngCore`. Its output bytes are unchanged.
+- **obfs4**: `FrameError::Crypto` carries `obfs4::framing::CryptoError`
+  instead of `crypto_secretbox::Error`; `Error::RngSourceErr` carries a
+  `getrandom` 0.4 error.
+- **obfs4**: the handshake `marshall` methods take `hmac` 0.13
+  `HmacReset<Sha256>`; the hidden `x25519_elligator2::PublicKey` re-export is
+  `x25519-dalek` 3.
+
+### Changed
+
+- **obfs4**: `digest`/`sha2` 0.11, `hmac`/`hkdf` 0.13, `x25519-dalek` 3,
+  `rand` 0.10, `rand_core` 0.10, `getrandom` 0.4 (also webtunnel). SHAKE-256
+  comes from `shake` 0.1, as in tor-llcrypto; `sha3` and `cipher` are no
+  longer direct dependencies. The wire format is unchanged.
+- **obfs4**: `crypto_secretbox` has no stable release on `cipher` 0.5, so the
+  NaCl secretbox (XSalsa20-Poly1305) is assembled from `salsa20` 0.11 and
+  `poly1305` 0.9 in `common::secretbox`, checked against the NaCl reference
+  vector and the Go interop. The tag is compared in constant time before
+  anything is decrypted.
+- **obfs4**: `hmac` is built with `zeroize`, so the HMAC state of the ntor
+  `verify`/`KEY_SEED` derivation is wiped too, not only its output. The onion
+  key relies on `x25519-dalek` 3 `StaticSecret` wiping itself on drop.
+- **obfs4**: a given seed now yields different length/IAT distribution tables,
+  because `rand` 0.10 shuffles and samples ranges differently from 0.8. The
+  peer never reproduces these tables, so interoperability is unaffected.
+- **lyrebird**: `resocks5-net` 0.5.2, which moved to the same generation.
+  Its stage timers are now cut to what is left of the total budget, and a tie
+  is reported as the total deadline (REP 6); lyrebird keeps its stage bound
+  below the total so that a silent upstream still reports REP 4.
+- **lyrebird**: `TOR_PT_PROXY` is parsed by `resocks5-net`
+  (`ProxyConfig::from_uri_with` with `ip_literal_only` and `validate_auth`);
+  lyrebird keeps only the narrower rules on top (lowercase `socks5`/`http`,
+  a trailing `/` for HTTP only, 1..=255-byte credentials for HTTP too). The
+  only newly accepted input is a raw `\` inside the credentials;
+  `url` and `percent-encoding` are no longer dependencies.
+- The older generation (`digest` 0.10, `rand` 0.8, `getrandom` 0.2, ...)
+  remains in the graph only through `rsa` in tor-llcrypto and `ring`.
+
 ### Fixed
 
 - `ptrs-gesher-lyrebird` moves from `safelog` 0.4 to 0.10, the version
@@ -19,8 +72,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Dependency alignment with Arti 0.48: `base64` 0.23, `webpki-roots` 1.0
-  (webtunnel), `itertools` 0.15 (core). `base64` 0.22 remains in the graph
-  through `resocks5-net`.
+  (webtunnel), `itertools` 0.15 (core).
 
 ## [0.9.0] - 2026-11-10
 

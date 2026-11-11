@@ -109,10 +109,10 @@ fn bench_framing_build_and_marshall(c: &mut Criterion) {
 }
 
 fn bench_handshake_marshall(c: &mut Criterion) {
-    use hmac::{Hmac, Mac};
+    use hmac::{HmacReset, KeyInit};
     use obfs4::common::x25519_elligator2::PublicRepresentative;
     use obfs4::framing::handshake::{ClientHandshakeMessage, ServerHandshakeMessage};
-    type HmacSha256 = Hmac<sha2::Sha256>;
+    type HmacSha256 = HmacReset<sha2::Sha256>;
 
     let repres = PublicRepresentative::from([0x42u8; 32]);
     let hmac_key = [0xAB; 32];
