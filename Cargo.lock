@@ -1561,7 +1561,7 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "url",
- "webpki-roots 1.0.11",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -1605,7 +1605,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tracing",
- "webpki-roots 1.0.11",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -1894,15 +1894,6 @@ name = "itertools"
 version = "0.10.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b0fd2260e829bddf4cb6ea802289de2f86d6a7a690192fbe91b3f46e0f2c8473"
-dependencies = [
- "either",
-]
-
-[[package]]
-name = "itertools"
-version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b192c782037fadd9cfa75548310488aabdbf3d2da73885b31bd0abd03351285"
 dependencies = [
  "either",
 ]
@@ -2648,7 +2639,7 @@ version = "0.9.0"
 dependencies = [
  "criterion",
  "futures",
- "itertools 0.14.0",
+ "itertools 0.15.0",
  "proptest",
  "serial_test",
  "subtle",
@@ -2679,7 +2670,7 @@ version = "0.9.0"
 dependencies = [
  "anyhow",
  "async-trait",
- "base64 0.22.1",
+ "base64 0.23.1",
  "clap",
  "criterion",
  "futures",
@@ -2690,7 +2681,7 @@ dependencies = [
  "ptrs-gesher-obfs4",
  "ptrs-gesher-webtunnel",
  "resocks5-net",
- "safelog 0.4.8",
+ "safelog",
  "socket2",
  "thiserror 2.0.20",
  "tokio",
@@ -2708,7 +2699,7 @@ dependencies = [
 name = "ptrs-gesher-obfs4"
 version = "0.9.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "bytes",
  "cipher 0.4.4",
  "colored",
@@ -2751,7 +2742,7 @@ dependencies = [
 name = "ptrs-gesher-webtunnel"
 version = "0.9.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "criterion",
  "getrandom 0.2.17",
  "hickory-resolver",
@@ -2764,7 +2755,7 @@ dependencies = [
  "tokio-rustls",
  "tracing",
  "url",
- "webpki-roots 0.26.11",
+ "webpki-roots",
 ]
 
 [[package]]
@@ -3167,19 +3158,6 @@ dependencies = [
  "quick-error",
  "tempfile",
  "wait-timeout",
-]
-
-[[package]]
-name = "safelog"
-version = "0.4.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7a4e1c994fbc7521a5003e5c1c54304654ea0458881e777f6e2638520c2de8c5"
-dependencies = [
- "derive_more",
- "educe",
- "either",
- "fluid-let",
- "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -4061,7 +4039,7 @@ dependencies = [
  "digest 0.11.3",
  "educe",
  "getrandom 0.4.3",
- "safelog 0.10.1",
+ "safelog",
  "thiserror 2.0.20",
  "tor-error",
  "tor-llcrypto",
@@ -4208,7 +4186,7 @@ dependencies = [
  "derive_more",
  "hex",
  "itertools 0.15.0",
- "safelog 0.10.1",
+ "safelog",
  "serde",
  "serde_with",
  "strum",
@@ -4249,7 +4227,7 @@ dependencies = [
  "rdrand",
  "reseeding_rng",
  "rsa",
- "safelog 0.10.1",
+ "safelog",
  "serde",
  "sha1",
  "sha2 0.11.1",
@@ -4694,18 +4672,9 @@ dependencies = [
 
 [[package]]
 name = "webpki-roots"
-version = "0.26.11"
+version = "1.0.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "521bc38abb08001b01866da9f51eb7c5d647a19260e00054a8c7fd5f9e57f7a9"
-dependencies = [
- "webpki-roots 1.0.11",
-]
-
-[[package]]
-name = "webpki-roots"
-version = "1.0.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f5f280bbb2b287bc8e7de7e3852945a0ff50d1bbcb5ed42b6c7a568c546df171"
+checksum = "7265c9301c16a8711c992c2d8da90ee77ef54b1ed51482d6dfeb00dc756b1297"
 dependencies = [
  "rustls-pki-types",
 ]

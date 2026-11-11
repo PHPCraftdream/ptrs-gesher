@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `ptrs-gesher-lyrebird` moves from `safelog` 0.4 to 0.10, the version
+  Arti 0.48 uses. The safe-logging mode is a global inside each `safelog`
+  copy, so with 0.4 a host that set its policy through Arti's `safelog`
+  did not affect how lyrebird scrubbed client addresses, contrary to the
+  `run_from_env` contract. `cargo-deny` now rejects a second `safelog`
+  version in the graph.
+
+### Changed
+
+- Dependency alignment with Arti 0.48: `base64` 0.23, `webpki-roots` 1.0
+  (webtunnel), `itertools` 0.15 (core). `base64` 0.22 remains in the graph
+  through `resocks5-net`.
+
 ## [0.9.0] - 2026-11-10
 
 All six crates move to 0.9.0 in lockstep for the Arti 2.8.0 (tor-* 0.48)

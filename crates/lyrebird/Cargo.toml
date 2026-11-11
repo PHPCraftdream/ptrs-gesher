@@ -46,7 +46,7 @@ clap = { version = "4.5", features = ["derive"]}
 # secure-auth: a TOR_PT_PROXY password is proven with SOCKS5 method 0x80 when the
 # upstream supports it (always, with LYREBIRD_PROXY_AUTH=secure).
 resocks5-net = { version = "0.5.1", default-features = false, features = ["zeroize", "secure-auth"] }
-base64 = "0.22"
+base64 = "0.23.1"
 # Wipe the parent's PT arguments (bridge secrets) when dropped.
 zeroize = "1"
 url = "2.5.8"
@@ -55,7 +55,7 @@ log = "0.4.34"
 # TCP keepalive on the outgoing bridge dial (already in-tree via tokio).
 socket2 = "0.6"
 futures = "0.3.31"
-safelog = "0.4.2"
+safelog = "0.10.1"
 thiserror = "2.0.9"
 tokio = { version = "1.53.3", features = ["io-util", "net", "macros", "sync", "signal", "time"] }
 tokio-util = "0.7.13"
