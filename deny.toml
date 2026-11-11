@@ -38,6 +38,9 @@ ignore = [
 
 [bans]
 multiple-versions = "warn"
+# safe-logging mode is a per-copy global: a second safelog would ignore the
+# host's (Arti's) policy.
+deny = [{ crate = "safelog", deny-multiple-versions = true }]
 
 [sources]
 unknown-registry = "deny"
